@@ -281,7 +281,11 @@ def passport_under(n: np.ndarray) -> list[str]:
     out = []
     y1, y2 = STRIP_Y
     for side, (x1, x2) in STRIP_X.items():
-        if float((n[y1:y2, x1:x2].max(2) > 100).mean()) >= STRIP_PAPER_FRAC:
+        c = n[y1:y2, x1:x2].astype(np.int16)
+        # tinted paper only: the bulletin is exactly neutral grey/white (120,120,120 / 240,240,240) and must not
+        # count (run 20261002_112327: 13 DENIED presses on the bulletin); passport paper is tinted (108,112,118)
+        paper = (c.max(2) > 100) & ((c.max(2) - c.min(2)) >= 6)
+        if float(paper.mean()) >= STRIP_PAPER_FRAC:
             out.append(side)
     return out
 

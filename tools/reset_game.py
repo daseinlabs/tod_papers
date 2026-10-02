@@ -222,7 +222,7 @@ def main(argv=None) -> int:
 
     log("--to-booth: running the TOD loop from the menu until request 1 says booth (2 consecutive ticks)")
     res: dict = {}
-    rc = loop.main(["--max-ticks", str(args.booth_ticks), "--stop-on-screen", "booth_idle,documents_on_desk",
+    rc = loop.main(["--max-ticks", str(args.booth_ticks), "--stop-on-screen", "booth_idle,documents_on_desk,stamp_tray_open",
                     "--stop-consecutive", "2", "--save-raw"], result=res)
     log(f"loop rc={rc} stop={res.get('stop_reason')} ticks={res.get('ticks')} run={res.get('run_dir')}")
     return 0 if rc == 0 else 3
