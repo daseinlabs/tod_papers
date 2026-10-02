@@ -6,7 +6,9 @@ Modules (`src/tod_papers/`):
 |---|---|
 | `extract.py` | `extract(frame_bgr) -> list[Box]`. Box = `(x1,y1,x2,y2,text,kind,conf,parent)`, client-relative physical px. |
 | `som.py` | `annotate(frame, boxes, max_marks=60) -> (annotated, {id: Box})`. Numbered tags + outlines, ids in reading order. |
-| `loop.py` | The agent. One TOD request per tick; executes the pick via `io_win.click/drag` at the box centre. |
+| `loop.py` | The agent. Two TOD requests per tick (one image each): state on the plain frame, action on the SoM frame. Executes the pick via `io_win.click/drag` at the box centre. |
+| `manual.py` | The Papers, Please playing guide sent in full with every action request, the state questions, the state block, the click-only / drag-only convention. |
+| `anchors.json` | Fallback drop regions (native 570x320 coords) used only when a region cannot be derived from detected boxes. |
 | `overlay.py` | Writes `viz_NNNN.png`: source-probability heatmap (red fill) + target probability (blue outline) + legend. |
 
 ## Running
@@ -17,9 +19,9 @@ cd .
 .venv-loop\Scripts\python.exe -m tod_papers.loop --dry-run --max-ticks 3   # no input at all
 ```
 
-Flags: `--max-ticks N`, `--dry-run`, `--max-marks 25` (soft option cap, see below), `--send-width 1140`
+Flags: `--max-ticks N`, `--dry-run`, `--max-marks 25` (soft element cap), `--history 30`, `--send-width 1140`
 (annotated frame is downscaled to this before upload), `--send-format png|jpeg` (png: ~50-80 KB on pixel art
-vs ~170 KB jpeg, cv2-encoded in ~20 ms), `--source-style goal|default|short`, `--settle 0.12` (s between
+vs ~170 KB jpeg, cv2-encoded in ~20 ms), `--settle 0.12` (s between
 hover / down / up so Unity sees them on separate frames), `--post-wait 0.8`, `--save-raw`, `--no-viz`.
 
 Offline (no game window, no input): `python -m tod_papers.loop --frames runs/<ts>/raw_0000.png ... [--out DIR]`
@@ -36,35 +38,50 @@ The game must be running windowed (UnityWndClass, title `PapersPlease`); launch 
 `.venv-loop` is a thin venv layered on `.venv-extract` through a `.pth` file (torch/ultralytics/
 rapidocr/opencv come from there) plus `pywin32 dxcam mss comtypes`. Recipe in `requirements-loop.txt`.
 
-## Per tick
+## Per tick (since 2026-10-02, loop5)
 
 1. `focus(hwnd)` and verify `GetForegroundWindow()==hwnd` (Desktop Duplication captures the screen
-   region, so an occluded game = wrong frame). Abort (exit 2) if it is not the game.
-2. Park the cursor at the client's right edge (it otherwise occludes text, e.g. STORY -> "STRY").
-3. Grab, then concurrently: **screen probe** (separate TOD request: plain downscaled frame, one-line text,
-   only the `screen` question) and `extract`. Inside the long prompt over the marked frame `screen` was
-   near-uniform and wrong on 3/4 saved frames; the probe got 4/4, and it finishes before extract, so it
-   adds no latency.
-4. `annotate` (som.py): same-caption boxes overlapping > 50% (of the smaller) collapse to the larger;
-   then, over `--max-marks`, untexted icon/panel boxes are pruned (uncaptioned, then "possibly ..."
-   CLIP labels, then non-detector scenery labels; smallest first). Text, page corners, detector objects
-   and detector-captioned boxes are never pruned. An extra id is always appended: "no element - click
-   an empty part of the screen" (frame centre).
-5. One agent TOD request, image = annotated frame, text = objective + rules + booth brief + a neutral
-   `Labelled on screen now: ...` inventory of captions (alphabetical, counts) + current aim + last
-   actions. Questions: `action` {click,drag,wait}, `source` (box ids), `target` (box ids + none),
-   `day`, `goal` (entrant done). Criteria text = `extract.describe(box, W, H)` only ("<kind> — '<text>'"
-   or "<kind> — <caption>", plus coarse position). With `--source-style goal` (default) the source
-   question is prefixed with the aim derived from the probed screen (+ last tick's `goal`), e.g. "Nobody
-   is being processed right now; the next entrant needs to come to the booth. Which numbered element…".
-6. Execute at box centres (bounds-checked against the client rect, foreground re-verified).
-   Click = move, 120 ms, down, 120 ms, up. Drag = `io_win.drag` 20 steps / 350 ms.
-7. Verify: re-grab after 0.8 s, mean abs grey diff (1/8 scale). "changed"/"NO visible effect" is
-   written into the history TOD sees next tick.
-8. Log `runs/<ts>/tick_NNNN.png` (annotated), `tick_NNNN.json` (boxes, descriptions, state text, all
-   probabilities, latencies, executed action, diff), `viz_NNNN.png`, `raw_NNNN.png` with `--save-raw`.
+   region, so an occluded game = wrong frame). Abort (exit 2) after 3 misses.
+2. Park the cursor, wait until the frame is still (<=3 s), grab.
+3. **Request 1 -- state** (unmarked frame downscaled to `--send-width`, one-line text), concurrently with
+   `extract`. TOD answers from the picture; nothing is inferred from detector labels:
+   `screen`, `day`, `person_at_window`, `document_on_counter_shelf`, `document_open_on_desk`,
+   `stamp_tray_open`, `document_under_stamp_heads`, `passport_shows_stamp_mark`,
+   `bulletin_or_rulebook_covering_desk` (noul), and the inspection decisions `issuing_country`
+   {ARSTOTZKA, other}, `expiry_after_today` (today = date of the known day, else day 1), `photo_matches_person`.
+   All answers + probabilities go to `tick_NNNN.json` (`state`, `state_line`) and the overlay banner.
+   If request 1 fails the tick is skipped (never act on a stale picture).
+4. **Drop-target regions** (`derive_regions`), booth screens only:
+   - `stamp landing strip (under the APPROVED/DENIED stamp head)` -- one per stamp, directly beneath the
+     detected stamp body (x span of the OCR `APPROVED`/`DENIED` / stamp-caption boxes, y from the body's
+     bottom edge down 12% of the frame). Offered when request 1 says the tray is open or a stamp is detected.
+   - `counter shelf (hand documents back here)` -- top = bottom of the person box at the window (or a
+     document lying on the counter), right = the shutter lever / window frame, bottom = drawer row.
+   - `desk (drop documents here to read them)` -- free desk right of the shelf, below the tray.
+   Each falls back to `anchors.json` (native 570x320 coords scaled to the client) if it cannot be derived;
+   the tick json has `regions` and `target_source` = {name: derived|fallback}. Regions are drop targets
+   only (never a source). The old generic "empty space" target is gone; the screen-centre option exists
+   only as a click source on non-booth screens (cutscenes without a button).
+5. `annotate` (som.py) as before (regions are never pruned).
+6. **Request 2 -- action** (SoM frame). Text = `manual.build()`: the whole manual (~1.2k words: screen
+   layout, click-only vs drag-only elements, drop targets, the entrant cycle A-G, APPROVED/DENIED rules for
+   days 1-3, bulletin/rulebook/page corners, other screens, mistakes seen in run 20261002_003519) + a
+   "WHAT IS CURRENTLY TRUE ON SCREEN" block from request 1 + the last 30 actions, one line each
+   (`tick | state summary | input | element | effect`) + ruled-out elements. No rule is pre-selected for
+   TOD. Questions: `action` {click, drag, wait} (instruction states the click/drag constraint),
+   `source` (element ids), `target` (element ids + regions).
+7. **Click/drag convention enforced in code** (`enforce_input`): horn, stamps (OCR APPROVED/DENIED,
+   stamp captions), buttons, page corners are click-only; documents (passport/paper/rulebook captions,
+   texted desk panels), the tray tab and the lever are drag-only. On a conflict the loop takes the better
+   of (a) same element with its allowed input, p(src)*p(action'), and (b) same input with the best
+   compatible element, p(action)*p(src'). TOD's raw pick and the note are logged (`tod_pick`,
+   `input_convention`) and shown in the overlay.
+8. Execute, verify by frame diff, log (`tick_NNNN.{png,json}`, `viz_NNNN.png`, `raw_NNNN.png`,
+   `summary.md` with state + manual step per tick). `manual_step_for_state` in the json is
+   `manual.situation(state)` -- a diagnostic of which manual line applies; it is never sent to TOD.
 
-TOD request failures skip the tick (logged), never act.
+Offline: `python -m tod_papers.loop --frames a.png b.png --out DIR` runs request 1 + extract + request 2 per
+frame and writes `<frame>.json`, `<frame>_som.png`, `<frame>_viz.png`, `offline.json`.
 
 ## Extraction details
 

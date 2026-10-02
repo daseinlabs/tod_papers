@@ -1,0 +1,8 @@
+{
+  "_comment": "Fallback drop regions in NATIVE 570x320 art coords [x1,y1,x2,y2], scaled to the client rect. Used only when loop.derive_regions() cannot derive a region from this tick's detected boxes; the tick json then says target_source=fallback. Measured on runs/20261002_003519 raw_0014/0033 and runs/20261001_221705 raw_0030.",
+  "native_size": [570, 320],
+  "stamp_landing_denied":   [340, 180, 400, 218],
+  "stamp_landing_approved": [460, 180, 520, 218],
+  "counter_shelf":          [10, 212, 172, 266],
+  "desk":                   [196, 230, 340, 304]
+}

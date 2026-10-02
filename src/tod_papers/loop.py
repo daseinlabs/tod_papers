@@ -1,13 +1,21 @@
 """loop.py -- the TOD Set-of-Mark agent loop.
 
-Each tick:  wait-until-stable grab -> extract -> som -> ONE TOD request -> execute
-            -> verify (frame diff, global + localized at source/target) -> log.
+Each tick:  wait-until-stable grab
+            -> REQUEST 1 (state, unmarked frame; concurrent with extract): screen, day, the
+               booth facts the manual is keyed on (person at window, document on counter,
+               open passport, tray open, passport under stamp, stamp mark, covered) and the
+               inspection decisions (issuing country, expiry, photo) -- all read by TOD
+               from the picture, nothing inferred from detector labels
+            -> extract -> drop-target regions (stamp landing strip, counter shelf, desk;
+               derived from detected boxes, else anchors.json fallback) -> som
+            -> REQUEST 2 (action, SoM frame): the whole manual (manual.py) + what request 1
+               says is true + the last 30 actions; questions action / source / target
+            -> click/drag convention enforced on the pick -> execute -> verify -> log.
 
-TOD makes every decision: what kind of input (click/drag/wait), which numbered
-element, which drop target, and what screen we're on. This file contains no
-game coordinates and no scripted navigation; the only geometry it uses is the
-centre of whichever box TOD picked. The loop only *removes* options that were
-empirically shown to do nothing (stuck blacklist) or that are unsafe.
+TOD makes every decision: what is on screen, what kind of input (click/drag/wait),
+which numbered element, which drop target. One image per request. The only
+geometry the loop adds is the drop-target regions TOD needs that no detector
+finds; their source (derived/fallback) is written to every tick json.
 
 Run (from repo root):
     .venv-loop\\Scripts\\python.exe -m tod_papers.loop --max-ticks 10
@@ -36,6 +44,7 @@ import win32gui
 
 from . import extract as ex
 from .extract import Box
+from . import manual as man
 from .som import annotate
 from .tod_client import TodClient, choice, noul
 
@@ -60,44 +69,8 @@ SCREENS = {
     "other": "anything else (loading, black screen, settings, dialogs)",
 }
 
-# tight per-day briefs (docs/game.md section 5, days 1-3)
-DAY_RULES = {
-    "1": "Day 1 (Nov 23 1982): only the passport is required. Only citizens of Arstotzka may enter; deny every foreigner. The first entrant is a tutorial (approve).",
-    "2": "Day 2 (Nov 24): passport only. Foreigners with a valid passport may now enter; documents must be up to date (deny expired); check photo and passport fields.",
-    "3": "Day 3 (Nov 25): foreigners need passport + entry ticket dated Nov 25 (any other date -> deny). Citizens need passport only.",
-}
-
-# how the booth works (docs/game.md sections 3-4), no coordinates
-BOOTH_BRIEF = (
-    "How the booth works: the loudspeaker/horn on the booth calls the next entrant; the shutter lever "
-    "beside the booth window opens/closes the window. The entrant puts documents on the counter "
-    "below the booth window; documents must be dragged onto the desk to read them. Multi-page papers "
-    "turn at their page corner. The stamp tray slides out from the tab at the desk edge; to stamp, drag "
-    "the open passport under the tray and click APPROVED or DENIED. Then drag all documents back onto "
-    "the counter / entrant to return them. Objects on the desk are moved by dragging, not clicking."
-)
-
-OBJECTIVE = (
-    "You are controlling the game Papers, Please through mouse input. Objective: play the Story "
-    "campaign, advance through intro/cutscene/bulletin screens, and then work the border booth: "
-    "call entrants, inspect their documents against the day's rules, and stamp approve/deny "
-    "correctly. Clickable elements in the screenshot carry numbered markers; you choose by number. "
-    "Grey struck-through markers are temporarily unavailable."
-)
-
-# neutral one-liners: what the inspector is working toward, given the last screen judgement
-AIMS = {
-    "menu": "Getting from the menus into the story campaign.",
-    "day_select": "Choosing where to continue the story from.",
-    "cutscene_or_text": "Moving past a story / text screen.",
-    "bulletin": "Finishing with the day's bulletin and getting to work in the booth.",
-    "booth_idle": "Nobody is being processed right now; the next entrant needs to come to the booth.",
-    "documents_on_desk": "An entrant is being processed: documents onto the desk, check against the rules, stamp the passport, return everything.",
-    "stamp_tray_open": "Stamps are available; the passport's visa page needs to be under a stamp for a stamp to land.",
-    "inspect_mode": "Comparing details for a discrepancy, or leaving inspect mode.",
-    "day_end": "Wrapping up the day and continuing to the next.",
-    "other": "Working out what the screen is and how to continue.",
-}
+# day rules + the playing guide live in manual.py
+DAY_RULES = man.DAY_RULES
 
 RISKY_RE = re.compile(r"delete|trash|erase", re.I)
 
@@ -223,59 +196,16 @@ def effect_map(before: np.ndarray, after: np.ndarray, ambient: np.ndarray | None
 # --------------------------------------------------------------------------
 
 
-BG_DESC = ("no element - empty space at the screen centre (click it to advance cutscene/text screens "
-           "that have no button; in the booth this is free desk space to drop things on)")
-# captions that say nothing useful about what an element is; left out of the "visible:" summary
-_NOISE_CAPS = {"dark empty background", "unlabelled graphic"}
-
-
+BG_DESC = "no element - the screen itself (click it to advance a cutscene/text screen that has no button)"
 def describe(b: Box, W: int, H: int) -> str:
     """Criteria text for one box. extract.describe() is the single source (kind,
     OCR text or caption, coarse position); the loop only adds its synthetic
     'background' option."""
     if b.kind == "background":
         return BG_DESC
+    if b.kind == "region":
+        return f"drop target - {b.caption}"
     return ex.describe(b, W, H)
-
-
-def _pl(word: str) -> str:
-    if "/" in word:
-        return "/".join(_pl(w) for w in word.split("/"))
-    if word.endswith(("s", "x", "ch", "sh")):
-        return word + "es"
-    if word.endswith("y") and not word.endswith(("ay", "ey", "oy")):
-        return word[:-1] + "ies"
-    return word + "s"
-
-
-def _plural(cap: str, n: int) -> str:
-    if n == 1:
-        return cap
-    head, sep, tail = cap.partition(" (")
-    return f"{n} {_pl(head)}{sep}{tail}"
-
-
-def visible_summary(boxes) -> str:
-    """Neutral inventory of the labelled things on screen, e.g. 'lever handle,
-    2 rubber stamps, passport booklet, 5 text lines'. Alphabetical, no ranking."""
-    caps: dict[str, int] = {}
-    n_text = 0
-    for b in boxes:
-        if b.kind == "background":
-            continue
-        if b.text and b.kind != "page_corner" and b.caption not in ex.DOC_CAPS:
-            n_text += 1
-            continue
-        c = (b.caption or "").strip()
-        if not c or c.startswith("possibly ") or c in _NOISE_CAPS:
-            continue
-        if c.startswith("page corner"):
-            c = "page corner"
-        caps[c] = caps.get(c, 0) + 1
-    parts = [_plural(c, n) for c, n in sorted(caps.items())]
-    if n_text:
-        parts.append(_plural("text line", n_text))
-    return ", ".join(parts) if parts else "(nothing labelled)"
 
 
 def short(desc: str, n: int = 70) -> str:
@@ -374,89 +304,279 @@ class StuckTracker:
 # --------------------------------------------------------------------------
 
 
-SOURCE_STYLES = ("default", "short", "goal")
+BOOTH_SCREENS = {"booth_idle", "documents_on_desk", "stamp_tray_open", "inspect_mode"}
+
+DAY_Q = choice(
+    "Which in-game day is it (from bulletin, date or clock text if visible; otherwise unknown)?",
+    {"1": "Day 1 / Nov 23", "2": "Day 2 / Nov 24", "3": "Day 3 / Nov 25", "later": "Day 4 or later",
+     "unknown": "not determinable yet"},
+)
 
 
-SCREEN_PROBE_TEXT = "A screenshot of the game Papers, Please."
-
-
-def screen_probe(tod: TodClient, frame: np.ndarray, args):
-    """Separate short request: plain (unmarked) frame + one-line text + the
-    screen question. Asked inside the long agent prompt over the marked frame,
-    `screen` was near-uniform and wrong on 3/4 saved frames; asked like this it
-    was right on 4/4. Runs concurrently with extract(), so it costs no latency."""
-    W, H = frame.shape[1], frame.shape[0]
-    small = frame
+def _small_for_send(frame: np.ndarray, args) -> np.ndarray:
+    H, W = frame.shape[:2]
     if args.send_width and W > args.send_width:
-        small = cv2.resize(frame, (args.send_width, int(H * args.send_width / W)), interpolation=cv2.INTER_AREA)
-    q = {"screen": choice("Which kind of screen is currently shown?", dict(SCREENS))}
-    return tod.ask(q, text=SCREEN_PROBE_TEXT, image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
+        return cv2.resize(frame, (args.send_width, int(H * args.send_width / W)), interpolation=cv2.INTER_AREA)
+    return frame
 
 
-def source_instruction(style: str, aim: str) -> str:
-    if style == "short":
-        return "Which numbered element should be used next?"
-    if style == "goal":
-        return f"{aim} Which numbered element should be clicked (or, for a drag, picked up) for that?"
-    return "Which numbered element should be clicked (or, for a drag, picked up)? Use the number drawn on the marker."
+def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown"):
+    """REQUEST 1: plain (unmarked) frame + one-line text + screen, day and the
+    manual's state/inspection questions (manual.state_questions). Asked inside
+    the long prompt over the marked frame `screen` was near-uniform; asked on its
+    own it was right on 4/4 frames. Runs concurrently with extract()."""
+    today = man.DAY_DATES.get(day, man.DAY_DATES["1"])
+    q = {"screen": choice("Which kind of screen is currently shown?", dict(SCREENS)), "day": DAY_Q}
+    q.update(man.state_questions(today))
+    small = _small_for_send(frame, args)
+    return tod.ask(q, text=man.STATE_TEXT, image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
 
 
-def current_aim(last_screen: str | None, last_goal: float | None) -> str:
-    aim = AIMS.get(last_screen, "Working out what the screen is and how to continue.")
-    if last_screen in ("documents_on_desk", "stamp_tray_open") and last_goal is not None and last_goal >= 0.6:
-        aim = "The current entrant looks done; the next entrant needs to come to the booth."
-    return aim
+def parse_state(res) -> dict:
+    """{question: {value, p, probs}}; p = P(true) for noul, P(chosen) for choice."""
+    out = {}
+    for k, a in res.answers.items():
+        if a.qtype == "noul":
+            p = p_true(a)
+            out[k] = {"value": p >= 0.5, "p": round(p, 3), "probs": a.probabilities}
+        else:
+            out[k] = {"value": a.value, "p": round(float(a.probabilities.get(str(a.value), 0.0)), 3),
+                      "probs": a.probabilities}
+    return out
 
 
-def build_questions(src_ids: dict[str, str], all_ids: dict[str, str], source_instr: str | None = None,
-                    aim: str = "") -> dict:
-    # the action question is goal-conditioned like the source question: asked
-    # bare, TOD answered "click" 0.61 on the entrant frame although every
-    # document must be dragged (scratchpad loop4/dryrun2.md)
+_STATE_ABBR = {"person_at_window": "person", "document_on_counter_shelf": "counter",
+               "document_open_on_desk": "open", "stamp_tray_open": "tray", "document_under_stamp_heads": "under",
+               "passport_shows_stamp_mark": "mark", "bulletin_or_rulebook_covering_desk": "cover",
+               "expiry_after_today": "exp_ok", "photo_matches_person": "photo"}
+
+
+def state_line(state: dict) -> str:
+    """Compact all-answers line (p = P(yes)) for the console and the overlay banner."""
+    bits = []
+    if "screen" in state:
+        bits.append(f"{state['screen']['value']}:{state['screen']['p']:.2f}")
+    for k, ab in _STATE_ABBR.items():
+        if k in state:
+            bits.append(f"{ab}={state[k]['p']:.2f}")
+    if "issuing_country" in state:
+        bits.append(f"iss={state['issuing_country']['value']}:{state['issuing_country']['p']:.2f}")
+    if "day" in state:
+        bits.append(f"day={state['day']['value']}")
+    return " ".join(bits)
+
+
+# --------------------------------------------------------------------------
+# drop-target regions (stamp landing strip, counter shelf, desk)
+# --------------------------------------------------------------------------
+
+ANCHORS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "anchors.json")
+_ANCHORS = None
+
+REGION_CAPS = {
+    "stamp_landing_approved": "stamp landing strip (under the APPROVED stamp head)",
+    "stamp_landing_denied": "stamp landing strip (under the DENIED stamp head)",
+    "counter_shelf": "counter shelf (hand documents back here)",
+    "desk": "desk (drop documents here to read them)",
+}
+
+
+def _anchor(name: str, W: int, H: int) -> Box:
+    global _ANCHORS
+    if _ANCHORS is None:
+        with open(ANCHORS_FILE, encoding="utf-8") as fh:
+            _ANCHORS = json.load(fh)
+    nw, nh = _ANCHORS.get("native_size", [570, 320])
+    x1, y1, x2, y2 = _ANCHORS[name]
+    sx, sy = W / nw, H / nh
+    return Box(int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy), "", "region", 0.0, caption=REGION_CAPS[name])
+
+
+_STAMP_TXT = re.compile(r"^\W*(APPRO\w*|DENI\w*)\W*$", re.I)
+
+
+def _stamp_side(b: Box, frame: np.ndarray):
+    t = (b.text or "").upper()
+    if _STAMP_TXT.match(t):
+        return "approved" if t.strip(" '\"").startswith("APPRO") else "denied"
+    if b.caption in ("green rubber stamp", "red rubber stamp"):
+        return "approved" if b.caption.startswith("green") else "denied"
+    if b.caption == "rubber stamp":
+        # Grounding DINO 'rubber stamp' hits the knob: decide by the colour just below it
+        y1, y2 = b.y2, min(frame.shape[0], b.y2 + max(8, b.h // 2))
+        roi = frame[y1:y2, b.x1:b.x2]
+        if roi.size == 0:
+            return None
+        bgr = roi.reshape(-1, 3).mean(0)
+        if bgr[1] > bgr[2] + 15:
+            return "approved"
+        if bgr[2] > bgr[1] + 15:
+            return "denied"
+    return None
+
+
+def derive_regions(boxes: list, frame: np.ndarray, state: dict):
+    """Drop targets no detector finds, derived from this tick's detected boxes:
+    - stamp landing strip, one per stamp: directly beneath the stamp body (x span
+      of the detected APPROVED/DENIED stamp boxes, y from the body's bottom edge
+      down ~12% of the frame). Offered when TOD says the tray is open or a stamp
+      was detected.
+    - counter shelf: under the booth window -- top = bottom of the person box at
+      the window (or a document lying on the counter), right edge = the shutter
+      lever / window frame, bottom = the drawer row.
+    - desk: free desk to the right of the counter shelf, below the tray.
+    Anything that cannot be derived (or fails a sanity check) comes from
+    anchors.json and is marked target_source=fallback.
+    Returns (regions, {name: 'derived'|'fallback'})."""
+    H, W = frame.shape[:2]
+    regions: list = []
+    src: dict = {}
+
+    # --- stamp landing strips
+    sides: dict = {}
+    for b in boxes:
+        cx, cy = b.center
+        if cx < 0.4 * W or not (0.2 * H < cy < 0.7 * H):
+            continue
+        side = _stamp_side(b, frame)
+        if side:
+            sides.setdefault(side, []).append(b)
+    if man.yes(state, "stamp_tray_open") or sides:
+        for side in ("denied", "approved"):
+            name = f"stamp_landing_{side}"
+            bs = sides.get(side)
+            r = None
+            if bs:
+                x1, x2 = min(b.x1 for b in bs), max(b.x2 for b in bs)
+                bottom = max(b.y2 for b in bs)
+                cx = (x1 + x2) // 2
+                hw = max(int(0.35 * (x2 - x1)), int(0.02 * W))
+                r = Box(cx - hw, bottom + int(0.01 * H), cx + hw, bottom + int(0.13 * H), "", "region", 0.0,
+                        caption=REGION_CAPS[name])
+                if not (0.4 * W < cx < W and 0.35 * H < r.y1 < 0.8 * H and r.y2 <= H):
+                    r = None
+            if r is not None:
+                src[name] = "derived"
+            else:
+                r = _anchor(name, W, H)
+                src[name] = "fallback"
+            regions.append(r)
+
+    # --- counter shelf
+    def left(b, maxfrac=0.36) -> bool:
+        return b.center[0] < maxfrac * W
+
+    persons = [b for b in boxes if b.caption == "person face" and left(b) and 0.5 * H < b.y2 < 0.78 * H]
+    levers = [b for b in boxes if b.caption == "lever handle" and left(b, 0.4)]
+    counter_docs = [b for b in boxes if b.caption == ex.COUNTER_CAP and left(b)]
+    shelf = None
+    if persons or counter_docs:
+        if persons:
+            p = max(persons, key=lambda b: b.area)
+            y1 = p.y2
+            x1 = max(0, p.x1 - int(0.05 * W))
+            x2 = max(levers, key=lambda b: b.area).x2 if levers else p.x2 + int(0.05 * W)
+        else:
+            d = counter_docs[0]
+            y1 = d.y1 - int(0.02 * H)
+            x1 = max(0, d.x1 - int(0.08 * W))
+            x2 = max(levers, key=lambda b: b.area).x2 if levers else d.x2 + int(0.08 * W)
+        drawers = [b.y1 for b in boxes if left(b) and b.y1 > y1 + 0.08 * H]
+        y2 = min([y1 + int(0.17 * H)] + [y - int(0.005 * H) for y in drawers])
+        cand = Box(x1, y1, x2, y2, "", "region", 0.0, caption=REGION_CAPS["counter_shelf"])
+        if 0.55 * H <= y1 <= 0.75 * H and cand.h >= 0.06 * H and x2 <= 0.4 * W and cand.w >= 0.15 * W:
+            shelf = cand
+    if shelf is not None:
+        src["counter_shelf"] = "derived"
+    else:
+        shelf = _anchor("counter_shelf", W, H)
+        src["counter_shelf"] = "fallback"
+    regions.append(shelf)
+
+    # --- desk: right of the shelf, below the tray
+    if src["counter_shelf"] == "derived":
+        x1 = shelf.x2 + int(0.03 * W)
+        desk = Box(x1, int(0.72 * H), min(W - 1, x1 + int(0.25 * W)), int(0.95 * H), "", "region", 0.0,
+                   caption=REGION_CAPS["desk"])
+        src["desk"] = "derived"
+    else:
+        desk = _anchor("desk", W, H)
+        src["desk"] = "fallback"
+    regions.append(desk)
+    return regions, src
+
+
+# --------------------------------------------------------------------------
+# request 2 questions + the click/drag convention
+# --------------------------------------------------------------------------
+
+ACTION_RULE = (
+    "Constraint: the loudspeaker/horn, the APPROVED and DENIED stamps, buttons/menu text and page corners are "
+    "CLICK only; documents (passport, papers, bulletin, rulebook), the stamp tray tab and the shutter lever are "
+    "DRAG only. Drop targets (stamp landing strip, counter shelf, desk) are only the end point of a drag."
+)
+
+
+def build_questions(src_ids: dict, tgt_ids: dict) -> dict:
     return {
         "action": choice(
-            (f"{aim} " if aim else "") + "Look at the annotated screenshot and recent history. What kind of mouse input should be performed next to make progress toward the objective?",
+            "Following the manual and what is currently true on screen, what kind of mouse input is the next "
+            "step? " + ACTION_RULE,
             {
-                "click": "click one numbered element (button, menu option, text/cutscene to advance, stamp, speaker)",
-                "drag": "drag one numbered element (e.g. a document, or a lever) onto another numbered element or empty space",
-                "wait": "do nothing this tick (a transition/animation is in progress or nothing is actionable)",
+                "click": "click one numbered element (loudspeaker, a stamp, a button/menu text, a page corner)",
+                "drag": "drag one numbered element (a document, the stamp tray tab, the lever) onto a drop target",
+                "wait": "do nothing this turn (someone is walking in / a screen is changing)",
             },
         ),
         "source": choice(
-            source_instr or source_instruction("default", ""),
+            "Following the manual and what is currently true on screen: which numbered element is clicked "
+            "next, or, for a drag, picked up? Use the number drawn on its marker.",
             src_ids,
         ),
-        # no "none" option: it took 0.15-0.24 on every frame and a drag with
-        # target none is skipped; the target is only used when action == drag
         "target": choice(
-            (f"{aim} " if aim else "") + "If the next input is a drag: where should the dragged item end up - "
-            "onto which numbered element, or empty space? Not the item itself. (Ignored when the input is a click.)",
-            dict(all_ids),
-        ),
-        "day": choice(
-            "Which in-game day is it (from bulletin, date or clock text if visible; otherwise unknown)?",
-            {"1": "Day 1 / Nov 23", "2": "Day 2 / Nov 24", "3": "Day 3 / Nov 25", "later": "Day 4 or later", "unknown": "not determinable yet"},
-        ),
-        "goal": noul(
-            "Has the current entrant been fully processed (passport stamped and documents returned)? "
-            "If no entrant has been called yet, answer no.",
-            "yes - stamped and documents handed back",
-            "no - not yet (or no entrant processed yet)",
+            "If the next input is a drag: onto which numbered drop target or element should the dragged item be "
+            "released? (stamp landing strip = under a stamp so it can be stamped; counter shelf = hand documents "
+            "back; desk = read a document / put papers aside / pull the tray tab left.) Ignored for a click.",
+            tgt_ids,
         ),
     }
 
 
-def build_state_text(history: deque, day: str, aim: str, ban_lines: list[str], visible: str = "") -> str:
-    rules = DAY_RULES.get(day)
-    rule_txt = rules if rules else "Current day not yet known. Rules by day: " + " | ".join(DAY_RULES.values())
-    hist = "\n".join(f"- {h}" for h in history) if history else "- (none yet; this is the first action)"
-    parts = [OBJECTIVE, f"Rules: {rule_txt}", BOOTH_BRIEF]
-    if visible:
-        parts.append(f"Labelled on screen now (automatic detection, may be imperfect): {visible}.")
-    parts += [f"Current aim: {aim}", f"Last actions (oldest first):\n{hist}"]
-    if ban_lines:
-        parts.append("Ruled out for now:\n" + "\n".join(f"- {s}" for s in ban_lines))
-    return "\n\n".join(parts)
+def _cls(b, booth: bool):
+    if b is None:
+        return None
+    if b.kind == "background":
+        return "click"
+    return man.input_class(b, booth)
+
+
+def enforce_input(action: str, src: str, res, idmap: dict, src_ids: dict, booth: bool):
+    """Apply the manual's click-only / drag-only convention to TOD's pick.
+    On a conflict (e.g. drag on a stamp) take the better of
+      (a) same element, its allowed input:  P(src) * P(allowed action)
+      (b) same input, best element allowed for it:  P(action) * P(element)
+    Returns (action, src, note); note == '' when nothing changed."""
+    if action not in ("click", "drag") or not src.isdigit():
+        return action, src, ""
+    cls = _cls(idmap.get(int(src)), booth)
+    if cls in (None, action):
+        return action, src, ""
+    pa, ps = res["action"].probabilities, res["source"].probabilities
+    opts = []
+    if cls in ("click", "drag"):
+        opts.append((float(ps.get(src, 0)) * float(pa.get(cls, 0)), cls, src))
+    best = None
+    for k in src_ids:
+        if _cls(idmap.get(int(k)), booth) in (None, action) and (best is None or ps.get(k, 0) > ps.get(best, 0)):
+            best = k
+    if best:
+        opts.append((float(pa.get(action, 0)) * float(ps.get(best, 0)), action, best))
+    if not opts:
+        return "wait", src, f"{action} on #{src} ({cls}-only), no compatible option -> wait"
+    _, a2, s2 = max(opts, key=lambda o: o[0])
+    note = (f"TOD chose {action} #{src} but that element is {cls}-only -> "
+            + (f"coerced to {a2} #{s2}" if s2 == src else f"kept {a2}, re-picked #{s2} (best {a2}-able element)"))
+    return a2, s2, note
 
 
 # --------------------------------------------------------------------------
@@ -480,15 +600,14 @@ def write_summary(run_dir: str, rows: list[dict], meta: dict) -> None:
     lines = [f"# Run {os.path.basename(run_dir)}", ""]
     for k, v in meta.items():
         lines.append(f"- {k}: {v}")
-    lines += ["", "| tick | screen | action | source desc | p(src) | goal p(yes) | effect |",
-              "|---:|---|---|---|---:|---:|---|"]
+    lines += ["", "| tick | screen | state (TOD, request 1) | manual step | action | source desc | p(src) | effect |",
+              "|---:|---|---|---|---|---|---:|---|"]
     for r in rows:
         d = str(r.get("src_desc", "-")).replace("|", "/")
         if r.get("tgt_desc"):
             d += " -> " + str(r["tgt_desc"]).replace("|", "/")
-        goal = r.get("goal")
-        lines.append(f"| {r['tick']} | {r.get('screen', '-')} | {r.get('action', '-')} | {short(d, 90)} | "
-                     f"{r.get('p_src', 0):.2f} | {'-' if goal is None else f'{goal:.2f}'} | {r.get('effect', '-')} |")
+        lines.append(f"| {r['tick']} | {r.get('screen', '-')} | {r.get('state', '-')} | {r.get('step', '-')} | "
+                     f"{r.get('action', '-')} | {short(d, 90)} | {r.get('p_src', 0):.2f} | {r.get('effect', '-')} |")
     with open(os.path.join(run_dir, "summary.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -507,21 +626,21 @@ def encode_image(img: np.ndarray, fmt: str = "png", quality: int = 90) -> str:
     return f"data:{mime};base64," + base64.b64encode(buf.tobytes()).decode()
 
 
-# screens on which "empty space" is only a drop destination, never something to click/pick up
-BOOTH_SCREENS = {"booth_idle", "documents_on_desk", "stamp_tray_open", "inspect_mode"}
-
-
-def prepare(frame: np.ndarray, boxes: list[Box], aim: str, history, day: str, args,
-            stuck: "StuckTracker | None" = None, tick: int = 0, screen: str = "") -> dict:
-    """Everything between extract() and the TOD request: Set-of-Mark annotation,
-    criteria (extract.describe), the visible-objects summary, questions, state
-    text and the encoded (downscaled) image."""
+def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str, args,
+            stuck: "StuckTracker | None" = None, tick: int = 0) -> dict:
+    """Everything between (extract + request 1) and request 2: drop-target
+    regions, Set-of-Mark annotation, criteria (extract.describe), questions,
+    the manual text and the encoded (downscaled) image."""
     t0 = time.perf_counter()
     H, W = frame.shape[:2]
+    screen = state.get("screen", {}).get("value", "")
+    booth = screen in BOOTH_SCREENS
+    regions, region_src = derive_regions(boxes, frame, state) if booth else ([], {})
     banned = (lambda b: stuck.banned(tick, b) is not None) if stuck is not None else None
-    annotated, idmap = annotate(frame, boxes, max_marks=args.max_marks - 1, excluded=banned)
-    # always offer "the screen itself" so text/cutscene screens can be advanced
-    idmap[len(idmap) + 1] = Box(W // 4, H // 4, 3 * W // 4, 3 * H // 4, "", "background", 0.0)
+    annotated, idmap = annotate(frame, list(boxes) + regions, max_marks=args.max_marks - 1 + len(regions),
+                                excluded=banned)
+    if not booth:  # text/cutscene screens without a button are advanced by clicking the screen itself
+        idmap[len(idmap) + 1] = Box(W // 4, H // 4, 3 * W // 4, 3 * H // 4, "", "background", 0.0)
     desc = {str(i): describe(b, W, H) for i, b in idmap.items()}
     banned_ids, ban_lines = {}, []
     if stuck is not None:
@@ -533,23 +652,26 @@ def prepare(frame: np.ndarray, boxes: list[Box], aim: str, history, day: str, ar
             verb = "Clicking" if f.action == "click" else "Dragging"
             ban_lines.append(f"{verb} '{short(f.desc, 60)}' did nothing (tried {f.count}x); excluded for "
                              f"{f.banned_until - tick} more tick(s)")
-    src_ids = {k: v for k, v in desc.items() if k not in banned_ids}
-    if screen in BOOTH_SCREENS:  # TOD's own screen judgement (probe)
-        src_ids = {k: v for k, v in src_ids.items() if idmap[int(k)].kind != "background"}
-    visible = visible_summary(idmap.values())
-    questions = build_questions(src_ids, desc, source_instruction(args.source_style, aim),
-                                aim if args.source_style == "goal" else "")
-    state_text = build_state_text(history, day, aim, ban_lines, visible)
-    send = annotated
-    if args.send_width and W > args.send_width:
-        send = cv2.resize(annotated, (args.send_width, int(H * args.send_width / W)), interpolation=cv2.INTER_AREA)
+    # regions are drop targets only; the background is a click source only
+    src_ids = {k: v for k, v in desc.items() if k not in banned_ids and idmap[int(k)].kind != "region"}
+    tgt_ids = {k: v for k, v in desc.items() if idmap[int(k)].kind != "background"} or dict(desc)
+    region_ids = {k: idmap[int(k)].caption for k in desc if idmap[int(k)].kind == "region"}
+    region_info = {}
+    for k, cap in region_ids.items():
+        name = next(n for n, c in REGION_CAPS.items() if c == cap)
+        b = idmap[int(k)]
+        region_info[name] = {"id": k, "box": [b.x1, b.y1, b.x2, b.y2], "target_source": region_src.get(name, "?")}
+    questions = build_questions(src_ids, tgt_ids)
+    state_text = man.build(state, history, day, ban_lines)
+    send = _small_for_send(annotated, args)
     url = encode_image(send, args.send_format, args.jpeg_quality)
     return dict(annotated=annotated, idmap=idmap, desc=desc, banned_ids=banned_ids, src_ids=src_ids,
-                visible=visible, questions=questions, state_text=state_text, image_url=url,
-                image_kb=round(len(url) * 3 / 4 / 1024, 1), prep_ms=round((time.perf_counter() - t0) * 1e3, 1))
+                tgt_ids=tgt_ids, regions=region_info, booth=booth, questions=questions, state_text=state_text,
+                image_url=url, image_kb=round(len(url) * 3 / 4 / 1024, 1),
+                prep_ms=round((time.perf_counter() - t0) * 1e3, 1))
 
 
-_PROBE_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="screen-probe")
+_PROBE_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="state-probe")
 
 
 def _timed(fn, *a):
@@ -558,9 +680,31 @@ def _timed(fn, *a):
     return r, (time.perf_counter() - t) * 1e3
 
 
+def _clean_state(state: dict) -> dict:
+    return {k: {"value": v["value"], "p": v["p"], "probs": {a: round(b, 4) for a, b in v["probs"].items()}}
+            for k, v in state.items()}
+
+
+def decide(res, P: dict) -> dict:
+    """TOD's request-2 answers -> the input to perform (after the click/drag
+    convention). Pure: no I/O."""
+    action = res["action"].value
+    src = str(res["source"].value)
+    tod_pick = (action, src)
+    action, src, note = enforce_input(action, src, res, P["idmap"], P["src_ids"], P["booth"])
+    tgt = str(res["target"].value)
+    if action == "drag" and tgt == src:
+        # dropping an item on itself is a no-op: take TOD's best other target
+        alt = [k for k, _ in sorted(res["target"].probabilities.items(), key=lambda kv: -kv[1]) if k != src]
+        if alt:
+            tgt = alt[0]
+    return dict(action=action, src=src, tgt=tgt, note=note, tod_pick=tod_pick,
+                p_src=float(res["source"].probabilities.get(src, 0.0)))
+
+
 def offline(args) -> int:
-    """--frames: extract -> prepare -> one TOD request per saved frame, each with
-    fresh state (no history). Never looks for the game window, never sends input."""
+    """--frames: request 1 + extract -> prepare -> request 2 per saved frame, each
+    with fresh state (no history). Never looks for the game window, never sends input."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = args.out or os.path.join(ROOT, "runs", ts + "_offline")
     os.makedirs(out_dir, exist_ok=True)
@@ -573,41 +717,54 @@ def offline(args) -> int:
             print(f"[offline] cannot read {path}")
             continue
         t0 = time.perf_counter()
-        fut = _PROBE_POOL.submit(_timed, screen_probe, tod, frame, args)
+        fut = _PROBE_POOL.submit(_timed, state_probe, tod, frame, args, "unknown")
         boxes = ex.extract(frame)
         t_ex = (time.perf_counter() - t0) * 1e3
         probe, t_probe = fut.result()
-        t_wait = (time.perf_counter() - t0) * 1e3 - t_ex
-        screen = probe["screen"].value
-        P = prepare(frame, boxes, current_aim(screen, None), deque(), "unknown", args, screen=screen)
+        state = parse_state(probe)
+        P = prepare(frame, boxes, state, deque(), "unknown", args)
         t1 = time.perf_counter()
         res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
         t_tod = (time.perf_counter() - t1) * 1e3
-        t_total = (time.perf_counter() - t0) * 1e3
+        D = decide(res, P)
+        step = man.situation(state, "1")
         r = {
-            "frame": path, "n_boxes_raw": len(boxes), "n_options": len(P["src_ids"]),
-            "extract_ms": round(t_ex), "extract_timings": {k: round(v) for k, v in ex.LAST_TIMINGS.items()},
-            "prep_ms": P["prep_ms"], "image_kb": P["image_kb"], "tod_ms": round(t_tod),
-            "probe_ms": round(t_probe), "probe_wait_after_extract_ms": round(t_wait), "total_ms": round(t_total),
-            "aim": current_aim(screen, None), "source_instructions_used": P["questions"]["source"]["instructions"],
-            "visible": P["visible"], "criteria": P["src_ids"], "state_text": P["state_text"],
-            "source_instructions": P["questions"]["source"]["instructions"],
+            "frame": path, "n_boxes_raw": len(boxes), "n_sources": len(P["src_ids"]), "n_targets": len(P["tgt_ids"]),
+            "extract_ms": round(t_ex), "state_ms": round(t_probe), "tod_ms": round(t_tod),
+            "image_kb": P["image_kb"], "state": _clean_state(state), "state_line": state_line(state),
+            "manual_step_for_state (diagnostic, not sent)": step, "regions": P["regions"],
+            "target_source": {n: v["target_source"] for n, v in P["regions"].items()},
+            "state_text": P["state_text"], "state_text_words": len(P["state_text"].split()),
+            "criteria": P["desc"],
             "answers": {q: {"choice": a.value, "probabilities": a.probabilities} for q, a in res.answers.items()},
+            "action_top3": top(res["action"].probabilities),
             "source_top3": [(k, P["desc"].get(k, k), p) for k, p in top(res["source"].probabilities)],
-            "screen_top3": top(probe["screen"].probabilities), "action_top3": top(res["action"].probabilities),
-            "target_top3": top(res["target"].probabilities),
+            "target_top3": [(k, P["desc"].get(k, k), p) for k, p in top(res["target"].probabilities)],
+            "decision": {**D, "src_desc": P["desc"].get(D["src"], "-"),
+                         "tgt_desc": P["desc"].get(D["tgt"], "-") if D["action"] == "drag" else None},
         }
         results.append(r)
         stem = os.path.join(out_dir, os.path.basename(os.path.dirname(os.path.abspath(path))) + "_"
                             + os.path.splitext(os.path.basename(path))[0])
         cv2.imwrite(stem + "_som.png", P["annotated"])
+        try:
+            from . import overlay
+            res.answers["screen"] = probe["screen"]
+            overlay.render(P["annotated"], P["idmap"], res, stem + "_viz.png", descriptions=P["desc"],
+                           executed="(offline)", effect="-", state_line=r["state_line"],
+                           chosen=(D["action"], D["src"], D["tgt"]), note=D["note"])
+        except Exception as e:
+            print(f"[offline] overlay failed: {e}")
         with open(stem + ".json", "w", encoding="utf-8") as fh:
             json.dump(r, fh, indent=1)
-        print(f"[offline] {path}: options={r['n_options']} extract={t_ex:.0f}ms probe={t_probe:.0f}ms "
-              f"(+{max(0, t_wait):.0f}ms wait) prep={P['prep_ms']:.0f}ms img={P['image_kb']}KB tod={t_tod:.0f}ms "
-              f"total={t_total:.0f}ms screen={r['screen_top3']} action={r['action_top3']}")
+        print(f"[offline] {path}: extract={t_ex:.0f}ms state={t_probe:.0f}ms tod={t_tod:.0f}ms "
+              f"words={r['state_text_words']}\n           state: {r['state_line']}\n           step: {step}"
+              f"\n           action={r['action_top3']} regions={r['target_source']}")
         for k, d, p in r["source_top3"]:
             print(f"           source #{k} p={p:.3f} {d}")
+        for k, d, p in r["target_top3"]:
+            print(f"           target #{k} p={p:.3f} {d}")
+        print(f"           decision: {D['action']} #{D['src']} -> #{D['tgt']} {D['note']}")
     with open(os.path.join(out_dir, "offline.json"), "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=1)
     print(f"[offline] TOD calls={tod.total_calls} cost=${tod.total_cost:.4f} -> {out_dir}")
@@ -631,12 +788,11 @@ def run(args) -> int:
     ex.warmup()
     print(f"[loop] warmup {1e3 * (time.perf_counter() - t):.0f} ms")
 
-    history: deque = deque(maxlen=6)
+    history: deque = deque(maxlen=args.history)
     stuck = StuckTracker(limit=args.stuck_limit, ban_ticks=args.ban_ticks)
     rows: list[dict] = []
     day = "unknown"
-    last_screen = None
-    last_goal = None
+    last_state: dict = {}
     fg_misses = 0
     overlay = None
     if args.viz:
@@ -668,34 +824,48 @@ def run(args) -> int:
             park_cursor()
             time.sleep(0.1)
             frame, waited, af, stable, ambient = wait_stable(grab.grab, interval=0.15, thresh=args.stable_thresh,
-                                                    max_wait=args.max_anim_wait)
+                                                             max_wait=args.max_anim_wait)
             rec.update(frame_shape=list(frame.shape), frame_hash=frame_hash(frame),
                        anim_wait_s=round(waited, 2), anim_frac=round(af, 5), stable=stable)
             if not stable:
                 print(f"[tick {tick:03d}] screen still animating after {waited:.1f}s (frac {af:.4f}); proceeding anyway")
 
+            # ---- REQUEST 1 (state, unmarked frame) concurrently with extract -------
             t0 = time.perf_counter()
-            fut = _PROBE_POOL.submit(_timed, screen_probe, tod, frame, args)
+            fut = _PROBE_POOL.submit(_timed, state_probe, tod, frame, args, day)
             boxes = ex.extract(frame)
             rec["extract_ms"] = round((time.perf_counter() - t0) * 1e3, 1)
             rec["extract_timings"] = {k: round(v, 1) for k, v in getattr(ex, "LAST_TIMINGS", {}).items()}
-            probe = None
             try:
-                probe, rec["probe_ms"] = fut.result()
-                screen = probe["screen"].value
-                rec["screen_probs"] = probe["screen"].probabilities
-            except RuntimeError as e:  # probe failed: fall back to last tick's judgement
-                print(f"[tick {tick:03d}] screen probe failed: {e}")
-                screen = last_screen or "other"
+                probe, rec["state_ms"] = fut.result()
+                state = parse_state(probe)
+            except RuntimeError as e:  # never act on a stale picture of the screen
+                print(f"[tick {tick:03d}] state request failed: {e}; skipping tick")
+                rec.update(tod_error=f"state: {e}", executed="none (state request error)")
+                row.update(action="none", effect="skipped: state request error")
+                with open(os.path.join(run_dir, f"tick_{tick:04d}.json"), "w", encoding="utf-8") as fh:
+                    json.dump(rec, fh, indent=1)
+                time.sleep(2.0)
+                continue
             rec["probe_wait_ms"] = round((time.perf_counter() - t0) * 1e3 - rec["extract_ms"], 1)
-            aim = current_aim(screen, last_goal)
-            P = prepare(frame, boxes, aim, history, day, args, stuck=stuck, tick=tick, screen=screen)
+            screen = state["screen"]["value"]
+            dv = state.get("day", {})
+            if dv.get("value") in DAY_RULES and dv.get("p", 0) >= 0.5:
+                day = dv["value"]
+            step = man.situation(state, day if day in DAY_RULES else "1")
+            sline = state_line(state)
+            rec.update(state=_clean_state(state), state_line=sline,
+                       manual_step_for_state=list(step))  # diagnostic only, never sent to TOD
+
+            # ---- REQUEST 2 (action, SoM frame) -------------------------------------
+            P = prepare(frame, boxes, state, history, day, args, stuck=stuck, tick=tick)
             annotated, idmap, desc, banned_ids = P["annotated"], P["idmap"], P["desc"], P["banned_ids"]
-            questions, state_text = P["questions"], P["state_text"]
             rec["prep_ms"] = P["prep_ms"]
+            rec["regions"] = P["regions"]
+            rec["target_source"] = {n: v["target_source"] for n, v in P["regions"].items()}
             t1 = time.perf_counter()
             try:
-                res = tod.ask(questions, text=state_text, image_data_url=P["image_url"])
+                res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
             except RuntimeError as e:  # network/HTTP failure: log, skip the tick, never act blind
                 print(f"[tick {tick:03d}] TOD request failed: {e}; skipping tick")
                 rec.update(tod_error=str(e), executed="none (TOD error)")
@@ -706,43 +876,35 @@ def run(args) -> int:
                 continue
             rec["tod_ms"] = round((time.perf_counter() - t1) * 1e3, 1)
             rec["tod_request_id"] = res.request_id
-            if probe is not None:  # keep logs/overlay shaped as before: screen alongside the other answers
-                res.answers["screen"] = probe["screen"]
+            res.answers["screen"] = probe["screen"]  # overlay shows it alongside the other answers
 
-            action = res["action"].value
-            src = str(res["source"].value)
-            tgt = str(res["target"].value)
-            if action == "drag" and tgt == src:
-                # dropping an item on itself is a no-op: take TOD's best other target
-                alt = [k for k, _ in sorted(res["target"].probabilities.items(), key=lambda kv: -kv[1]) if k != src]
-                if alt:
-                    tgt = alt[0]
-            day_ans = res["day"].value
-            p_goal = p_true(res["goal"])
-            p_src = float(res["source"].probabilities.get(src, 0.0))
-            if day_ans in DAY_RULES and res["day"].probabilities.get(day_ans, 0) >= 0.5:
-                day = day_ans
-            last_screen, last_goal = screen, p_goal
-
+            D = decide(res, P)
+            action, src, tgt = D["action"], D["src"], D["tgt"]
+            p_src = D["p_src"]
+            if D["note"]:
+                print(f"[tick {tick:03d}] input convention: {D['note']}")
             rec.update(
-                state_text=state_text,
+                state_text=P["state_text"],
                 descriptions=desc,
                 excluded={k: v.desc for k, v in banned_ids.items()},
                 boxes={str(i): b.to_dict() for i, b in idmap.items()},
                 answers={q: {"choice": a.value, "probabilities": a.probabilities, "confidence": a.confidence}
                          for q, a in res.answers.items()},
+                tod_pick=list(D["tod_pick"]), input_convention=D["note"] or None,
             )
             sb = idmap.get(int(src)) if src.isdigit() else None
             tb = idmap.get(int(tgt)) if tgt.isdigit() else None
             src_desc = desc.get(src, "-")
             print(
-                f"[tick {tick:03d}] boxes={len(idmap)} wait={waited:.2f}s extract={rec['extract_ms']:.0f}ms tod={rec['tod_ms']:.0f}ms "
-                f"screen={screen} aim={short(aim, 40)!r} action={top(res['action'].probabilities)} "
-                f"source={top(res['source'].probabilities)} ({short(src_desc)}) "
-                f"target={top(res['target'].probabilities, 2)} day={day_ans} goal={p_goal:.2f}"
+                f"[tick {tick:03d}] boxes={len(idmap)} wait={waited:.2f}s extract={rec['extract_ms']:.0f}ms "
+                f"state={rec.get('state_ms', 0):.0f}ms tod={rec['tod_ms']:.0f}ms\n"
+                f"           state: {sline}\n           (manual step {step[0]}: {step[1]})\n"
+                f"           action={top(res['action'].probabilities)} source={top(res['source'].probabilities)} "
+                f"({short(src_desc)}) target={top(res['target'].probabilities, 2)}"
                 + (f" excluded={sorted(banned_ids, key=int)}" if banned_ids else "")
             )
-            row.update(screen=screen, action=action, src_desc=src_desc, p_src=p_src, goal=p_goal)
+            row.update(screen=screen, state=man.state_summary(state), step=step[0], action=action,
+                       src_desc=src_desc, p_src=p_src)
             if action == "drag":
                 row["tgt_desc"] = desc.get(tgt, tgt)
 
@@ -808,17 +970,20 @@ def run(args) -> int:
                 effect = executed
             row["effect"] = effect
 
-            label = f"'{short(src_desc, 60)}'" if sb else "-"
-            eff = "" if changed is None else (" -> changed" if changed else " -> NO change")
+            # ---- history: one line per action (tick | state | input | element | effect)
+            ssum = man.state_summary(state)
+            el = f"'{short(src_desc, 60)}'" if sb else "-"
+            eff = "not verified (dry-run)" if changed is None else ("changed" if changed else "NO change")
             if veto:
-                history.append(f"tick {tick} [{screen}]: {veto}")
+                history.append(f"t{tick} | {ssum} | vetoed | {el} | {veto}")
             elif action == "click":
-                history.append(f"tick {tick} [{screen}]: clicked {label}{eff}")
+                history.append(f"t{tick} | {ssum} | click | {el} | {eff}")
             elif action == "drag":
                 tl = f"'{short(desc.get(tgt, 'nothing'), 50)}'"
-                history.append(f"tick {tick} [{screen}]: dragged {label} onto {tl}{eff}")
+                history.append(f"t{tick} | {ssum} | drag | {el} -> {tl} | {eff}")
             else:
-                history.append(f"tick {tick} [{screen}]: waited")
+                history.append(f"t{tick} | {ssum} | wait | - | -")
+            last_state = state
 
             # ---- log -----------------------------------------------------------------
             stem = os.path.join(run_dir, f"tick_{tick:04d}")
@@ -830,7 +995,8 @@ def run(args) -> int:
             if overlay is not None:
                 try:
                     overlay.render(annotated, idmap, res, os.path.join(run_dir, f"viz_{tick:04d}.png"),
-                                   descriptions=desc, executed=executed, effect=effect)
+                                   descriptions=desc, executed=executed, effect=effect, state_line=sline,
+                                   chosen=(action, src, tgt), note=D["note"])
                 except Exception as e:
                     print(f"[loop] overlay failed: {e}")
     finally:
@@ -838,6 +1004,7 @@ def run(args) -> int:
         write_summary(run_dir, rows, {
             "ticks": len(rows), "TOD calls": tod.total_calls, "cost": f"${tod.total_cost:.4f}",
             "dry_run": args.dry_run, "args": " ".join(sys.argv[1:]),
+            "last state": state_line(last_state) if last_state else "-",
         })
         print(f"[loop] done. TOD calls={tod.total_calls} cost=${tod.total_cost:.4f}. Logs: {run_dir}")
     return 0
@@ -847,12 +1014,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="TOD Set-of-Mark agent loop for Papers, Please")
     ap.add_argument("--max-ticks", type=int, default=10)
     ap.add_argument("--dry-run", action="store_true", help="do everything except mouse input")
-    ap.add_argument("--max-marks", type=int, default=25, help="option cap incl. the background option (soft: text, "
-                    "page corners and detector-labelled objects are never dropped)")
+    ap.add_argument("--max-marks", type=int, default=25, help="element cap (soft: text, page corners and "
+                    "detector-labelled objects are never dropped; drop-target regions come on top)")
     ap.add_argument("--send-format", choices=("png", "jpeg"), default="png", help="png: smaller than jpeg on pixel art (~80 vs ~170 KB)")
     ap.add_argument("--jpeg-quality", type=int, default=90)
-    ap.add_argument("--source-style", choices=SOURCE_STYLES, default="goal",
-                    help="wording of the source question: default | short | goal (prefixed with the current aim)")
+    ap.add_argument("--history", type=int, default=30, help="past actions listed in the request-2 text")
     ap.add_argument("--frames", nargs="+", help="offline: run on saved frames (no game window, no input)")
     ap.add_argument("--out", default=None, help="offline: output directory")
     ap.add_argument("--send-width", type=int, default=1140, help="downscale annotated frame to this width for TOD (0=full)")

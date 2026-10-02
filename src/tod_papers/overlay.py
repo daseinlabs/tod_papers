@@ -17,7 +17,11 @@ def _fit(t: str, n: int) -> str:
 
 
 def render(annotated: np.ndarray, idmap: dict, res, path: str, descriptions: dict | None = None,
-           executed: str = "", effect: str = "") -> None:
+           executed: str = "", effect: str = "", state_line: str = "", chosen: tuple | None = None,
+           note: str = "") -> None:
+    """state_line: request-1 answers (TOD's reading of the plain frame), shown in
+    the banner. chosen: (action, src, tgt) actually performed, if the loop's
+    click/drag convention changed TOD's pick (note says how)."""
     descriptions = descriptions or {}
     img = annotated.copy()
     H, W = img.shape[:2]
@@ -42,6 +46,8 @@ def render(annotated: np.ndarray, idmap: dict, res, path: str, descriptions: dic
     src = str(res["source"].value)
     tgt = str(res["target"].value)
     act = res["action"].value
+    if chosen is not None:
+        act, src, tgt = chosen
     sb = idmap.get(int(src)) if src.isdigit() else None
     tb = idmap.get(int(tgt)) if tgt.isdigit() else None
     if sb is not None and act != "wait":
@@ -55,15 +61,25 @@ def render(annotated: np.ndarray, idmap: dict, res, path: str, descriptions: dic
     # banner with the chosen action
     p_src = ps.get(src, 0.0)
     if act == "drag":
-        chosen = f"{act.upper()} #{src} ({p_src:.2f}) -> #{tgt} ({pt.get(tgt, 0.0):.2f}): {_fit(descriptions.get(src, ''), 60)}"
+        chosen_txt = f"{act.upper()} #{src} ({p_src:.2f}) -> #{tgt} ({pt.get(tgt, 0.0):.2f}): {_fit(descriptions.get(src, ''), 60)}"
     elif act == "click":
-        chosen = f"CLICK #{src} ({p_src:.2f}): {_fit(descriptions.get(src, ''), 80)}"
+        chosen_txt = f"CLICK #{src} ({p_src:.2f}): {_fit(descriptions.get(src, ''), 80)}"
     else:
-        chosen = "WAIT"
-    bh = int(90 * k)
+        chosen_txt = "WAIT"
+    bh = int((90 + (40 if state_line else 0) + (40 if note else 0)) * k)
     banner = np.full((bh, W, 3), 20, np.uint8)
-    cv2.putText(banner, _fit(chosen, 110), (12, int(38 * k)), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(banner, _fit(f"executed: {executed}   effect: {effect}", 120), (12, int(78 * k)),
+    yb = int(38 * k)
+    if state_line:
+        cv2.putText(banner, _fit("state: " + state_line, 150), (12, yb), cv2.FONT_HERSHEY_SIMPLEX, fs * 0.75,
+                    (120, 255, 120), 2, cv2.LINE_AA)
+        yb += int(40 * k)
+    cv2.putText(banner, _fit(chosen_txt, 110), (12, yb), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 255), 2, cv2.LINE_AA)
+    yb += int(40 * k)
+    if note:
+        cv2.putText(banner, _fit(note, 130), (12, yb), cv2.FONT_HERSHEY_SIMPLEX, fs * 0.75, (80, 160, 255), 2,
+                    cv2.LINE_AA)
+        yb += int(40 * k)
+    cv2.putText(banner, _fit(f"executed: {executed}   effect: {effect}", 120), (12, yb),
                 cv2.FONT_HERSHEY_SIMPLEX, fs * 0.85, (200, 200, 200), 2, cv2.LINE_AA)
     img = np.vstack([banner, img])
     H2 = img.shape[0]
@@ -85,6 +101,8 @@ def render(annotated: np.ndarray, idmap: dict, res, path: str, descriptions: dic
         put(f" {'*' if n == 0 else ' '}#{lab}: {v:.3f}", (0, 255, 255) if n == 0 else (230, 230, 230))
         put(f"     {descriptions.get(lab, '')}", (170, 170, 170), 0.75)
     for q in ("target", "screen"):
+        if q not in res.answers:
+            continue
         a_ = res[q]
         put(f"{q}: {a_.value}", (120, 220, 255))
         for lab, v in sorted(a_.probabilities.items(), key=lambda kv: -kv[1])[:3]:
