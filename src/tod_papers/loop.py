@@ -378,6 +378,7 @@ REGION_CAPS = {
     "stamp_landing_denied": "stamp landing strip (under the DENIED stamp head)",
     "counter_shelf": "counter shelf (hand documents back here)",
     "desk": "desk (drop documents here to read them)",
+    "tray_stow": "right edge of the desk (drag the tray tab here to put the stamp tray away)",
 }
 
 
@@ -461,6 +462,21 @@ def derive_regions(boxes: list, frame: np.ndarray, state: dict):
                 r = _anchor(name, W, H)
                 src[name] = "fallback"
             regions.append(r)
+        # --- tray stow target: right of the APPROVED stamp, at the stamp bar's height
+        ab = sides.get("approved")
+        r = None
+        if ab:
+            y1, y2 = min(b.y1 for b in ab), max(b.y2 for b in ab)
+            x1 = min(W - int(0.02 * W), max(b.x2 for b in ab) + int(0.01 * W))
+            r = Box(x1, y1, W - 1, y2, "", "region", 0.0, caption=REGION_CAPS["tray_stow"])
+            if not (r.w >= 0.015 * W and 0.25 * H < r.center[1] < 0.65 * H):
+                r = None
+        if r is not None:
+            src["tray_stow"] = "derived"
+        else:
+            r = _anchor("tray_stow", W, H)
+            src["tray_stow"] = "fallback"
+        regions.append(r)
 
     # --- counter shelf
     def left(b, maxfrac=0.36) -> bool:
@@ -504,6 +520,29 @@ def derive_regions(boxes: list, frame: np.ndarray, state: dict):
         src["desk"] = "fallback"
     regions.append(desk)
     return regions, src
+
+
+TRAY_HANDLE_CAP = "stamp tray tab (left end of the open stamp bar)"
+
+
+def derive_tray_handle(boxes: list, frame: np.ndarray, state: dict):
+    """While the tray is out its tab sits at the LEFT end of the stamp bar, where no
+    detector draws a box. Derived from the detected DENIED stamp (the left stamp):
+    a narrow box just left of it, same height. Only offered when request 1 says the
+    tray is open and the DENIED stamp was detected (never a fallback)."""
+    if not man.yes(state, "stamp_tray_open"):
+        return None
+    H, W = frame.shape[:2]
+    den = [b for b in boxes if b.center[0] > 0.4 * W and 0.2 * H < b.center[1] < 0.7 * H
+           and _stamp_side(b, frame) == "denied" and b.w > 0.08 * W]
+    if not den:
+        return None
+    d = min(den, key=lambda b: b.x1)
+    x2 = d.x1 - int(0.045 * W)
+    x1 = x2 - int(0.03 * W)
+    if x1 < 0.4 * W:
+        return None
+    return Box(x1, d.y1 + d.h // 6, x2, d.y2 - d.h // 6, "", "object", 0.0, caption=TRAY_HANDLE_CAP)
 
 
 # --------------------------------------------------------------------------
@@ -636,6 +675,9 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     screen = state.get("screen", {}).get("value", "")
     booth = screen in BOOTH_SCREENS
     regions, region_src = derive_regions(boxes, frame, state) if booth else ([], {})
+    handle = derive_tray_handle(boxes, frame, state) if booth else None
+    if handle is not None:
+        boxes = list(boxes) + [handle]
     banned = (lambda b: stuck.banned(tick, b) is not None) if stuck is not None else None
     annotated, idmap = annotate(frame, list(boxes) + regions, max_marks=args.max_marks - 1 + len(regions),
                                 excluded=banned)
@@ -801,6 +843,11 @@ def run(args) -> int:
         except Exception as e:
             print(f"[loop] overlay unavailable: {e}")
 
+    stop_screens = {s.strip() for s in (args.stop_on_screen or "").split(",") if s.strip()}
+    stop_run = 0
+    stop_reason = None
+    stall_key, stall_n = None, 0
+
     def park_cursor():
         if not args.dry_run and is_foreground(hwnd):
             io_win.move(hwnd, *park)
@@ -856,6 +903,26 @@ def run(args) -> int:
             sline = state_line(state)
             rec.update(state=_clean_state(state), state_line=sline,
                        manual_step_for_state=list(step))  # diagnostic only, never sent to TOD
+
+            # ---- harness stop conditions (no input is sent on a stopping tick) -------
+            if stop_screens:
+                stop_run = stop_run + 1 if screen in stop_screens else 0
+                if stop_run >= args.stop_consecutive:
+                    stop_reason = f"screen in {sorted(stop_screens)} for {stop_run} consecutive ticks"
+            key = (screen, man.state_summary(state))
+            stall_key, stall_n = key, (stall_n + 1 if key == stall_key else 1)
+            if args.stall_stop and stall_n >= args.stall_stop:
+                stop_reason = f"stalled: same state {key} for {stall_n} ticks"
+            if stop_reason:
+                print(f"[tick {tick:03d}] state: {sline}")
+                print(f"[loop] STOP: {stop_reason}")
+                rec.update(executed="none (stop condition)", stop_reason=stop_reason)
+                row.update(screen=screen, state=man.state_summary(state), step=step[0], action="none",
+                           effect="stop: " + stop_reason)
+                cv2.imwrite(os.path.join(run_dir, f"raw_{tick:04d}.png"), frame)
+                with open(os.path.join(run_dir, f"tick_{tick:04d}.json"), "w", encoding="utf-8") as fh:
+                    json.dump(rec, fh, indent=1)
+                break
 
             # ---- REQUEST 2 (action, SoM frame) -------------------------------------
             P = prepare(frame, boxes, state, history, day, args, stuck=stuck, tick=tick)
@@ -1005,12 +1072,16 @@ def run(args) -> int:
             "ticks": len(rows), "TOD calls": tod.total_calls, "cost": f"${tod.total_cost:.4f}",
             "dry_run": args.dry_run, "args": " ".join(sys.argv[1:]),
             "last state": state_line(last_state) if last_state else "-",
+            "stop reason": stop_reason or "max ticks",
         })
         print(f"[loop] done. TOD calls={tod.total_calls} cost=${tod.total_cost:.4f}. Logs: {run_dir}")
+    args.result = {"run_dir": run_dir, "stop_reason": stop_reason, "ticks": len(rows)}
+    if stop_screens and not (stop_reason or "").startswith("screen"):
+        return 3   # asked to stop on a screen that never came
     return 0
 
 
-def main(argv=None) -> int:
+def main(argv=None, result: dict | None = None) -> int:
     ap = argparse.ArgumentParser(description="TOD Set-of-Mark agent loop for Papers, Please")
     ap.add_argument("--max-ticks", type=int, default=10)
     ap.add_argument("--dry-run", action="store_true", help="do everything except mouse input")
@@ -1037,11 +1108,19 @@ def main(argv=None) -> int:
                     help="cursor park point as client fractions (default: top-right corner, away from controls)")
     ap.add_argument("--no-viz", dest="viz", action="store_false")
     ap.add_argument("--save-raw", action="store_true")
+    ap.add_argument("--stop-on-screen", default="", help="comma list of request-1 screens; stop (without acting) "
+                    "once one of them is seen --stop-consecutive ticks in a row (used by tools/reset_game.py)")
+    ap.add_argument("--stop-consecutive", type=int, default=2)
+    ap.add_argument("--stall-stop", type=int, default=0, help="stop when screen + state summary stay identical "
+                    "for N ticks (0 = off)")
     args = ap.parse_args(argv)
     if args.frames:
         return offline(args)
     try:
-        return run(args)
+        rc = run(args)
+        if result is not None:
+            result.update(getattr(args, "result", {}))
+        return rc
     except AbortSafety as e:
         print(f"[loop] SAFETY ABORT: {e}")
         return 2

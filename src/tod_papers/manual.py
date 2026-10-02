@@ -32,9 +32,9 @@ import re
 DAY_DATES = {"1": "1982.11.23", "2": "1982.11.24", "3": "1982.11.25"}
 
 DAY_RULES = {
-    "1": "Day 1 (1982.11.23): only the passport is required. Only citizens of Arstotzka may enter. "
-         "APPROVED if the passport's issuing country is ARSTOTZKA and its expiry date is after 1982.11.23; "
-         "otherwise DENIED.",
+    "1": "Day 1 (1982.11.23): only the passport is required. The ONLY rule today: APPROVED if the passport's "
+         "issuing country is ARSTOTZKA, otherwise DENIED. Expiry date and photo are NOT checked on Day 1 "
+         "(those checks start on Day 2).",
     "2": "Day 2 (1982.11.24): passport only. Foreigners may now enter too. APPROVED if the passport is not "
          "expired (expiry after 1982.11.24) and the photo matches the person; otherwise DENIED.",
     "3": "Day 3 (1982.11.25): Arstotzkan citizens need only a valid passport. Foreigners need a valid passport "
@@ -63,7 +63,9 @@ numbered element onto another numbered element. You decide one input per turn.
   readout shows today's date. They are not needed to process an entrant.
 - Right of the window, the whole lower right of the screen: your dark dotted DESK. Documents are read here.
   Faint text near its bottom says DRAG DOCUMENTS HERE.
-- Right edge of the desk: a small grey TAB sticks out. It is the handle of the STAMP TRAY.
+- Right edge of the desk: a small grey TAB sticks out. It is the handle of the STAMP TRAY. When the tray
+  is out, its tab is at the LEFT end of the grey stamp bar ("stamp tray tab (left end of the open stamp
+  bar)").
 - When the stamp tray is out, a grey bar crosses the upper desk with two big stamps on it: a red DENIED
   stamp (left) and a green APPROVED stamp (right), each with a dark round knob on top (the stamp head).
   Under the bar runs a dark strip with the words ALIGN VISA BENEATH STAMP: that strip is where a passport
@@ -90,6 +92,8 @@ Dragging a stamp does nothing. Clicking a document does nothing. Clicking empty 
   gives it back to the entrant.
 - "desk (drop documents here to read them)": free desk space to the left of the stamp tray. Drop documents
   here to open and read them, or to move a bulletin/rulebook out of the way.
+- "right edge of the desk (drag the tray tab here to put the stamp tray away)": offered while the tray is
+  out. Dragging the tray tab here closes the tray.
 
 4. PROCESSING ONE ENTRANT -- FIND THE FIRST LINE THAT MATCHES WHAT IS CURRENTLY TRUE
 A. Nobody is at the window and no document is on the counter or desk: click the loudspeaker on the booth
@@ -97,14 +101,21 @@ A. Nobody is at the window and no document is on the counter or desk: click the 
    already walking up, wait.
 B. A person is at the window and their passport lies on the counter shelf under the window: drag the
    passport down to the desk ("desk" target) to open it. Clicking it does nothing.
-C. An open passport lies on the desk and the stamp tray is closed: read the passport (issuing country at
-   the bottom, EXP. date, photo), then open the stamp tray by dragging the tab at the right edge of the
+C. An open passport lies on the desk and the stamp tray is closed: read the passport (on Day 1 only the
+   issuing country at the bottom matters; from Day 2 also the EXP. date and photo), then open the stamp tray by dragging the tab at the right edge of the
    desk to the left (drop it on the "desk" target).
 D. The stamp tray is open but the passport is NOT lying under a stamp head (it is off to the side, or it
    has slid up behind the tray so only an edge shows): stamps only mark a document lying directly beneath
-   the stamp heads, in the dark strip under the tray. Drag the passport to the stamp landing strip under
-   the stamp you will use (APPROVED or DENIED, see section 5). Do not drag the stamps; they are clicked.
-   Do not drop the passport onto the tray bar itself: it slides behind the tray where no stamp reaches it.
+   the stamp heads, in the dark strip under the tray. First decide APPROVED or DENIED (section 5), then
+   drag the passport to the stamp landing strip under THAT stamp. Both strips are valid landing places:
+   the APPROVED strip and the DENIED strip each work; put the passport under the stamp you intend to use.
+   Do not drag the stamps; they are clicked. Do not drop the passport onto the tray bar itself: it slides
+   behind the tray where no stamp reaches it.
+D2. RECOVERY: the entrant's passport is no longer visible anywhere on the desk (it slid behind the open
+   stamp tray, so the desk looks empty while the person is still at the window): close the stamp tray by
+   dragging its tab (left end of the open stamp bar) back to the RIGHT (drop it on the "right edge of the
+   desk" target). The hidden passport
+   reappears; then continue with C.
 E. The stamp tray is open, the passport lies under a stamp head, and it has no stamp mark yet: decide with
    section 5, then click APPROVED or DENIED (one click).
 F. The passport shows a stamp mark (green APPROVED or red DENIED ink on its page): drag the stamped passport
@@ -115,13 +126,11 @@ An entrant is finished only after their passport is stamped AND handed back. Cli
 while someone is still at the window does nothing.
 
 5. DECIDING: APPROVED OR DENIED
-Read three things on the open passport: the issuing country (printed in large letters at the bottom of
-the passport, e.g. ARSTOTZKA), the EXP. (expiry) date, and the photo compared with the person at the
-window.
-- Day 1, 1982.11.23: click APPROVED if the issuing country is ARSTOTZKA and the expiry date is after
-  1982.11.23; otherwise click DENIED.
-- Day 2, 1982.11.24: foreigners may enter too. APPROVED if not expired (expiry after 1982.11.24) and the
-  photo matches the person; otherwise DENIED.
+- Day 1, 1982.11.23: the ONLY rule is the issuing country (printed in large letters at the bottom of the
+  passport, e.g. ARSTOTZKA). Issuing country ARSTOTZKA -> APPROVED. Any other country -> DENIED.
+  Expiry date and photo are NOT Day 1 rules; do not deny anyone on Day 1 for expiry or photo.
+- Day 2, 1982.11.24 (expiry and photo checks start today): foreigners may enter too. APPROVED if not
+  expired (expiry after 1982.11.24) and the photo matches the person; otherwise DENIED.
 - Day 3, 1982.11.25: Arstotzkans need a valid passport only. Foreigners also need an entry ticket dated
   1982.11.25; no ticket or a different date -> DENIED.
 The first entrant of day 1 is the tutorial; follow the same rule (his passport is Arstotzkan -> APPROVED).
@@ -145,6 +154,8 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
 - Clicking APPROVED while the passport was above the tray instead of under the stamp: no mark landed.
 - Clicking the loudspeaker over and over while the entrant was still at the window.
 - Clicking the clock/date drawer: it does nothing useful.
+- Leaving the passport hidden behind the open tray and clicking the loudspeaker: nothing happens; close
+  the tray (drag its tab right) to get the passport back (rule D2).
 """
 
 # --------------------------------------------------------------------------
@@ -262,8 +273,11 @@ def state_block(state: dict, day: str) -> str:
         c = state.get("issuing_country")
         if c:
             lines.append(f"- Passport issuing country: {c['value']} (p={c['p']:.2f})")
-        lines.append(f"- Passport expiry date is after today ({today}): {_yn(state, 'expiry_after_today')}")
-        lines.append(f"- Passport photo matches the person at the window: {_yn(state, 'photo_matches_person')}")
+        if day in ("2", "3"):
+            lines.append(f"- Passport expiry date is after today ({today}): {_yn(state, 'expiry_after_today')}")
+            lines.append(f"- Passport photo matches the person at the window: {_yn(state, 'photo_matches_person')}")
+        else:  # Day 1 (or not yet known): expiry/photo are asked and logged but are not Day 1 rules
+            lines.append("- (Day 1: expiry and photo are not checked; only the issuing country decides)")
     d = DAY_RULES.get(day)
     lines.append(f"- Day: {day} -- {d}" if d else "- Day: not yet known (treat as day 1 until a later date shows)")
     return "\n".join(lines)
@@ -321,12 +335,14 @@ def situation(state: dict, day: str = "1") -> tuple[str, str]:
         return "6", "drag bulletin/rulebook -> desk (aside)"
     if yes(state, "stamp_tray_open"):
         if yes(state, "document_under_stamp_heads"):
-            ok = yes(state, "expiry_after_today") and state.get("issuing_country", {}).get("value") == "ARSTOTZKA"
+            ok = state.get("issuing_country", {}).get("value") == "ARSTOTZKA"   # Day 1: the only rule
             if day == "2":
                 ok = yes(state, "expiry_after_today") and yes(state, "photo_matches_person")
             return "E", "click " + ("APPROVED" if ok else "DENIED")
         if yes(state, "document_open_on_desk"):
             return "D", "drag passport -> stamp landing strip"
+        if yes(state, "person_at_window"):
+            return "D2", "drag tray tab -> right edge (close tray, reveal hidden passport)"
     if yes(state, "document_on_counter_shelf") and not yes(state, "document_open_on_desk"):
         return "B", "drag passport (counter) -> desk"
     if yes(state, "document_open_on_desk") and not yes(state, "stamp_tray_open"):
@@ -344,6 +360,7 @@ _STAMP_RE = re.compile(r"\b(APPRO\w*|DENI\w*)\b", re.I)
 CLICK_CAPS = {"speaker/horn", "rubber stamp", "red rubber stamp", "green rubber stamp", "button"}
 DRAG_CAPS = {"closed passport", "open passport", "rulebook / ring binder", "document on counter",
              "passport booklet", "paper document", "ticket", "bulletin board", "tab at screen edge",
+             "stamp tray tab (left end of the open stamp bar)",
              "lever handle"}
 
 

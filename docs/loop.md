@@ -110,3 +110,47 @@ Sources, all on the frame reduced to native art resolution (2280/570 = 4x, neare
 - The shutter lever at the right edge is not reliably detected.
 - Pixel-font OCR confusions (N→H "HEXT", "Arstotzkd"); TOD copes via the image.
 - The day-select screen exposes a trash (delete save) icon; nothing prevents TOD picking it.
+
+## Harness reset: `tools/reset_game.py` (2026-10-02)
+
+Puts the game into a known clean state with **no scripted in-game clicks**:
+
+```
+.venv-loop\Scripts\python.exe tools\reset_game.py              # restart at the main menu
+.venv-loop\Scripts\python.exe tools\reset_game.py --to-booth   # ... then TOD plays menu -> Day 1 booth and stops
+```
+
+1. Terminates `PapersPlease.exe` (psutil terminate, kill after 10 s).
+2. Copies `%APPDATA%\3909\PapersPlease\` to `runs/save_backup_<ts>/`, then deletes the progress files
+   (`save_*.sav`, `headers.sav`, `names.sav`, `stats.sav`). `settings.sav` (video/window settings),
+   `steam_autocloud.vdf` and screenshots stay. `--keep-saves` backs up without deleting. The files are
+   encrypted hex blobs, so nothing is edited in place. Steam Cloud (autocloud) could restore deleted files at
+   launch; the tool lists the folder after the relaunch so that is visible in its log.
+3. Relaunches with `steam://rungameid/239030` (a direct exe launch is restarted by the DRM).
+4. Waits for the `UnityWndClass` window of the new process, then for a non-black, still frame (4 consecutive
+   0.5 s grabs with < 0.4% changed pixels; an animated menu only gives a warning), brings it to the
+   foreground and checks the geometry: client size vs 2280x1280, 570:320 aspect (otherwise the game
+   letterboxes and the `anchors.json` fallbacks, scaled by W/570 and H/320, would be offset), integer
+   native scale, and fullscreen (client == screen).
+5. `--to-booth` runs `loop.main(["--max-ticks", 40, "--stop-on-screen", "booth_idle,documents_on_desk",
+   "--stop-consecutive", "2", "--save-raw"])`. Every click on the way (STORY, day tile, NEXT, WALK TO WORK)
+   is TOD's pick. The loop stops without acting on the second consecutive booth tick. Exit 3 if the booth
+   never came.
+
+New loop flags: `--stop-on-screen a,b` + `--stop-consecutive N` (stop without acting once request 1 says one
+of those screens N ticks running) and `--stall-stop N` (stop when the screen + state summary stay identical
+for N ticks). The stop reason goes into the tick json (`stop_reason`) and `summary.md`.
+
+New derived elements (geometry from detected boxes, logged like the other regions):
+- drop target `right edge of the desk (drag the tray tab here to put the stamp tray away)` (`tray_stow`):
+  right of the detected APPROVED stamp, at the stamp height; fallback `anchors.json` `tray_stow`. Offered
+  with the landing strips while the tray is out.
+- source `stamp tray tab (left end of the open stamp bar)`: while the tray is out its tab moves to the left
+  end of the bar, where no detector draws a box. Derived just left of the detected DENIED stamp, only when
+  request 1 says the tray is open (no fallback). Drag-only.
+
+Manual (2026-10-02): Day 1's only rule is issuing country ARSTOTZKA -> APPROVED, else DENIED; expiry and
+photo start on Day 2. Request 1 still asks and logs `expiry_after_today` / `photo_matches_person`, but on
+Day 1 (or unknown day) the state block leaves them out. Both landing strips are valid; the passport goes
+under the stamp TOD intends to use. Recovery rule D2: passport no longer visible -> close the tray (drag its
+tab right) to reveal it.

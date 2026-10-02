@@ -4,5 +4,6 @@
   "stamp_landing_denied":   [340, 180, 400, 218],
   "stamp_landing_approved": [460, 180, 520, 218],
   "counter_shelf":          [10, 212, 172, 266],
-  "desk":                   [196, 230, 340, 304]
+  "desk":                   [196, 230, 340, 304],
+  "tray_stow":              [530, 135, 568, 175]
 }
