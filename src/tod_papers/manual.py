@@ -114,8 +114,10 @@ D. The stamp tray is open but the passport is NOT lying under a stamp head (it i
    the APPROVED strip and the DENIED strip each work; put the passport under the stamp you intend to use.
    Do not drag the stamps; they are clicked. Do not drop the passport onto the tray bar itself: it slides
    behind the tray where no stamp reaches it.
-D2. RECOVERY: the entrant's passport is no longer visible anywhere on the desk (it slid behind the open
-   stamp tray, so the desk looks empty while the person is still at the window): close the stamp tray by
+D2. RECOVERY: the entrant's passport is no longer visible anywhere on the desk or the counter shelf (it
+   slid behind the open stamp tray, so the desk looks empty while the person is still at the window). If
+   the passport is on the counter shelf, that is rule B, not D2: leave the tray open and drag the passport
+   to the desk. Only for a hidden passport: close the stamp tray by
    dragging its tab (left end of the open stamp bar) back to the RIGHT (drop it on the "right edge of the
    desk" target). The hidden passport
    reappears; then continue with C.
@@ -504,7 +506,8 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
             return "E", "click " + need.upper()
         if yes(state, "document_open_on_desk"):
             return "D", "drag passport -> stamp landing strip"
-        if yes(state, "person_at_window") and (facts or {}).get("tray_flips", 0) < 4:
+        if (yes(state, "person_at_window") and (facts or {}).get("tray_flips", 0) < 4
+                and not yes(state, "document_on_counter_shelf")):
             return "D2", "drag tray tab -> right edge (close tray, reveal hidden passport)"
     if yes(state, "document_on_counter_shelf") and not yes(state, "document_open_on_desk"):
         return "B", "drag passport (counter) -> desk"

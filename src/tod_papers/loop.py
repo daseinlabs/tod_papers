@@ -445,13 +445,19 @@ def desk_facts(boxes: list, W: int, H: int, regions: list | None = None) -> dict
             continue   # the APPROVED/DENIED stamp bodies on the tray
         if _TRAY_LABEL_RE.search(up) and len(up) <= 24:
             continue   # 'ALIGN VISA BENEATH STAMP' / 'DRAG DOCUMENTS HERE'
+        if re.search(r"BENEATH|ALIGN V", up) or (re.search(r"APPRO", up) and re.search(r"DENI", up)):
+            continue   # an OCR line running across the tray bar (stamp bodies + strip label), not a page
         if t in seen:
             continue
         seen.add(t)
         lines.append(t)
         if cy >= strip_top and len(t) >= 4:
             page_x.append((b.x1, b.x2))   # text on a document page below the stamp bar
-        if ink is None and cy >= strip_top:
+        # an OCR line running across the tray (both stamp bodies and/or the ALIGN VISA BENEATH STAMP label,
+        # run 20261002_111831: 'DENIED APPROVED ISA BENEATH STAMP') is the tray, not ink on a page
+        tray_line = bool(_TRAY_LABEL_RE.search(up) or re.search(r"BENEATH|ALIGN", up)) or (
+            bool(re.search(r"APPRO", up)) and bool(re.search(r"DENI", up)))
+        if ink is None and cy >= strip_top and not tray_line:
             for word in re.findall(r"[A-Z]{3,}", up):
                 side = "approved" if _INK_APPROVED.search(word) else ("denied" if _INK_DENIED.search(word) else None)
                 if side:
@@ -1116,7 +1122,7 @@ def offline(args) -> int:
         t0 = time.perf_counter()
         boxes, vis, sinfo = get_boxes(frame, args.extractor)
         t_ex = (time.perf_counter() - t0) * 1e3
-        df = desk_facts(vis if vis is not None else boxes, frame.shape[1], frame.shape[0])
+        df = desk_facts(boxes, frame.shape[1], frame.shape[0])   # hybrid: merged (tray clutter dropped)
         asked = inspect_keys(df)
         probe, t_probe = _timed(state_probe, tod, frame, args, "unknown", asked, df)
         state = parse_state(probe)
@@ -1250,7 +1256,7 @@ def run(args) -> int:
             if sinfo is not None:
                 rec["static_layout"] = {k: v for k, v in sinfo.items() if k in (
                     "screen", "tray_open", "passport_under", "ms")}
-            df = desk_facts(vis if vis is not None else boxes, frame.shape[1], frame.shape[0])
+            df = desk_facts(boxes, frame.shape[1], frame.shape[0])   # hybrid: merged (tray clutter dropped)
             asked = inspect_keys(df)
             rec["desk_facts"], rec["inspect_asked"] = df, list(asked)
             try:
