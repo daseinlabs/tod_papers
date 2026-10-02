@@ -168,33 +168,32 @@ def state_questions(today: str = DAY_DATES["1"]) -> dict:
     frame. All noul except issuing_country (choice)."""
     return {
         "person_at_window": _noul(
-            "Look at the booth window on the left side of the screen (below the yard, above the grey-green "
-            "counter). Is a person standing there, visible from the chest up?",
-            "yes - a person (entrant) is at the booth window",
-            "no - the booth window is empty (no person behind it), or this is not the booth screen"),
+            "Look at the left third of the picture, behind the window with the height marks 1.1 to 1.9. "
+            "Is a person's head and shoulders visible there?",
+            "yes - a person's head and shoulders are visible behind that window",
+            "no - only the empty dark wall with height marks is visible there"),
         "document_on_counter_shelf": _noul(
             "Look at the grey-green counter shelf directly under the booth window (left side). Does a "
             "passport or other document lie on that shelf?",
             "yes - a passport/document lies on the counter shelf under the window",
             "no - the counter shelf is empty"),
         "document_open_on_desk": _noul(
-            "Look at the dark desk on the right. Is an OPEN passport lying on the desk, at least partly "
-            "visible (pages with a photo, name, DOB/SEX/ISS/EXP fields, or an ENTRY VISA box)? The bulletin "
-            "or rulebook alone does not count.",
-            "yes - an open passport is (at least partly) visible on the desk",
-            "no - no open passport on the desk"),
+            "Look at the dark desk on the right half of the picture. Is any part of a passport page (cream "
+            "paper with a name, numbers or a photo) visible there, even if only a thin strip sticks out above "
+            "or beside the grey stamp bar? The bulletin (dark blue sheet) does not count.",
+            "yes - some part of a cream passport page is visible on the right half",
+            "no - no passport paper visible on the right half"),
         "stamp_tray_open": _noul(
             "Is the stamp tray pulled out over the desk: a grey bar with a big red DENIED stamp and a big "
             "green APPROVED stamp on it?",
             "yes - the red DENIED and green APPROVED stamps are visible on a bar over the desk",
             "no - no stamps visible (only a small grey tab at the right edge of the desk)"),
         "document_under_stamp_heads": _noul(
-            "If the stamp tray is out: does a passport lie directly beneath one of the two stamps, in the "
-            "dark strip under the bar marked ALIGN VISA BENEATH STAMP, so that a stamp pressed now would "
-            "land on the passport's page? A passport off to the side of the stamps, or hidden above/behind "
-            "the bar, does NOT count.",
-            "yes - a passport page lies right under a stamp, in the strip below the bar",
-            "no - no passport under a stamp (or the tray is closed)"),
+            "Look at the dark band directly BELOW the grey bar with the words ALIGN VISA BENEATH STAMP, under "
+            "the red and green stamps. Is a cream passport page lying inside that dark band, under the red or "
+            "green stamp?",
+            "yes - a cream passport page lies in the dark band below the bar, under a stamp",
+            "no - that dark band is empty, or there is no stamp bar"),
         "passport_shows_stamp_mark": _noul(
             "Does a passport visible anywhere on screen carry a stamp mark: green APPROVED or red DENIED ink "
             "printed on its page (not the stamps on the tray themselves)?",
