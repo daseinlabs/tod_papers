@@ -36,8 +36,8 @@ _GREY = (128, 128, 128)
 # interactive things: lever, speaker, stamps, papers ...). CLIP-only labels on
 # scenery fragments ("pole", "road barrier", "possibly door") are weaker.
 try:
-    from .extract import GDINO_VOCAB as _GV
-    STRONG_CAPS = {c for c, _ in _GV.values()} | {"page corner"}
+    from .extract import DOC_CAPS as _DC, GDINO_VOCAB as _GV
+    STRONG_CAPS = {c for c, _ in _GV.values()} | {"page corner"} | set(_DC)
 except Exception:  # pragma: no cover - older extract.py
     STRONG_CAPS = set()
 

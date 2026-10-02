@@ -86,18 +86,44 @@ GDINO_VOCAB = {
     "ticket": ("ticket", 0.30),
     "bulletin board": ("bulletin board", 0.35),
 }
+# Counter-strip pass: a second, small Grounding DINO run on just the counter in
+# front of the entrant window (Papers, Please layout; frame fractions
+# x1,y1,x2,y2), with its own prompt so the main prompt's scores are untouched
+# (adding phrases to one prompt shifts every score: the bulletin's tape turned
+# into a "loudspeaker"). On the full frame the closed passport lying there
+# scores at most "rubber stamp" 0.25 / "green passport" 0.50 -- and "green
+# passport" also fires 0.56 on the green APPROVED stamp -- so only inside the
+# strip does a document-like hit become "document on counter".
+COUNTER_QUERIES = ("green passport", "small closed booklet", "passport", "document", "folded paper")
+COUNTER_STRIP = (0.0, 0.645, 0.315, 0.865)
+COUNTER_DOC_MIN = 0.25         # passport 0.34-0.36 on 221705 raw_0027..39; empty counter <= 0.19
+COUNTER_DOC_MAX_FRAC = 0.35   # of the strip area (whole-strip hits are the counter itself)
+COUNTER_DOC_MIN_PX = 40       # min side, frame px
+COUNTER_CAP = "document on counter"
+COUNTER_PASS = os.environ.get("TOD_COUNTER_PASS", "1") != "0"
+COUNTER_SHORT = 320           # short side the strip crop is resized to for GDINO
 # detections of these (large ones) delimit a paper -> page corner at its bottom-right
 PAPER_CAPS = {"folded page corner", "passport booklet", "paper document", "ticket"}
 PAPER_MIN_FRAC = 0.03
 # CLIP zero-shot vocabulary for crops nothing else labelled
 # (no lever / speaker / page-corner classes here: CLIP put those on fence posts
 # and slats; Grounding DINO owns them)
-CLIP_VOCAB = ["red rubber stamp", "green rubber stamp", "passport booklet", "paper document", "book",
+# "passport booklet" was dropped: CLIP put it on the rulebook (0.47); with
+# closed/open passport + rulebook classes the rulebook reads "rulebook / ring
+# binder" 0.64 and the open passport on the desk "open passport" 0.74.
+CLIP_VOCAB = ["red rubber stamp", "green rubber stamp", "closed passport", "open passport",
+              "rulebook / ring binder", "paper document", "book",
               "person face", "button", "clock", "ticket", "bulletin board", "crowd of people", "soldier",
               "fence", "pole", "wall", "concrete ground", "road barrier", "window shutter", "drawer", "tray",
               "weighing scale", "speaker grille", "envelope", "map", "building", "logo", "arrow",
               "dark empty background", "desk", "booth", "window", "door", "car", "flag", "photo"]
 CLIP_MIN_P = 0.25
+# document labels: CLIP is better at telling passport / rulebook / bulletin
+# apart than Grounding DINO, so for boxes GDINO calls a paper/passport CLIP
+# gets a second say, and wins when it picks one of these with p >= CLIP_DOC_P.
+DOC_CAPS = {"closed passport", "open passport", "rulebook / ring binder", COUNTER_CAP}
+CLIP_DOC_P = 0.4
+CLIP_OPEN_TEXT_P = 0.65
 
 
 @dataclass
@@ -310,6 +336,7 @@ class _GDino:
                 cur.append(i)
         self.phrases = phrases
         self.spans = spans[: len(phrases)]
+        self.tin_doc = tok([" . ".join(COUNTER_QUERIES) + " ."], return_tensors="pt").to(self.dev)
         self.mean = torch.tensor([0.485, 0.456, 0.406], device=self.dev).view(1, 3, 1, 1)
         self.std = torch.tensor([0.229, 0.224, 0.225], device=self.dev).view(1, 3, 1, 1)
 
@@ -346,6 +373,40 @@ class _GDino:
                 continue
             out_d.append(d)
         return out_d
+
+
+    def counter(self, frame: np.ndarray) -> list[tuple]:
+        """Second pass on the counter strip only -> [(COUNTER_CAP, score, x1, y1, x2, y2)]."""
+        torch = self.torch
+        H, W = frame.shape[:2]
+        X1, Y1 = int(COUNTER_STRIP[0] * W), int(COUNTER_STRIP[1] * H)
+        X2, Y2 = int(COUNTER_STRIP[2] * W), int(COUNTER_STRIP[3] * H)
+        crop = frame[Y1:Y2, X1:X2]
+        ch, cw = crop.shape[:2]
+        if ch < 32 or cw < 32:
+            return []
+        h = COUNTER_SHORT
+        w = int(round(cw * h / ch / 32) * 32)
+        x = cv2.resize(crop, (w, h), interpolation=cv2.INTER_AREA if h < ch else cv2.INTER_NEAREST)
+        x = torch.from_numpy(x[..., ::-1].copy()).to(self.dev).permute(2, 0, 1)[None].half() / 255
+        x = ((x - self.mean) / self.std).half()
+        with torch.inference_mode():
+            out = self.model(pixel_values=x, pixel_mask=torch.ones((1, h, w), dtype=torch.long, device=self.dev),
+                             **self.tin_doc)
+            score = out.logits[0].float().sigmoid().max(-1).values
+            bx = out.pred_boxes[0].float()
+            keep = score >= COUNTER_DOC_MIN
+            score, bx = score[keep].cpu().numpy(), bx[keep].cpu().numpy()
+        dets = []
+        for sc, (cx, cy, bw, bh) in sorted(zip(score, bx), key=lambda t: -t[0]):
+            if bw * bh > COUNTER_DOC_MAX_FRAC or min(bw * cw, bh * ch) < COUNTER_DOC_MIN_PX:
+                continue
+            d = (COUNTER_CAP, float(sc), X1 + max(0, int((cx - bw / 2) * cw)), Y1 + max(0, int((cy - bh / 2) * ch)),
+                 X1 + min(cw - 1, int((cx + bw / 2) * cw)), Y1 + min(ch - 1, int((cy + bh / 2) * ch)))
+            if any(iou(Box(*d[2:]), Box(*o[2:])) > 0.3 for o in dets):
+                continue
+            dets.append(d)
+        return dets
 
 
 class _Clip:
@@ -761,7 +822,10 @@ def _resolve_parts(dets: list[tuple]) -> list[tuple]:
     out = []
     for d in dets:
         bd = Box(*d[2:])
-        cont = [e for e in dets if e is not d and e[0] != d[0] and e[0] != "folded page corner"
+        if d[0] == COUNTER_CAP:
+            out.append(d)
+            continue
+        cont = [e for e in dets if e is not d and e[0] != d[0] and e[0] not in ("folded page corner", COUNTER_CAP)
                 and Box(*e[2:]).area > 1.6 * bd.area and _contain_frac(bd, Box(*e[2:])) >= 0.85]
         if cont and d[0] != "folded page corner":
             c = max(cont, key=lambda e: e[1])
@@ -774,7 +838,97 @@ def _clip_caption(frame: np.ndarray, boxes: list[Box], clip) -> None:
     if clip is None or not boxes:
         return
     for b, (lab, p) in zip(boxes, clip(frame, boxes)):
-        b.caption = lab if p >= CLIP_MIN_P else f"possibly {lab}"
+        b.caption = lab if p >= (CLIP_DOC_P if lab in DOC_CAPS else CLIP_MIN_P) else f"possibly {lab}"
+
+
+EDGE_TAB_CAP = "tab at screen edge"
+
+
+def _edge_tabs(native: np.ndarray, s: int) -> list[Box]:
+    """Narrow tall tabs sticking out of the left/right frame edge (the stamp
+    tray handle at the desk's right edge). The panel finder misses them: they
+    are open on the frame side and smaller than its minimum area. Contours on
+    the native frame padded with a 1 px black border; kept if they touch a side
+    edge, are <= 3% of the width, >= 4x as tall as wide, boxy and contrasting."""
+    H, W = native.shape[:2]
+    gray = cv2.cvtColor(native, cv2.COLOR_BGR2GRAY)
+    e = cv2.Canny(cv2.copyMakeBorder(gray, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0), 30, 90)
+    e = cv2.dilate(e, np.ones((2, 2), np.uint8))
+    cnts, _ = cv2.findContours(e, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    out: list[Box] = []
+    for c in cnts:
+        x, y, w, h = cv2.boundingRect(c)
+        x, y = x - 1, y - 1
+        if not (x <= 1 or x + w >= W - 1) or w > 0.03 * W or h < 4 * w or w < 4 or h > 0.5 * H:
+            continue
+        if cv2.contourArea(cv2.convexHull(c)) / max(1, w * h) < 0.6:
+            continue
+        x1, y1, x2, y2 = max(0, x), max(0, y), min(W, x + w), min(H, y + h)
+        m = max(2, w // 2)
+        ring = gray[max(0, y1 - m):min(H, y2 + m), max(0, x1 - m):min(W, x2 + m)].astype(np.float32)
+        inner = gray[y1:y2, x1:x2].astype(np.float32)
+        rn = ring.size - inner.size
+        if rn <= 0 or abs(float(inner.mean()) - (ring.sum() - inner.sum()) / rn) < 18:
+            continue
+        b = Box(x1 * s, y1 * s, x2 * s, y2 * s, kind="object", conf=0.5, caption=EDGE_TAB_CAP)
+        if not any(iou(b, o) > 0.5 for o in out):
+            out.append(b)
+    return out
+
+
+def _counter_docs(boxes: list[Box]) -> None:
+    """A 'document on counter' / edge-tab box replaces the untexted
+    icon/panel/object boxes that are mostly the same thing (in place)."""
+    own = (COUNTER_CAP, EDGE_TAB_CAP)
+    docs = [b for b in boxes if b.caption in own and b.kind == "object"]
+    for d in docs:
+        for b in list(boxes):
+            if b is d or b.text or b.kind == "page_corner" or b.caption in own:
+                continue
+            if iou(b, d) > 0.5 or (_contain_frac(b, d) > 0.8 and b.area > 0.3 * d.area):
+                boxes.remove(b)
+
+
+CONTROL_CAPS = {"speaker/horn", "lever handle"}
+
+
+def _drop_printed_controls(boxes: list[Box], frame_area: int) -> None:
+    """Controls do not lie on paper: a speaker/lever detection inside a texted
+    sheet (the rulebook diagram, the bulletin's tape) is a drawing -> dropped."""
+    sheets = [b for b in boxes if b.kind == "panel" and b.text and b.area >= PAPER_MIN_FRAC * frame_area]
+    for b in list(boxes):
+        if b.caption in CONTROL_CAPS and not b.text and any(
+                S.area > 4 * b.area and _contain_frac(b, S) >= 0.9 for S in sheets):
+            boxes.remove(b)
+
+
+_CLIP_RECHECK = {"passport booklet", "paper document"}
+
+
+def _clip_docs(frame: np.ndarray, boxes: list[Box], clip) -> None:
+    """Second opinion on paper-like boxes: Grounding DINO's 'passport' /
+    'document' fire on the bulletin, the rulebook and a strip of tape alike.
+    CLIP names a passport / rulebook (DOC_CAPS) with p >= CLIP_DOC_P -> that
+    label wins; a 'passport booklet' CLIP does not confirm becomes a plain
+    'paper document'."""
+    if clip is None:
+        return
+    cand = [b for b in boxes if b.caption in _CLIP_RECHECK or (b.text and b.caption in DOC_CAPS)
+            or (b.kind == "panel" and b.text and b.area >= PAPER_MIN_FRAC * frame.shape[0] * frame.shape[1])]
+    if not cand:
+        return
+    for b, (lab, p) in zip(cand, clip(frame, cand)):
+        if b.text:
+            # texted sheets: the bulletin reads 'closed passport' up to 0.63,
+            # the open passport 'open passport' 0.72 -> only that, only high
+            if lab == "open passport" and p >= CLIP_OPEN_TEXT_P:
+                b.caption = lab
+            elif b.caption in DOC_CAPS:   # crop label from before the text was attached
+                b.caption = ""
+        elif lab in DOC_CAPS and p >= CLIP_DOC_P:
+            b.caption = lab
+        elif b.caption == "passport booklet":
+            b.caption = "paper document"
 
 
 def _corners(out: list[Box], dets: list[tuple], frame_area: int) -> list[Box]:
@@ -856,7 +1010,7 @@ def describe(box: Box, W: int | None = None, H: int | None = None) -> str:
     visible: no hints about which element to use."""
     if box.text and box.kind != "page_corner":
         t = box.text if len(box.text) <= 60 else box.text[:57] + "..."
-        d = f"{box.kind} — '{t}'"
+        d = f"{box.kind} — {box.caption}: '{t}'" if box.caption in DOC_CAPS else f"{box.kind} — '{t}'"
     else:
         d = f"{box.kind} — {box.caption or 'unlabelled graphic'}"
     W = W or _LAST_WH[0]
@@ -893,6 +1047,11 @@ def extract(frame_bgr: np.ndarray) -> list[Box]:
     t = lap("icon_ms", t)
     gdino, clip = _get_labellers()
     dets = _resolve_parts(gdino(frame_bgr)) if gdino is not None else []
+    if gdino is not None and COUNTER_PASS:
+        cdets = gdino.counter(frame_bgr)
+        # what lies on the counter is the document, not whatever the full-frame
+        # pass thought it was ('rubber stamp' 0.25 on the closed passport)
+        dets = [d for d in dets if not any(_det_matches(Box(*d[2:]), Box(*c[2:])) for c in cdets)] + cdets
     t = lap("gdino_ms", t)
     panels = _panel_boxes(native, s)
     t = lap("panel_ms", t)
@@ -908,6 +1067,11 @@ def extract(frame_bgr: np.ndarray) -> list[Box]:
     boxes = _merge(texts, icons, panels, W * H)
     for cap, sc, *xy in _apply_dets(boxes, obj_dets, score):
         boxes.append(Box(*xy, kind="object", conf=round(sc, 3), caption=cap))
+    boxes += _edge_tabs(native, s)
+    _counter_docs(boxes)
+    _drop_printed_controls(boxes, W * H)
+    _clip_docs(frame_bgr, boxes, clip)
+    t = lap("merge_ms", t)
     boxes = _corners(boxes, dets, W * H)
     boxes = _dedup(boxes)
     # pad text boxes a little so markers/clicks don't sit on the glyph edge
@@ -915,7 +1079,8 @@ def extract(frame_bgr: np.ndarray) -> list[Box]:
         if b.kind == "text":
             p = max(2, s)
             b.x1, b.y1, b.x2, b.y2 = max(0, b.x1 - p), max(0, b.y1 - p), min(W - 1, b.x2 + p), min(H - 1, b.y2 + p)
-    t = lap("merge_ms", t)
+    T["merge_ms"] += (time.perf_counter() - t) * 1e3
+    t = time.perf_counter()
     T["total_ms"] = (t - t0) * 1e3
     LAST_TIMINGS.clear()
     LAST_TIMINGS.update(T)

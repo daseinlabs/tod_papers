@@ -223,8 +223,8 @@ def effect_map(before: np.ndarray, after: np.ndarray, ambient: np.ndarray | None
 # --------------------------------------------------------------------------
 
 
-BG_DESC = ("no element - click an empty part of the screen (only useful on cutscene/text screens "
-           "that have no button to press)")
+BG_DESC = ("no element - empty space at the screen centre (click it to advance cutscene/text screens "
+           "that have no button; in the booth this is free desk space to drop things on)")
 # captions that say nothing useful about what an element is; left out of the "visible:" summary
 _NOISE_CAPS = {"dark empty background", "unlabelled graphic"}
 
@@ -263,7 +263,7 @@ def visible_summary(boxes) -> str:
     for b in boxes:
         if b.kind == "background":
             continue
-        if b.text and b.kind != "page_corner":
+        if b.text and b.kind != "page_corner" and b.caption not in ex.DOC_CAPS:
             n_text += 1
             continue
         c = (b.caption or "").strip()
@@ -408,13 +408,17 @@ def current_aim(last_screen: str | None, last_goal: float | None) -> str:
     return aim
 
 
-def build_questions(src_ids: dict[str, str], all_ids: dict[str, str], source_instr: str | None = None) -> dict:
+def build_questions(src_ids: dict[str, str], all_ids: dict[str, str], source_instr: str | None = None,
+                    aim: str = "") -> dict:
+    # the action question is goal-conditioned like the source question: asked
+    # bare, TOD answered "click" 0.61 on the entrant frame although every
+    # document must be dragged (scratchpad loop4/dryrun2.md)
     return {
         "action": choice(
-            "Look at the annotated screenshot and recent history. What kind of mouse input should be performed next to make progress toward the objective?",
+            (f"{aim} " if aim else "") + "Look at the annotated screenshot and recent history. What kind of mouse input should be performed next to make progress toward the objective?",
             {
                 "click": "click one numbered element (button, menu option, text/cutscene to advance, stamp, speaker)",
-                "drag": "drag one numbered element (e.g. a document or lever) onto another numbered element",
+                "drag": "drag one numbered element (e.g. a document, or a lever) onto another numbered element or empty space",
                 "wait": "do nothing this tick (a transition/animation is in progress or nothing is actionable)",
             },
         ),
@@ -422,9 +426,12 @@ def build_questions(src_ids: dict[str, str], all_ids: dict[str, str], source_ins
             source_instr or source_instruction("default", ""),
             src_ids,
         ),
+        # no "none" option: it took 0.15-0.24 on every frame and a drag with
+        # target none is skipped; the target is only used when action == drag
         "target": choice(
-            "If the next input is a drag, which numbered element is the drop destination? If it is not a drag, answer none.",
-            {**all_ids, "none": "no drop target (not a drag)"},
+            (f"{aim} " if aim else "") + "If the next input is a drag: where should the dragged item end up - "
+            "onto which numbered element, or empty space? Not the item itself. (Ignored when the input is a click.)",
+            dict(all_ids),
         ),
         "day": choice(
             "Which in-game day is it (from bulletin, date or clock text if visible; otherwise unknown)?",
@@ -500,8 +507,12 @@ def encode_image(img: np.ndarray, fmt: str = "png", quality: int = 90) -> str:
     return f"data:{mime};base64," + base64.b64encode(buf.tobytes()).decode()
 
 
+# screens on which "empty space" is only a drop destination, never something to click/pick up
+BOOTH_SCREENS = {"booth_idle", "documents_on_desk", "stamp_tray_open", "inspect_mode"}
+
+
 def prepare(frame: np.ndarray, boxes: list[Box], aim: str, history, day: str, args,
-            stuck: "StuckTracker | None" = None, tick: int = 0) -> dict:
+            stuck: "StuckTracker | None" = None, tick: int = 0, screen: str = "") -> dict:
     """Everything between extract() and the TOD request: Set-of-Mark annotation,
     criteria (extract.describe), the visible-objects summary, questions, state
     text and the encoded (downscaled) image."""
@@ -523,8 +534,11 @@ def prepare(frame: np.ndarray, boxes: list[Box], aim: str, history, day: str, ar
             ban_lines.append(f"{verb} '{short(f.desc, 60)}' did nothing (tried {f.count}x); excluded for "
                              f"{f.banned_until - tick} more tick(s)")
     src_ids = {k: v for k, v in desc.items() if k not in banned_ids}
+    if screen in BOOTH_SCREENS:  # TOD's own screen judgement (probe)
+        src_ids = {k: v for k, v in src_ids.items() if idmap[int(k)].kind != "background"}
     visible = visible_summary(idmap.values())
-    questions = build_questions(src_ids, desc, source_instruction(args.source_style, aim))
+    questions = build_questions(src_ids, desc, source_instruction(args.source_style, aim),
+                                aim if args.source_style == "goal" else "")
     state_text = build_state_text(history, day, aim, ban_lines, visible)
     send = annotated
     if args.send_width and W > args.send_width:
@@ -565,7 +579,7 @@ def offline(args) -> int:
         probe, t_probe = fut.result()
         t_wait = (time.perf_counter() - t0) * 1e3 - t_ex
         screen = probe["screen"].value
-        P = prepare(frame, boxes, current_aim(screen, None), deque(), "unknown", args)
+        P = prepare(frame, boxes, current_aim(screen, None), deque(), "unknown", args, screen=screen)
         t1 = time.perf_counter()
         res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
         t_tod = (time.perf_counter() - t1) * 1e3
@@ -675,7 +689,7 @@ def run(args) -> int:
                 screen = last_screen or "other"
             rec["probe_wait_ms"] = round((time.perf_counter() - t0) * 1e3 - rec["extract_ms"], 1)
             aim = current_aim(screen, last_goal)
-            P = prepare(frame, boxes, aim, history, day, args, stuck=stuck, tick=tick)
+            P = prepare(frame, boxes, aim, history, day, args, stuck=stuck, tick=tick, screen=screen)
             annotated, idmap, desc, banned_ids = P["annotated"], P["idmap"], P["desc"], P["banned_ids"]
             questions, state_text = P["questions"], P["state_text"]
             rec["prep_ms"] = P["prep_ms"]
@@ -698,6 +712,11 @@ def run(args) -> int:
             action = res["action"].value
             src = str(res["source"].value)
             tgt = str(res["target"].value)
+            if action == "drag" and tgt == src:
+                # dropping an item on itself is a no-op: take TOD's best other target
+                alt = [k for k, _ in sorted(res["target"].probabilities.items(), key=lambda kv: -kv[1]) if k != src]
+                if alt:
+                    tgt = alt[0]
             day_ans = res["day"].value
             p_goal = p_true(res["goal"])
             p_src = float(res["source"].probabilities.get(src, 0.0))
