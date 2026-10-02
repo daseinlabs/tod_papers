@@ -1,0 +1,36 @@
+# Perception / extraction layer for Papers Please  (Python 3.13, Windows 11, RTX 4070 8GB)
+# Verified installed & smoke-tested 2026-10-01.
+#
+# torch/torchvision MUST come from the CUDA 12.6 index, everything else from PyPI:
+#   py -3.13 -m venv .venv-extract
+#   .venv-extract\Scripts\python -m pip install -U pip
+#   .venv-extract\Scripts\python -m pip install torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cu126
+#   .venv-extract\Scripts\python -m pip install -r requirements-extract.txt
+
+# --- detection (GPU) ---
+ultralytics==8.4.171
+
+# --- OCR (recommended: CPU) ---
+# rapidocr-onnxruntime pulls in `onnxruntime` (CPU) automatically; that is the
+# recommended runtime for OCR here (GPU onnxruntime was slower, see docs/extraction.md).
+rapidocr-onnxruntime==1.2.3
+onnxruntime==1.30.0            # CPU wheel; installed automatically by rapidocr if omitted
+
+# --- imaging ---
+opencv-python-headless==5.0.0.93
+pillow==12.3.0
+numpy==2.5.2
+
+# torch / torchvision are installed separately from the cu126 index (see header):
+# torch==2.14.1+cu126
+# torchvision==0.29.1+cu126
+
+# OPTIONAL — only if you want to experiment with GPU OCR (NOT recommended, it was
+# slower on these PaddleOCR dynamic-shape models). Requires a CUDA-12 build and
+# torch's bundled CUDA/cuDNN DLLs on the DLL search path; onnxruntime-gpu 1.23+
+# needs CUDA 13 and will NOT work with torch cu126, so pin 1.22:
+# onnxruntime-gpu==1.22.0   # install INSTEAD of onnxruntime (same module name)
+
+# OPTIONAL — EasyOCR, evaluated as an alternative OCR (GPU, torch-based). Works on
+# 3.13 but was ~1.3s and less accurate on the pixel font than RapidOCR:
+# easyocr==1.7.2
