@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+models/
+weights/
+captures/
+runs/
+*.png
+*.jpg
+!assets/**
