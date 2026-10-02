@@ -166,8 +166,13 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
   corner. Do not drag a page corner.
 
 7. OTHER SCREENS
-- Menus: click STORY, then the day tile, then the button that continues. Never click a trash/delete icon.
-- Full-screen text, newspaper or bulletin screens: click the text or the button (NEXT, WALK TO WORK).
+- Main menu (title screen): click STORY.
+- Day-select screen ("Select day to continue or start a new game"): a row of day tiles near the top left.
+  At the start the only tile is DAY 1 / NEW -- click it (it is a tile, not a button). Never click BACK,
+  QUIT, or the trash/delete icon on this screen: BACK returns to the main menu and undoes progress, the
+  trash icon deletes the save. If no day tile is drawn yet, choose wait.
+- After the day tile, the intro, newspaper and bulletin screens advance with NEXT, then WALK TO WORK takes
+  you to the booth. Full-screen text without a button: click the text.
 - End of day: click the button that continues to the next day.
 - While something is moving (the person walking in, a screen fading), choose wait.
 
@@ -462,6 +467,10 @@ def build(state: dict, history, day: str, ban_lines: list[str] | None = None, fa
     if el:
         h = f"{el}\n{h}"
     head = f"LAST {len(hist)} ACTIONS" if hist else "LAST ACTIONS"
+    nb = (facts or {}).get("menu_bounces") or 0
+    if nb >= 2:
+        h = (f"You have gone back and forth between the main menu and day select {nb} times. BACK undoes "
+             f"progress; pick a day tile.\n{h}")
     parts = [MANUAL, state_block(state, day, facts), desk_text_block(facts),
              f"{head} (oldest first; tick | what was true | input | element | effect):\n{h}"]
     if ban_lines:

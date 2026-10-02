@@ -129,13 +129,16 @@ LAYOUT: list[Element] = [
             MENU_SLOTS["story"], "title"),
     Element("endless", "text", "ENDLESS menu button (endless mode; not used)", "avoid", MENU_SLOTS["endless"], "title"),
     Element("quit_title", "icon", "quit-game button (top right; never click)", "avoid", MENU_SLOTS["quit"], "title"),
-    Element("day1_tile", "object", "Day 1 tile (NEW) -- click to start Day 1", "click", MENU_SLOTS["day1_tile"],
-            "day_select"),
+    Element("day1_tile", "object", "day tile 'DAY 1 - NEW' (top-left) -- a tile, not a button: click it to start "
+            "Day 1", "click", MENU_SLOTS["day1_tile"], "day_select+tile1"),
     Element("day2_tile", "object", "Day 2 tile -- click to continue from Day 2", "click", (86, 74, 154, 104),
             "day_select+tile2", False),
     Element("day3_tile", "object", "Day 3 tile -- click to continue from Day 3", "click", (166, 74, 234, 104),
             "day_select+tile3", False),
-    Element("back", "text", "BACK button", "click", MENU_SLOTS["bottom_button"], "btn:back"),
+    # BACK only ever leads back to the title menu (run 20261002_113830 bounced menu <-> day select 15 ticks);
+    # it is never offered on the day-select screen
+    Element("back", "text", "BACK button (returns to the previous menu)", "click", MENU_SLOTS["bottom_button"],
+            "btn:back+!day_select"),
     Element("trash", "icon", "delete-save (trash) button (never click)", "avoid", MENU_SLOTS["trash"], "day_select"),
     Element("next", "text", "NEXT button -- click to continue", "click", MENU_SLOTS["bottom_button"], "btn:next"),
     Element("walk_to_work", "text", "WALK TO WORK button -- click to go to the booth", "click",
@@ -250,7 +253,8 @@ def screen_of(n: np.ndarray) -> tuple[str, dict]:
             flags["btn:" + name] = True
             break
     if _tpl_score(n, "select_header", "select_header") >= TPL_MIN_IOU:
-        for i, el in ((2, "day2_tile"), (3, "day3_tile")):
+        # a tile is offered only when it is drawn (an off-screen / not yet painted region captures black)
+        for i, el in ((1, "day1_tile"), (2, "day2_tile"), (3, "day3_tile")):
             flags[f"tile{i}"] = bool((_crop(n, BY_NAME[el].box).max(2) > 40).mean() > 0.02)
         return "day_select", flags
     return ("button_screen" if flags else "other"), flags
@@ -294,6 +298,10 @@ def _visible(when: str, screen: str, flags: dict) -> bool:
     for cond in when.split("+"):
         if cond == "never":
             return False
+        if cond.startswith("!"):
+            if screen == cond[1:] or flags.get(cond[1:]):
+                return False
+            continue
         if cond in ("booth", "title", "day_select"):
             if screen != cond:
                 return False
@@ -509,8 +517,12 @@ def extract_static(frame_bgr: np.ndarray, targets: bool = True, informational: b
 _TRAY_LABEL = re.compile(r"BENEATH|ALIGN|DRAG DOC", re.I)
 
 
+_MENU_NAMES = {"story", "day1_tile", "day2_tile", "day3_tile"}
+_MENU_AVOID = re.compile(r"\b(BACK|QUIT|EXIT|DELETE|ENDLESS)\b", re.I)
+
+
 def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: float = 0.3,
-                 frame_wh: tuple[int, int] | None = None) -> list[Box]:
+                 frame_wh: tuple[int, int] | None = None, screen: str | None = None) -> list[Box]:
     """Static fixed-layout elements (never missed) + vision's boxes for everything
     else (document panels with identity/text, per-paper splits). A vision box
     overlapping a static fixed element (IoU >= iou_drop) is dropped. Static's own
@@ -534,6 +546,11 @@ def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: flo
     # APPROVED/DENIED text on a stamp body, the horn) is the same control: keep only the static one
     keep = [v for v in vision_boxes if all(iou(v, f) < iou_drop for f in fixed)
             and all(inside(v, f) < 0.6 for f in objs)]
+    if screen in ("title", "day_select") or any(getattr(f, "name", "") in _MENU_NAMES for f in fixed):
+        # title / day-select: the static layout has every control; vision's icon captions on the black screen
+        # ("speaker/horn" on the trash icon, "bulletin board" on the header) are clutter. Keep only OCR text
+        # that is not a back/quit/delete control.
+        keep = [v for v in keep if v.text and not _MENU_AVOID.search(v.text)]
     if frame_wh is not None and any(getattr(f, "name", "") == "horn" for f in fixed):
         # booth: vision is only asked for the DOCUMENTS (desk + counter shelf). Its boxes on the yard, the person,
         # the drawer row, the stamp bar and the tray label are clutter next to the static controls.

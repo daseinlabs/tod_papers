@@ -213,6 +213,25 @@ def _virtual_screen() -> Tuple[int, int, int, int]:
     )
 
 
+def ensure_onscreen(hwnd: int) -> Optional[Tuple[int, int]]:
+    """If the client area pokes outside the virtual desktop, move the window so the client lies inside it.
+
+    Off-screen client pixels capture as black and clicks there land nowhere (run 20261002_113830: the client
+    sat at x=-637 after launch, the left 637 px incl. the Day 1 tile were black, 3 tile clicks did nothing and
+    the loop bounced menu <-> day select for 15 ticks). Returns the new client origin, or None if unchanged."""
+    cx, cy, w, h = client_rect_physical(hwnd)
+    vx, vy, vw, vh = _virtual_screen()
+    nx = min(max(cx, vx), vx + vw - w) if w <= vw else vx
+    ny = min(max(cy, vy), vy + vh - h) if h <= vh else vy
+    if (nx, ny) == (cx, cy):
+        return None
+    wl, wt, _, _ = win32gui.GetWindowRect(hwnd)
+    win32gui.SetWindowPos(hwnd, 0, wl + (nx - cx), wt + (ny - cy), 0, 0,
+                          win32con.SWP_NOSIZE | win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE)
+    time.sleep(0.3)
+    return client_rect_physical(hwnd)[:2]
+
+
 def _abs_from_screen(sx: int, sy: int) -> Tuple[int, int]:
     """Map a physical screen pixel to the 0..65535 absolute coord space over
     the whole virtual desktop that SendInput+VIRTUALDESK expects."""

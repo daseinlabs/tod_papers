@@ -542,7 +542,8 @@ def get_boxes(frame: np.ndarray, extractor: str):
     if extractor == "static":
         return st, None, info
     vis = ex.extract(frame)
-    return layout.merge_hybrid(st, vis, frame_wh=(frame.shape[1], frame.shape[0])), vis, info
+    return (layout.merge_hybrid(st, vis, frame_wh=(frame.shape[1], frame.shape[0]), screen=(info or {}).get("screen")),
+            vis, info)
 
 
 _STATIC_REGION = {   # loop region name -> layout element (native box)
@@ -1182,6 +1183,9 @@ def offline(args) -> int:
     return 0
 
 
+MENU_AVOID_RE = re.compile(r"\b(BACK|QUIT|EXIT|DELETE|TRASH|ENDLESS)\b", re.I)
+
+
 def run(args) -> int:
     hwnd = find_game_window()
     x, y, w, h = io_win.client_rect_physical(hwnd)
@@ -1216,6 +1220,8 @@ def run(args) -> int:
     stop_run = 0
     stop_reason = None
     stall_key, stall_n = None, 0
+    screen_seq: list[str] = []
+    menu_bounces = 0
     ent = Entrant()
 
     def park_cursor():
@@ -1238,6 +1244,12 @@ def run(args) -> int:
                     row.update(action="none", effect="skipped: game not foreground")
                     raise AbortSafety(f"game window lost foreground {fg_misses} times in a row")
                 time.sleep(2.0)
+            moved = io_win.ensure_onscreen(hwnd)
+            if moved is not None:
+                print(f"[tick {tick:03d}] game client was partly off-screen; moved it to {moved}")
+                rec["window_moved_to"] = list(moved)
+                grab.close()
+                grab = io_win.Grabber(hwnd)
             park_cursor()
             time.sleep(0.1)
             frame, waited, af, stable, ambient = wait_stable(grab.grab, interval=0.15, thresh=args.stable_thresh,
@@ -1306,6 +1318,19 @@ def run(args) -> int:
                 with open(os.path.join(run_dir, f"tick_{tick:04d}.json"), "w", encoding="utf-8") as fh:
                     json.dump(rec, fh, indent=1)
                 break
+
+            # ---- menu <-> day-select bouncing (run 20261002_113830: 15 ticks of STORY, BACK, STORY ...) ------
+            if not screen_seq or screen_seq[-1] != screen:
+                if screen_seq and screen_seq[-1] == "day_select" and screen == "menu":
+                    menu_bounces += 1
+                screen_seq.append(screen)
+            facts["menu_bounces"] = menu_bounces
+            if menu_bounces >= 1 and screen in ("menu", "day_select"):
+                # after one no-progress cycle, back/quit/delete controls are not offered on menu screens
+                nb = [b for b in boxes if not MENU_AVOID_RE.search(f"{b.text} {getattr(b, 'caption', '')}")]
+                if len(nb) < len(boxes):
+                    rec["menu_avoid_dropped"] = len(boxes) - len(nb)
+                    boxes = nb
 
             # ---- REQUEST 2 (action, SoM frame) -------------------------------------
             P = prepare(frame, boxes, state, history, day, args, stuck=stuck, tick=tick, facts=facts)

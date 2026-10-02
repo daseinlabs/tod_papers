@@ -209,6 +209,9 @@ def main(argv=None) -> int:
         log(f"WARNING: {e}; continuing")
         st = {"stable_after_s": None}
     hwnd = unity_window_of({p.pid for p in game_procs()}) or hwnd
+    moved = io_win.ensure_onscreen(hwnd)
+    if moved is not None:
+        log(f"client was partly off-screen; moved it to {moved}")
     fg = loop.try_foreground(hwnd)
     geo = check_geometry(hwnd)
     log(f"stable after {st['stable_after_s']}s; foreground={fg}; client={geo['client']} style={geo['style']}")
