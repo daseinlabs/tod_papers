@@ -14,7 +14,7 @@
 # ~30 ms), g2-standard-8 (OCR is CPU-bound; g2-standard-4 has only 4 vCPUs).
 set -euo pipefail
 NAME=${NAME:-tod-extract}
-ZONE=${ZONE:-us-west4-a}
+ZONE=${ZONE:-$(cat "$(dirname "$0")/.zone" 2>/dev/null || echo us-west4-a)}
 MACHINE=${MACHINE:-g2-standard-8}          # g2-standard-4 is cheaper; see docs/remote_extraction.md
 PROJECT=${PROJECT:-$(gcloud config get-value project 2>/dev/null)}
 IMAGE_FAMILY=${IMAGE_FAMILY:-common-cu129-ubuntu-2204-nvidia-580}   # Deep Learning VM: driver + docker preinstalled
@@ -23,26 +23,27 @@ cd "$(dirname "$0")/.."
 
 case "${1:-}" in
 up)
-  $G compute instances create "$NAME" --zone="$ZONE" --machine-type="$MACHINE" \
-    --provisioning-model=SPOT --instance-termination-action=STOP --maintenance-policy=TERMINATE \
-    --image-family="$IMAGE_FAMILY" --image-project=deeplearning-platform-release \
-    --boot-disk-size=80GB --boot-disk-type=pd-balanced \
-    --metadata=install-nvidia-driver=True --labels=app=tod-extract
-  echo "waiting for ssh ..."; for i in $(seq 1 30); do $G compute ssh "$NAME" --zone="$ZONE" --command=true -- -o ConnectTimeout=10 && break; sleep 10; done
-  tar czf /tmp/tod_extract_src.tgz requirements-extract.txt deploy/requirements-server.txt deploy/fetch_models.py deploy/Dockerfile src/tod_papers/*.py
-  $G compute scp --zone="$ZONE" /tmp/tod_extract_src.tgz "$NAME":~/
-  $G compute ssh "$NAME" --zone="$ZONE" --command='set -e
-    mkdir -p tod && tar xzf tod_extract_src.tgz -C tod && cd tod
-    until nvidia-smi >/dev/null 2>&1; do echo "waiting for NVIDIA driver install..."; sleep 15; done
-    sudo docker build -f deploy/Dockerfile -t tod-extract .
-    sudo docker rm -f tod-extract 2>/dev/null || true
-    sudo docker run -d --name tod-extract --gpus all --restart unless-stopped \
-      -p 127.0.0.1:8765:8765 -e TOD_OCR_THREADS=$(nproc) tod-extract
-    until curl -fs localhost:8765/health; do sleep 5; done; echo'
-  echo "up. now: deploy/gcp_l4_spot.sh tunnel" ;;
+  T0=$(date +%s)
+  # spot L4 capacity comes and goes: try $ZONE, then the other L4 zones we have quota in
+  ZONES="$ZONE ${FALLBACK_ZONES:-us-west4-c us-west1-a us-west1-b us-west1-c us-west2-b us-west2-c us-central1-a us-central1-b us-central1-c}"
+  created=
+  for z in $ZONES; do
+    echo "== trying $z"
+    if $G compute instances create "$NAME" --zone="$z" --machine-type="$MACHINE"       --provisioning-model=SPOT --instance-termination-action=STOP --maintenance-policy=TERMINATE       --image-family="$IMAGE_FAMILY" --image-project=deeplearning-platform-release       --boot-disk-size=80GB --boot-disk-type=pd-balanced       --metadata=install-nvidia-driver=True --labels=app=tod-extract; then created=$z; break; fi
+  done
+  [ -n "$created" ] || { echo "no spot L4 capacity in: $ZONES"; exit 1; }
+  ZONE=$created; echo "$ZONE" > deploy/.zone; echo "created in $ZONE (+$(( $(date +%s) - T0 ))s)"
+  # NB on Windows gcloud drives PuTTY (plink/pscp): no OpenSSH -o flags, Windows paths for scp
+  echo "waiting for ssh ..."; for i in $(seq 1 30); do $G compute ssh "$NAME" --zone="$ZONE" --strict-host-key-checking=no --command=true && break; sleep 10; done
+  TGZ=$(mktemp -d)/tod_extract_src.tgz
+  tar czf "$TGZ" requirements-extract.txt deploy/requirements-server.txt deploy/fetch_models.py deploy/Dockerfile deploy/remote_up.sh src/tod_papers/*.py
+  command -v cygpath >/dev/null && TGZ=$(cygpath -w "$TGZ")
+  $G compute scp --zone="$ZONE" --strict-host-key-checking=no "$TGZ" "$NAME":tod_extract_src.tgz
+  $G compute ssh "$NAME" --zone="$ZONE" --strict-host-key-checking=no     --command='mkdir -p tod && tar xzf tod_extract_src.tgz -C tod && bash tod/deploy/remote_up.sh'
+  echo "up in $(( $(date +%s) - T0 ))s (zone $ZONE). now: deploy/gcp_l4_spot.sh tunnel" ;;
 tunnel)
   echo "tunnel localhost:8765 -> $NAME:8765 (Ctrl-C to close)"
-  $G compute ssh "$NAME" --zone="$ZONE" -- -N -L 8765:localhost:8765 ;;
+  $G compute ssh "$NAME" --zone="$ZONE" --strict-host-key-checking=no -- -N -L 8765:localhost:8765 ;;
 stop)   $G compute instances stop "$NAME" --zone="$ZONE" ;;
 start)  $G compute instances start "$NAME" --zone="$ZONE" ;;
 down)   $G compute instances delete "$NAME" --zone="$ZONE" --quiet ;;

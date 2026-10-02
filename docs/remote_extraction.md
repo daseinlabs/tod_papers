@@ -14,6 +14,7 @@ and send it only the frame.
 | `tools/check_remote_extract.py` | Equality and latency check: remote against local on saved frames. |
 | `deploy/Dockerfile` | CUDA 12.6 cuDNN runtime, Python 3.13 (uv), torch 2.14.1+cu126, the pinned `requirements-extract.txt` and `deploy/requirements-server.txt`. Weights (~1.3 GB) are baked in at build time by `deploy/fetch_models.py` from HF and modelscope. |
 | `deploy/docker-compose.yml` | For any Linux box with an NVIDIA GPU and nvidia-container-toolkit. Binds to loopback; reach it over an SSH tunnel. |
+| `deploy/remote_up.sh` | Runs on the VM: waits for the NVIDIA driver, installs docker.io and the nvidia runtime (the cu129 DLVM image ships nvidia-container-toolkit but **not** docker), builds the image, starts the container on 127.0.0.1:8765 and waits for `/health`. Re-run it by hand after a preemption mid-build. |
 | `deploy/gcp_l4_spot.sh` | `up / tunnel / stop / start / down / status` for one GCP L4 **spot** VM. The VM uses a Deep Learning VM image (driver and docker preinstalled), builds the image on the VM and is reached through an SSH tunnel (no public port). |
 | `deploy/modal_app.py` | Alternative: Modal serverless L4 built from the same Dockerfile. |
 
@@ -41,7 +42,8 @@ Use `TOD_EXTRACT_FMT=jpeg` only for non-pixel-art sources.
 | AWS, Azure, RunPod, Vast, Lambda | No CLI and no credential env vars. |
 | Docker | Not installed locally (there is a `~/.docker` dir). WSL is present. |
 
-No cloud resources were created.
+At the time of the design pass no cloud resources existed. The L4 VM `tod-extract` was
+created on 2026-10-02 (see "L4 measured" below).
 
 ## Measurements
 
@@ -104,18 +106,61 @@ These are estimates, not measured on an L4. After `up`, run
 `tools/check_remote_extract.py http://127.0.0.1:8765 <frames>` through the tunnel to
 get real numbers. It prints the server stage times and the network share separately.
 
+## L4 measured (2026-10-02, g2-standard-8 spot, us-west4-a)
+
+`up` to a warm `/health`: **15.5 min** wall time. That breaks down as VM create 20 s, sshd
+plus the driver install ~2 min, docker install ~1 min, image build ~7.5 min (pip ~1 min,
+weights ~45 s, layer export/unpack ~5 min), model warmup 12 s. It includes one **spot
+preemption 6 min in** (mid-build). After `start` the build was re-run by hand
+(`nohup bash tod/deploy/remote_up.sh`). Expect ~10 min without a preemption.
+Restarting a stopped VM is fast: the image and container persist, and the container
+uses `--restart unless-stopped`.
+
+Client: this laptop, over the `gcp_l4_spot.sh tunnel` SSH forward (PuTTY), with the
+game and the live loop running. There were 3 calls per frame; the median is reported.
+Server stages are in ms, and the GPU stages run alongside OCR.
+
+| Frame | boxes local / L4 | **L4 round-trip median** (3 runs) | srv total | ocr | gdino | clip | icon | merge | encode | net+HTTP | local `extract()` same session |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `20261002_003519/raw_0000` | 56 / 56 | **1.23 s** (1.19, 1.27, 1.23) | 1052 | 990 | 375 | 172 | 24 | 60 | 55 | 143 | 9.7 s |
+| `20261002_003519/raw_0014` | 67 / 67 | **1.26 s** (1.16, 1.26, 4.48) | 1038 | 988 | 350 | 194 | 24 | 48 | 50 | 187 | 5.2 s |
+| `20261002_003519/raw_0020` | 61 / 60 | **1.08 s** (5.93, 1.08, 1.08) | 967 | 924 | 431 | 203 | 24 | 41 | 48 | 51 | 5.4 s |
+| `20261002_003519/raw_0033` | 56 / 56 | **0.74 s** (0.83, 0.73, 0.74) | 617 | 602 | 354 | 185 | 31 | 13 | 48 | 93 | 3.5 s |
+| `20261001_221705/raw_0030` | 56 / 56 | **0.94 s** (0.94, 0.89, 0.96) | 786 | 744 | 371 | 172 | 23 | 41 | 60 | 42 | 4.2 s |
+| scratchpad `loop5/live_20261002` | 62 / 62 | **0.85 s** (0.80, 0.85, 0.87) | 727 | 698 | 356 | 168 | 24 | 16 | 60 | 44 | 3.8 s |
+
+- **All six medians are under 1.3 s (0.74-1.26 s)**, against 3.5-9.7 s for local
+  `extract()` in the same session. That is a 4-8x win, and better than the 2-4x
+  estimate. The tuning step (OCR threads, DINO half precision, batched CLIP) was
+  therefore not needed. Notes for later: DINO and CLIP already run fp16 and CLIP already
+  batches its crops. OCR is the critical path (600-990 ms on 8 Cascade Lake vCPUs,
+  `TOD_OCR_THREADS=8`), and the GPU stages finish inside the OCR window. The next lever
+  is g2-standard-12/16 (more OCR cores), not GPU work.
+- Two of the 18 calls were 4.5 s and 5.9 s tail outliers. The tunnel or a first-shape
+  OCR warmup are suspects; this was not investigated. Keep `TOD_EXTRACT_TIMEOUT` at
+  >=10 s.
+- **The boxes are *not* bit-identical across GPUs** (the laptop-hosted server *was*
+  identical to local). OCR text is identical everywhere, because OCR runs on the CPU.
+  fp16 YOLO/GDINO/CLIP numerics on the L4 move some icon and panel edges by 1 px. Of
+  358 boxes, 353 matched kind, text and caption within 4 px. The rest: raw_0000 had one
+  icon caption "possibly booth" vs "possibly desk"; raw_0020 lost an "arrow" icon and
+  gained a "possibly map" panel (61->60); raw_0030 gained a "possibly dark empty
+  background" panel. Every repeat on the L4 gave identical boxes, so the L4 is
+  deterministic. Stuck detection will see one shift when switching between local and
+  remote, but not from tick to tick.
+
 ## Cost
 
 | Option | $/h while on | Notes |
 |---|---|---|
-| **GCP g2-standard-8 spot, us-west4** | **~$0.57** (us-west1/central1: $0.51) | Default in `gcp_l4_spot.sh`. Preemptible: the VM stops and `start` brings it back. |
+| **GCP g2-standard-8 spot, us-west4** | **~$0.57** (us-west1/central1: $0.51) | Default in `gcp_l4_spot.sh`. **Measured:** 0.74-1.26 s median round-trip, 15.5 min to ready the first time. Preemptible: it was preempted once 6 min after creation. The VM stops, and `start` brings it back. |
 | GCP g2-standard-4 spot | ~$0.48 (us-west1/central1: $0.42) | Half the vCPUs, so slower OCR. |
 | GCP g2-standard-4 on-demand | $0.71–0.80 | No preemption. |
 | Boot disk 80 GB pd-balanced | ~$0.01/h, $8/month | Billed even when the VM is stopped. Use `down` to delete it. |
 | Modal L4 serverless | $0.80 GPU + ~$0.38 (8 cores) + ~$0.13 (16 GiB) ≈ **$1.30/h** while a container is up | Scales to zero after 10 min idle. $30/month free credit is ~20 h. Cold start ~30–60 s. |
 | RunPod / Vast / Lambda | — | No account or CLI on this machine. |
 
-A 2-hour play session on GCP g2-standard-8 spot costs about **$1.20**. Remember `stop`.
+A 2-hour play session on GCP g2-standard-8 spot costs about **$1.20**, and the first `up` costs about $0.15 (15 min). That works out to about **$0.0002 per extracted frame** at ~1 frame/s. Remember `stop`.
 
 ## Go / no-go
 
@@ -127,8 +172,10 @@ whenever the game is running:
 2. **Latency.** The laptop under game load measured 2.2–5.9 s per frame. An L4 box that
    is not running the game should give ~0.85–1.35 s end to end. That is a **2–4× win**.
    The game, the loop and the TOD requests also get the laptop's GPU and CPU back.
-3. **Correctness.** The output is bit-identical to local extract() (verified on 2
-   frames), so prompts, Set-of-Mark and stuck detection behave exactly the same.
+3. **Correctness.** Transport is lossless: the laptop-hosted server was bit-identical
+   to local. On the L4, OCR text is identical, but fp16 GPU numerics shift a few edges by
+   1 px and flip ~1 icon or panel caption per frame (see "L4 measured"). The L4 itself
+   is deterministic.
 
 The caveat: OCR is CPU-bound, and a g2's Cascade Lake vCPUs are slower per core than
 the laptop's i9. That is why the default is **g2-standard-8, not g2-standard-4**. If
@@ -159,28 +206,42 @@ set TOD_EXTRACT_URL=http://127.0.0.1:8765
 deploy/gcp_l4_spot.sh stop        # when done (stops GPU billing)
 ```
 
+**Current state (2026-10-02): VM `tod-extract` is RUNNING in us-west4-a** (recorded in
+`deploy/.zone`, which `gcp_l4_spot.sh` reads). To stop it from any shell:
+
+```
+gcloud compute instances stop tod-extract --zone=us-west4-a --project=REDACTED
+```
+
+Use `deploy/gcp_l4_spot.sh down` to delete it together with its disk, which stops the
+~$8/month disk charge.
+
 `.venv-loop` already has fastapi, uvicorn and python-multipart (pins in
 `deploy/requirements-server.txt`). The client only needs `requests`, which is already
 installed.
 
 ### loop.py change (not applied; for loop.py's owner)
 
-loop.py imports `from . import extract as ex` and calls `ex.warmup()` and
-`ex.extract(frame)`. It also uses `ex.describe`, `ex.COUNTER_CAP` and `ex.LAST_TIMINGS`,
-and those must keep pointing at the real module. Swap only the two calls:
+This is three added lines right after `from . import extract as ex` (line 45). It rebinds
+the two entry points on the module, so the `ex.warmup()` and `ex.extract(frame)` call
+sites (currently 950/958 and 1032/1085) do not change, and the diff survives line
+shifts. `ex.describe`, `ex.COUNTER_CAP`, `ex.LAST_TIMINGS` and `ex._LAST_WH` stay the
+real module's. `extract_remote` fills `LAST_TIMINGS`/`_LAST_WH` and never calls
+`ex.extract`, so there is no recursion. In remote mode no model is ever loaded on the
+laptop.
 
-```python
-# near the imports
-_EXTRACT_URL = os.environ.get("TOD_EXTRACT_URL")
-if _EXTRACT_URL: from . import extract_remote as _exr
-_extract = _exr.extract if _EXTRACT_URL else ex.extract;  _warmup = _exr.warmup if _EXTRACT_URL else ex.warmup
+```diff
+--- a/src/tod_papers/loop.py
++++ b/src/tod_papers/loop.py
+@@ -45,2 +45,5 @@
+ from . import extract as ex
++if os.environ.get("TOD_EXTRACT_URL"):  # remote extraction (docs/remote_extraction.md)
++    from . import extract_remote as _exr
++    ex.extract, ex.warmup = _exr.extract, _exr.warmup
+ from .extract import Box
 ```
 
-Then replace `ex.extract(frame)` with `_extract(frame)` (lines ~763 and ~883), and
-`ex.warmup()` with `_warmup()` (lines ~754 and ~830). Nothing else changes:
-`extract_remote` writes `ex.LAST_TIMINGS` and `ex._LAST_WH`, so
-`rec["extract_timings"]` and `ex.describe(b, W, H)` keep working. In remote mode
-`extract.py` never loads any model, so nothing extra ends up on the laptop's GPU.
+The loop is unchanged when `TOD_EXTRACT_URL` is unset.
 
 ### Modal instead of GCP
 
@@ -194,8 +255,8 @@ It is more expensive per hour, but it scales to zero and needs no stop/start.
 
 ## Not done / untested
 
-- Neither the Docker image nor the deploy scripts have been built or run (Docker is not
-  installed locally, and no cloud resources were created for this task). Expect possible
-  first-build fixes. The likely ones are the `uv` Python 3.13 install and `libgl1` for
-  opencv.
-- The L4 numbers are estimates from the 4070 measurements.
+- Built and run on GCP 2026-10-02. There were three fixes to `gcp_l4_spot.sh`/`remote_up.sh`:
+  docker is missing on the DLVM image, Windows gcloud drives PuTTY (no OpenSSH `-o`
+  flags, Windows paths for scp), and there is zone fallback for spot capacity.
+- `deploy/modal_app.py` and `docker-compose.yml` have still not been run.
+- The cause of the 2/18 tail outliers (4.5-5.9 s) is unknown.

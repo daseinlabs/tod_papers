@@ -9,3 +9,4 @@ runs/
 *.png
 *.jpg
 !assets/**
+deploy/.zone
