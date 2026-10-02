@@ -190,3 +190,155 @@ cleanest standalone reading and is the realistic unloaded number.
 - **EasyOCR/opencv install conflict:** installing EasyOCR after opencv-python can fail on
   a locked `cv2.pyd`; use opencv-python-headless.
 ```
+
+
+---
+
+# Update 2026-10-01 (evening): perception-quality pass on real game frames
+
+The sections above were written against a synthetic 640x400 frame. This pass worked on
+real 2280x1280 captures (`runs/*/raw_*.png`, `captures/*.png`) and changed
+`src/tod_papers/extract.py` as follows. The public API is unchanged:
+`extract(frame_bgr) -> list[Box]`. `Box` gains `caption: str`, and there is a new
+`describe(box, W=None, H=None) -> str`.
+
+## Current pipeline
+
+| Stage | Where | What |
+|---|---|---|
+| native frame | CPU | `frame[::4, ::4]`. The game renders 570x320 art at exactly 4x (every 4x4 cell is one colour, so sampling is lossless) |
+| OCR (worker thread, overlapped with the GPU stages) | CPU onnxruntime | RapidOCR **3.9.2**. PP-OCRv4 mobile **det** runs on a 2x nearest-neighbour copy of the native frame. Each line is re-cropped from the **native** frame with 2 px padding, upscaled **3x bilinear**, and recognised by PP-OCRv5 mobile **rec**. Short lines (<= 4 words) with a non-dictionary word get a second read from **PP-OCRv4 English rec**. The reading with the best `score + 0.15 x dictionary-word fraction` wins (dictionary = BERT uncased `vocab.txt` shipped with grounding-dino-tiny). CJK and emoji output is stripped. |
+| icons | CUDA | OmniParser v2 `icon_detect` YOLO (unchanged) |
+| open-vocab labels | CUDA fp16 | **Grounding DINO tiny**, whole frame at short side 640, fixed prompt (see `GDINO_VOCAB`) |
+| panels | CPU | contour proposals (unchanged) |
+| crop labels | CUDA fp16 | **CLIP ViT-B/16** zero-shot over `CLIP_VOCAB`, run only on icon/panel boxes that Grounding DINO did not label |
+| merge | CPU | Unchanged merge, then: GDINO detections caption the boxes they cover (IoU >= 0.5 or mutual containment). Unmatched detections become `kind="object"` boxes. Detected papers produce `page_corner` boxes. Dedup step. |
+
+Grounding DINO details:
+
+- **Part-of rule.** A detection inside a bigger detection with a different label takes the container's label. GDINO calls the stamp knobs "loudspeaker" (0.45) inside the "rubber stamp" bar.
+- **Paper-to-corner rule.** "folded page corner", "passport" and "document" all fire on the *whole sheet* (0.25–0.6), never on the corner itself. So each detected paper (>= 3% of the frame) gets a `page_corner` at its bottom-right, captioned "folded page corner" or "page corner". The synthetic corners that `_merge` proposed for panel fragments inside that paper are dropped. Synthetic corners for papers the detector missed remain as a fallback, captioned "page corner (proposed, bottom-right of paper)".
+- **Prompt choices.**
+  - "lever handle" hits a fence post. **"yellow lever"** hits the shutter lever (0.39–0.49).
+  - "loudspeaker" plus "horn speaker" are both mapped to the caption `speaker/horn`.
+  - Detections larger than 20% of the frame are ignored; the outside wall otherwise comes back as "bulletin board".
+
+Dedup: a box fully inside (>= 95%) another box with the same text (or, if untexted, the same caption) is dropped. `page_corner` boxes are always kept.
+
+`describe(box)` returns `"<kind> — '<ocr text>'"` or `"<kind> — <caption>"`, followed by
+` (top-left|top-centre|…|centre|…|bottom-right)`. The frame size defaults to the last
+frame passed to `extract()`. It describes only what is visible and gives no hint about
+which element to use. Note: `loop.py` already appends its own coarse position after
+`ex.describe(b)`, so the loop currently prints the position twice. The fix belongs to
+loop.py's owner: either drop `coarse_pos` there or call `describe(b, W, H)`.
+
+Environment flags:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `TOD_OCR_GPU=1` | off | Opt-in CUDA EP for OCR. It was slower, so CPU stays the default. |
+| `TOD_OCR_THREADS` | 8 | onnxruntime intra-op threads |
+| `TOD_OCR_SECOND=0` | on | Disables the English second-opinion recogniser |
+| `TOD_LABELS=0` | on | Disables GDINO and CLIP. Boxes then have no caption. |
+| `TOD_GDINO_SIZE` | 640 | Short side fed to GDINO |
+| `TOD_EXTRACT_VERBOSE=0` | on | Silences the per-call timing line |
+
+`LAST_TIMINGS` holds `icon_ms, gdino_ms, panel_ms, clip_ms, ocr_ms` (worker thread),
+`ocr_wait_ms, merge_ms, total_ms`.
+
+## Model files (all under `models/`)
+
+| Path | Source | Used |
+|---|---|---|
+| `icon_detect_model.pt` | microsoft/OmniParser-v2.0 `icon_detect/model.pt` | yes |
+| `rapidocr/ch_PP-OCRv4_det_mobile.onnx` | auto-downloaded by rapidocr 3.9.2 (modelscope RapidAI/RapidOCR), copied here | yes |
+| `rapidocr/ch_PP-OCRv5_rec_mobile.onnx` | same | yes |
+| `rapidocr/en_PP-OCRv4_rec_mobile.onnx` | same | yes |
+| `grounding-dino-tiny/` (659 MB) | IDEA-Research/grounding-dino-tiny | yes (also supplies `vocab.txt` for the OCR lexicon) |
+| `clip-vit-base-patch16/` | openai/clip-vit-base-patch16. The repo only has `pytorch_model.bin`; it was loaded with `CLIPModel` and re-saved with `save_pretrained`, giving `model.safetensors` | yes |
+| `florence2-base/` (447 MB) | florence-community/Florence-2-base (native transformers 5 layout) | evaluated, not used |
+| `omniparser-v2/icon_caption/` and `omniparser-caption-hf/` | microsoft/OmniParser-v2.0 `icon_caption`, converted with `scripts/convert_omniparser_caption.py` (old remote-code key layout to native `Florence2ForConditionalGeneration`; fp16; 0 unmapped / 0 unfilled keys) | evaluated, not used |
+| `owlv2-base-ensemble/` (593 MB) | google/owlv2-base-patch16-ensemble | evaluated, not used |
+
+Install, in .venv-loop:
+
+```
+.venv-loop\Scripts\python -m pip install transformers==5.18.0 rapidocr==3.9.2
+# rapidocr 3.x downloads its default models into site-packages\rapidocr\models on first use;
+# copy the three .onnx files above into models\rapidocr\ (extract.py loads them from there)
+# HF snapshots: huggingface_hub.snapshot_download(repo, local_dir="models/<name>")
+```
+
+## OCR: before and after (real frames)
+
+"Before" means the previous `extract.py`: rapidocr_onnxruntime 1.2.3 (PP-OCRv3), native frame upscaled 2x nearest-neighbour, one full pass.
+
+| Frame | Before | After |
+|---|---|---|
+| booth `215501/raw_0003` | `DERED` | `DENIED` |
+| | `APPROVED` | `APPROVED` |
+| | `ALICH YISA BEHEATH STAMP` | `ALIGN VISA BENEATH STAMP` |
+| | `Glory to Arstotzkd.` | `Glory to Arstotzka.` |
+| | `…restricted to Arstotzkon citizens only` | `…restricted to Arstotzkan citizens only.` |
+| | `Stamp passport EHTRy VIsA and` | `stamp passport ENTRy VIsA and` |
+| | `Grestin Bord` / `Checkpd` | `Grestin Bordr Checkpoint.` |
+| | `M1.0.4` | `M.O.A` |
+| NEXT screen `214249/raw_0004` | `HEXT` | `NEXT` |
+| menu `captures/launch_01` | `EHDLESS`, (PAPERS missed) | `ENDLESS`, `PAPERS`, `PLEASE` |
+| booth `221705/raw_0030` | `Artotrkan Ministry +f Admissi+n`, `Shutt2r`, `Count2r`, `Timz &: Dat` | `Arrtotzkan.. Minirtry or Admizzion`, `Shutter`, `Counter`, `Time & Date` |
+| newspaper `214516/raw_0002` | `Ho42mb2r 23rd, 1982`, `N+ Charga`, `Aftar 6 Long 4ears` | `Hovember 23rd, 1982`, `No Charge`, `Rfter 6 Long Years` |
+
+Still wrong: "Arstotzkan" on the small Inspector's-booth sheet, "Hovember", "Rfter", and "Welcome toy / sition at". The last one is a line partly hidden behind the stamp bar.
+
+Variants tried. No single recogniser or preprocessing got all five targets (ALIGN VISA BENEATH STAMP / APPROVED / DENIED / NEXT / ARSTOTZKA):
+
+- **PP-OCRv3 (1.2.3), any preprocessing** (nearest/area 1x, 2x/3x NN, full 4x frame, Otsu/adaptive binarisation): fails ALIGN, DENIED and NEXT.
+- **Native 1x OCR.** The scoping agent's "native 1x reads STAMP/APPROVE/DENY" result came from the synthetic frame. It is **not confirmed on real booth frames**: at 1x the detector finds only 6 of the 15 lines on `215501/raw_0003` and misses DENIED, APPROVED and ALIGN entirely. 1x does read NEXT.
+- **PP-OCRv5 mobile.**
+  - 3x nearest-neighbour: reads everything except NEXT and ENDLESS (N/H confusion).
+  - 3x bilinear: reads everything except APPROVED (`RPPROUED`).
+- **PP-OCRv4 English, 3x bilinear:** 7 of 8 key words; reads NEXT as `HEXT`.
+- **PP-OCRv6 small:** `HEXT` in every variant.
+- **PP-OCRv5 server:** 10–50x slower, and still `HEXT`/`APPROUED`.
+- **Chosen: v5 + v4-en + dictionary bonus.** This combination is the only one that reads all five targets plus ENDLESS, PAPERS and PLEASE.
+- **Florence-2-base `<OCR>` on padded line crops** read every target correctly, but took 4.7–5 s for 19 crops on this GPU, so it was rejected.
+
+## Labels: Florence captions vs OWLv2 vs Grounding DINO (booth frames)
+
+| Element (booth `215501/raw_0003`, `221705/raw_0030`) | Florence-2-base `<CAPTION>` per crop | OmniParser icon_caption | OWLv2 (full frame) | **Grounding DINO tiny (full frame)** | CLIP crop |
+|---|---|---|---|---|---|
+| bulletin page corner (bottom-right) | "a black and white photo of a man in a suit and tie" | "A simple math problem" | only low-score boxes in the wrong places | finds the **whole sheet** as "folded page corner" (0.29) / "passport" (0.38). Corner placed at its bottom-right | n/a |
+| shutter lever (yellow, left) | generic photo caption | "A step ladder" | not detected | "yellow lever" 0.39–0.49. ("lever handle" hits a fence post) | "possibly lever handle" on fragments |
+| speaker horn on booth roof | generic | "unanswerable" | "speaker horn" fired on the stamp knobs instead | "loudspeaker" 0.22–0.35 on 221705 / 214516; **missed on 215501** (0.18) | "possibly tray" |
+| DENIED / APPROVED stamps | "A red box with the word denied on it" | – | stamp knobs labelled "speaker horn" | "rubber stamp" 0.30 (knobs relabelled via the part-of rule) | – |
+| clock | – | – | found | 0.26–0.39 | "clock" |
+| entrant at window | – | – | – | "person face" 0.45 | "person face" |
+| rulebook on desk | – | – | – | "passport" 0.30 | "passport booklet" |
+| latency | ~37 s for 59 crops (vision tower ~1.8 s per 8x768², sdpa math fallback) | similar | 560–1150 ms fp16 | **250–370 ms fp16 @640 (quiet GPU)**, 750–1150 ms (contended) | 90–250 ms quiet, 450–650 ms contended (~40 crops) |
+
+Conclusion: Florence-2 captioning (base or OmniParser fine-tune) is unusable on this pixel
+art and far over budget. Grounding DINO is the only model that puts correct labels on the
+lever, horn, stamps, clock, entrant and papers. CLIP fills in the remaining crops; its
+labels on small YOLO fragments of the outside scenery are often noise ("pole", "road
+barrier", "door"). It also keeps a CLIP-only label prefixed "possibly" when top-1
+probability is below 0.25.
+
+## Measured latency (real 2280x1280 booth frames, warm)
+
+| Condition | icon | gdino | clip | ocr (thread) | **total** |
+|---|---|---|---|---|---|
+| quiet machine (earlier in the session) | 40–48 ms | 250–370 ms | 170–230 ms | 410–810 ms | **515–815 ms** |
+| contended: game + live loop + other agents running; GPU P5 at 1050 MHz | 170–220 ms | 1.1–1.2 s | 0.55–0.65 s | 2.1–3.5 s | **2.2–3.5 s** |
+| old extract.py, same contended run | 200–250 ms | – | – | 1.4–4.8 s | 1.6–5.0 s |
+
+The OCR worker is the critical path. GPU work (YOLO → GDINO → CLIP) overlaps it. The
+≤ 1.0 s target holds on a quiet machine and not under contention. When contended, the new
+pipeline costs about as much as the old OCR-only one did. To trim further:
+
+- `TOD_OCR_SECOND=0` saves about 30% of OCR, at the cost of NEXT/APPROVED-type ambiguities.
+- `TOD_LABELS=0` drops GDINO and CLIP.
+- `TOD_GDINO_SIZE=512` makes GDINO faster but gives lower lever scores.
+
+Test dumps (described criteria lists, SoM images, before/after JSON) for menu,
+newspaper, NEXT and two booth frames are in the session scratchpad `percept/`
+(`criteria_*.txt`, `som_*.jpg`, `percept_summary.json`).

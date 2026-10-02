@@ -34,3 +34,20 @@ numpy==2.5.2
 # OPTIONAL — EasyOCR, evaluated as an alternative OCR (GPU, torch-based). Works on
 # 3.13 but was ~1.3s and less accurate on the pixel font than RapidOCR:
 # easyocr==1.7.2
+
+# ---------------------------------------------------------------------------
+# 2026-10-01 perception-quality pass (installed & verified in .venv-loop, which
+# reaches torch/ultralytics/rapidocr_onnxruntime via .venv-extract's site-packages):
+#   .venv-loop\Scripts\python -m pip install transformers==5.18.0 rapidocr==3.9.2
+# --- OCR v2: RapidOCR 3.x (PP-OCRv4 det + PP-OCRv5 rec + PP-OCRv4 en rec) ---
+rapidocr==3.9.2
+omegaconf==2.3.1
+shapely==2.1.2
+pyclipper==1.4.0
+# --- labels: Grounding DINO tiny + CLIP ViT-B/16 (CUDA fp16) ---
+transformers==5.18.0
+tokenizers==0.23.2
+safetensors==0.8.0
+huggingface_hub==1.33.0
+regex==2026.9.29
+# NOTE: rapidocr 3.9.2 pulls in opencv-python next to opencv-python-headless (both 5.0.0.93); harmless.
