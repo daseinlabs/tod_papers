@@ -88,7 +88,14 @@ def backup_and_clear(ts: str, keep: bool) -> dict:
     if not keep:
         for pat in PROGRESS_GLOBS:
             for f in glob.glob(os.path.join(SAVE_DIR, pat)):
-                os.remove(f)
+                for i in range(20):   # the killed game can hold names.sav for a moment (WinError 32)
+                    try:
+                        os.remove(f)
+                        break
+                    except PermissionError:
+                        if i == 19:
+                            raise
+                        time.sleep(0.5)
                 info["removed"].append(os.path.basename(f))
     info["after"] = sorted(os.listdir(SAVE_DIR))
     log(f"removed {info['removed'] or 'nothing'}; kept {[f for f in info['after'] if f.endswith(('.sav', '.vdf'))]}")

@@ -47,6 +47,7 @@ if os.environ.get("TOD_EXTRACT_URL"):   # cloud L4 extraction (docs/remote_extra
     from . import extract_remote as _exr
     ex.extract, ex.warmup = _exr.extract, _exr.warmup
 from .extract import Box
+from . import layout
 from . import manual as man
 from .som import annotate
 from .tod_client import TodClient, choice, noul
@@ -519,6 +520,46 @@ CARRY_COUNTRY_P = 0.85
 
 
 # --------------------------------------------------------------------------
+# extractor choice: vision (extract.extract, models), static (layout.py, no models), hybrid (both)
+# --------------------------------------------------------------------------
+
+
+def get_boxes(frame: np.ndarray, extractor: str):
+    """(boxes the loop marks, vision boxes for the desk OCR facts or None, static-layout info or None).
+    hybrid = static boxes for every fixed control (horn, lever, tray tab, whole stamps, drawers) + vision
+    boxes for the documents (identity, OCR text, per-paper split); drop targets then come from the static
+    layout (static_regions)."""
+    if extractor == "vision":
+        return ex.extract(frame), None, None
+    st = layout.extract_static(frame, targets=False)
+    info = {**layout.LAST.get("flags", {}), "screen": layout.LAST.get("screen")}
+    if extractor == "static":
+        return st, None, info
+    vis = ex.extract(frame)
+    return layout.merge_hybrid(st, vis, frame_wh=(frame.shape[1], frame.shape[0])), vis, info
+
+
+_STATIC_REGION = {   # loop region name -> layout element (native box)
+    "stamp_landing_denied": "landing_denied", "stamp_landing_approved": "landing_approved",
+    "tray_stow": "tray_stow", "hand_back": "hand_back", "desk": "desk",
+}
+
+
+def static_regions(frame: np.ndarray, tray_is_open: bool):
+    """Drop targets from the fixed screen layout (layout.py), scaled to the frame: the two stamp landing strips
+    and the tray stow edge while the tray is open (layout.tray_open on the pixels, not TOD's answer), the person
+    at the window (hand back) and the desk. Returns (regions, {name: 'static'})."""
+    H, W = frame.shape[:2]
+    names = (["stamp_landing_denied", "stamp_landing_approved", "tray_stow"] if tray_is_open else [])
+    names += ["hand_back", "desk"]
+    out = []
+    for name in names:
+        x1, y1, x2, y2 = layout.scale_box(layout.BY_NAME[_STATIC_REGION[name]].box, W, H)
+        out.append(Box(x1, y1, x2, y2, "", "region", 0.0, caption=REGION_CAPS[name]))
+    return out, {n: "static" for n in names}
+
+
+# --------------------------------------------------------------------------
 # drop-target regions (stamp landing strip, counter shelf, desk)
 # --------------------------------------------------------------------------
 
@@ -550,6 +591,9 @@ _STAMP_TXT = re.compile(r"^\W*(APPRO\w*|DENI\w*)\W*$", re.I)
 
 
 def _stamp_side(b: Box, frame: np.ndarray):
+    name = getattr(b, "name", "")
+    if name in ("stamp_denied", "stamp_approved"):
+        return name[6:]
     t = (b.text or "").upper()
     if _STAMP_TXT.match(t):
         return "approved" if t.strip(" '\"").startswith("APPRO") else "denied"
@@ -698,7 +742,7 @@ def derive_tray_handle(boxes: list, frame: np.ndarray, state: dict):
     detector draws a box. Derived from the detected DENIED stamp (the left stamp):
     a narrow box just left of it, same height. Only offered when request 1 says the
     tray is open and the DENIED stamp was detected (never a fallback)."""
-    if not man.yes(state, "stamp_tray_open"):
+    if not man.yes(state, "stamp_tray_open") or any(getattr(b, "name", "") == "tray_tab_open" for b in boxes):
         return None
     H, W = frame.shape[:2]
     den = [b for b in boxes if b.center[0] > 0.4 * W and 0.2 * H < b.center[1] < 0.7 * H
@@ -737,7 +781,8 @@ def build_questions(src_ids: dict, tgt_ids: dict) -> dict:
         ),
         "source": choice(
             "Following the manual and what is currently true on screen: which numbered element is clicked "
-            "next, or, for a drag, picked up? Use the number drawn on its marker.",
+            "next, or, for a drag, picked up? Use the number drawn on its marker. Stamping: click the stamp the "
+            "passport is lying under; if you want the other decision, first drag the passport to the other strip.",
             src_ids,
         ),
         "target": choice(
@@ -843,10 +888,20 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     screen = state.get("screen", {}).get("value", "")
     # a person at the window means the booth even if the screen answer drifted (counter shelf must be offered)
     booth = screen in BOOTH_SCREENS or man.yes(state, "person_at_window", 0.6)
-    regions, region_src = derive_regions(boxes, frame, state) if booth else ([], {})
+    static = getattr(args, "extractor", "vision") != "vision"
+    sinfo = (facts or {}).get("static") or {}
+    if booth and static:
+        regions, region_src = static_regions(frame, bool(sinfo.get("tray_open", man.yes(state, "stamp_tray_open"))))
+    else:
+        regions, region_src = derive_regions(boxes, frame, state) if booth else ([], {})
     if facts is not None:
-        facts["passport_under"] = passport_under(facts.get("page_xr"), regions) \
-            if booth and man.yes(state, "stamp_tray_open") else []
+        if booth and static and sinfo.get("screen") == "booth":
+            # pixel check of the strip under each stamp head (layout.passport_under), not the OCR x-range
+            facts["passport_under"] = list(sinfo.get("passport_under") or [])
+            facts["under_source"] = "static"
+        else:
+            facts["passport_under"] = passport_under(facts.get("page_xr"), regions) \
+                if booth and man.yes(state, "stamp_tray_open") else []
     handle = derive_tray_handle(boxes, frame, state) if booth else None
     if handle is not None:
         boxes = list(boxes) + [handle]
@@ -906,7 +961,8 @@ TRAY_FLIP_LIMIT = 4
 
 
 def _is_tray_tab(b) -> bool:
-    return b is not None and "stamp tray tab" in (b.caption or "")
+    return b is not None and ("stamp tray tab" in (b.caption or "")
+                              or getattr(b, "name", "") in ("tray_tab", "tray_tab_open"))
 
 
 def decide(res, P: dict) -> dict:
@@ -927,6 +983,18 @@ def decide(res, P: dict) -> dict:
                                                     f"tab #{src} skipped, re-picked #{alt[0]}")
             src = alt[0]
     tgt = str(res["target"].value)
+    sb = P["idmap"].get(int(src)) if src.isdigit() else None
+    if action == "drag" and _is_tray_tab(sb):
+        # the tab only toggles the tray: an open tray's tab goes RIGHT onto the stow edge, a closed tray's tab LEFT
+        # onto the desk. Compare dry-run 2026-10-02 (003519_0033, loop5 live): TOD picked the open tab but dropped
+        # it on a stamp landing strip, where it does nothing.
+        is_open = "left end of the open" in (sb.caption or "") or getattr(sb, "name", "") == "tray_tab_open"
+        want = REGION_CAPS["tray_stow"] if is_open else REGION_CAPS["desk"]
+        ok = [k for k, b in P["idmap"].items() if b.kind == "region" and b.caption == want]
+        if ok and tgt != str(ok[0]):
+            note = (note + "; " if note else "") + (f"tray tab dragged onto #{tgt} -> #{ok[0]} "
+                                                    f"({'stow edge' if is_open else 'desk'})")
+            tgt = str(ok[0])
     if action == "drag" and tgt == src:
         # dropping an item on itself is a no-op: take TOD's best other target
         alt = [k for k, _ in sorted(res["target"].probabilities.items(), key=lambda kv: -kv[1]) if k != src]
@@ -948,15 +1016,26 @@ class Entrant:
     started: int = 0
     last_under: list = field(default_factory=list)   # stamp heads the passport lay under this tick
     tray_seen: list = field(default_factory=list)    # [(tick, tray_open)] -- open/close oscillation check
+    missed_stamps: list = field(default_factory=list)  # [(tick, side)] stamp pressed, passport under the other head
+    hb_drop: int | None = None   # tick of the last document drag onto the person that changed the screen
+    log: list = field(default_factory=list)          # [(tick, why)] every reset (for the run report)
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
+        self.hb_drop, self.missed_stamps = None, []
+        self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
 
     def observe(self, tick: int, state: dict) -> None:
         """Start-of-tick update from request 1."""
         person = man.yes(state, "person_at_window")
-        if not person and (self.handed_back is not None or not (
+        if self.hb_drop is not None and tick - self.hb_drop <= 3 and not person:
+            # a document was dropped on the person and the person is gone now: they took it and left,
+            # whether or not a stamp was detected (run 101448: the stamp was missed, memory carried over)
+            self.reset(tick, f"hand-back drop at tick {self.hb_drop} + person gone")
+        elif self.hb_drop is not None and tick - self.hb_drop > 3:
+            self.hb_drop = None   # the person stayed: the drop was not a hand-back
+        elif not person and (self.handed_back is not None or not (
                 man.yes(state, "document_open_on_desk") or man.yes(state, "document_on_counter_shelf"))):
             if self.country or self.stamp_clicks or self.handed_back is not None:
                 self.reset(tick, "window empty")
@@ -970,20 +1049,36 @@ class Entrant:
             return
         if action == "click":
             side = _stamp_side(sb, frame)
-            if side and side in (self.last_under or []) and man.yes(state, "stamp_tray_open"):
-                self.stamp_clicks.append((tick, side))
-            elif (sb.caption == "speaker/horn" and self.handed_back is not None
-                  and not man.yes(state, "person_at_window")):
+            if side:
+                # any click on a stamp (knob or body) that changed the screen is a stamp press (run 101448 t11:
+                # the knob click stamped the passport but was not recorded). Only when the strip check says the
+                # passport lies under the OTHER head only is it logged as a press that marked nothing.
+                under = self.last_under or []
+                if under and side not in under:
+                    self.missed_stamps.append((tick, side))
+                else:
+                    self.stamp_clicks.append((tick, side))
+            elif ((sb.caption == "speaker/horn" or getattr(sb, "name", "") == "horn")
+                  and self.handed_back is not None and not man.yes(state, "person_at_window")):
                 self.reset(tick, "horn clicked after hand-back")
         elif (action == "drag" and tb is not None and tb.kind == "region"
               and tb.caption == REGION_CAPS["hand_back"] and man.input_class(sb, True) == "drag"
               and sb.caption not in (TRAY_HANDLE_CAP, "tab at screen edge", "lever handle")
-              and (self.stamp_clicks or man.yes(state, "passport_shows_stamp_mark"))):
-            self.handed_back = tick
+              and getattr(sb, "name", "") not in ("tray_tab", "tray_tab_open", "shutter_lever")):
+            if self.stamp_clicks or man.yes(state, "passport_shows_stamp_mark"):
+                # a stamped passport dropped on the person and the frame changed: this entrant is done. Reset
+                # now (the next entrant must not inherit the country/stamps) but keep handed_back so the
+                # manual says "wait for them to leave, then click the horn".
+                done = (f"hand-back drop at tick {tick} (country={(self.country or {}).get('value')}, "
+                        f"stamps={[sd for _, sd in self.stamp_clicks] or 'mark only'})")
+                self.reset(tick, done)
+                self.handed_back = tick
+            else:
+                self.hb_drop = tick   # unstamped: reset only if the person then leaves (observe)
 
     def facts(self, tick: int, df: dict) -> dict:
         return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
-                "handed_back": self.handed_back, "tray_flips": self.tray_flips()}
+                "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips()}
 
     def tray_flips(self) -> int:
         """Open<->closed changes of the stamp tray over the last 8 ticks with no stamp click in between.
@@ -1019,9 +1114,9 @@ def offline(args) -> int:
             print(f"[offline] cannot read {path}")
             continue
         t0 = time.perf_counter()
-        boxes = ex.extract(frame)
+        boxes, vis, sinfo = get_boxes(frame, args.extractor)
         t_ex = (time.perf_counter() - t0) * 1e3
-        df = desk_facts(boxes, frame.shape[1], frame.shape[0])
+        df = desk_facts(vis if vis is not None else boxes, frame.shape[1], frame.shape[0])
         asked = inspect_keys(df)
         probe, t_probe = _timed(state_probe, tod, frame, args, "unknown", asked, df)
         state = parse_state(probe)
@@ -1029,6 +1124,7 @@ def offline(args) -> int:
         ent = Entrant()
         ent.observe(0, state)
         facts = ent.facts(0, df)
+        facts["static"] = sinfo
         P = prepare(frame, boxes, state, deque(), "unknown", args, facts=facts)
         t1 = time.perf_counter()
         res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
@@ -1036,7 +1132,8 @@ def offline(args) -> int:
         D = decide(res, P)
         step = man.situation(state, "1", facts)
         r = {
-            "frame": path, "n_boxes_raw": len(boxes), "n_sources": len(P["src_ids"]), "n_targets": len(P["tgt_ids"]),
+            "frame": path, "extractor": args.extractor, "passport_under": facts.get("passport_under"),
+            "n_boxes_raw": len(boxes), "n_sources": len(P["src_ids"]), "n_targets": len(P["tgt_ids"]),
             "extract_ms": round(t_ex), "state_ms": round(t_probe), "tod_ms": round(t_tod),
             "image_kb": P["image_kb"], "state": _clean_state(state), "state_line": state_line(state),
             "inspect_asked": list(asked), "desk_facts": df,
@@ -1146,10 +1243,14 @@ def run(args) -> int:
 
             # ---- extract, then REQUEST 1 (state, unmarked frame + desk OCR text) ------
             t0 = time.perf_counter()
-            boxes = ex.extract(frame)
+            boxes, vis, sinfo = get_boxes(frame, args.extractor)
             rec["extract_ms"] = round((time.perf_counter() - t0) * 1e3, 1)
+            rec["extractor"] = args.extractor
             rec["extract_timings"] = {k: round(v, 1) for k, v in getattr(ex, "LAST_TIMINGS", {}).items()}
-            df = desk_facts(boxes, frame.shape[1], frame.shape[0])
+            if sinfo is not None:
+                rec["static_layout"] = {k: v for k, v in sinfo.items() if k in (
+                    "screen", "tray_open", "passport_under", "ms")}
+            df = desk_facts(vis if vis is not None else boxes, frame.shape[1], frame.shape[0])
             asked = inspect_keys(df)
             rec["desk_facts"], rec["inspect_asked"] = df, list(asked)
             try:
@@ -1172,8 +1273,9 @@ def run(args) -> int:
                 day = dv["value"]
             ent.observe(tick, state)
             facts = ent.facts(tick, df)
+            facts["static"] = sinfo
             rec["entrant"] = {"country": ent.country, "stamp_clicks": list(ent.stamp_clicks),
-                              "handed_back": ent.handed_back}
+                              "missed_stamps": list(ent.missed_stamps), "handed_back": ent.handed_back}
             step = man.situation(state, day if day in DAY_RULES else "1", facts)
             sline = state_line(state)
             rec.update(state=_clean_state(state), state_line=sline,
@@ -1351,6 +1453,10 @@ def run(args) -> int:
             "dry_run": args.dry_run, "args": " ".join(sys.argv[1:]),
             "last state": state_line(last_state) if last_state else "-",
             "stop reason": stop_reason or "max ticks",
+            "extractor": args.extractor,
+            "entrant resets": "; ".join(f"t{t}: {w}" for t, w in ent.log) or "-",
+            "remote extract fallbacks": len(getattr(sys.modules.get("tod_papers.extract_remote"), "FALLBACK_LOG", [])),
+            "TOD retries": getattr(tod, "total_retries", 0),
         })
         print(f"[loop] done. TOD calls={tod.total_calls} cost=${tod.total_cost:.4f}. Logs: {run_dir}")
     args.result = {"run_dir": run_dir, "stop_reason": stop_reason, "ticks": len(rows)}
@@ -1362,6 +1468,9 @@ def run(args) -> int:
 def main(argv=None, result: dict | None = None) -> int:
     ap = argparse.ArgumentParser(description="TOD Set-of-Mark agent loop for Papers, Please")
     ap.add_argument("--max-ticks", type=int, default=10)
+    ap.add_argument("--extractor", choices=("vision", "static", "hybrid"), default="hybrid",
+                    help="vision: extract.extract (models); static: layout.extract_static (fixed layout, no "
+                         "models); hybrid: static fixed controls + drop targets, vision documents")
     ap.add_argument("--dry-run", action="store_true", help="do everything except mouse input")
     ap.add_argument("--max-marks", type=int, default=25, help="element cap (soft: text, page corners and "
                     "detector-labelled objects are never dropped; drop-target regions come on top)")

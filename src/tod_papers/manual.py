@@ -68,8 +68,9 @@ numbered element onto another numbered element. You decide one input per turn.
   bar)").
 - When the stamp tray is out, a grey bar crosses the upper desk with two big stamps on it: a red DENIED
   stamp (left) and a green APPROVED stamp (right), each with a dark round knob on top (the stamp head).
+  Each stamp is ONE element: clicking anywhere on it (knob or red/green body) presses it.
   Under the bar runs a dark strip with the words ALIGN VISA BENEATH STAMP: that strip is where a passport
-  must lie for a stamp to mark it.
+  must lie for a stamp to mark it. A stamp only marks what lies in the strip directly under THAT stamp.
 
 2. CLICK OR DRAG -- EACH ELEMENT HAS EXACTLY ONE
 CLICK only (never drag these):
@@ -118,10 +119,11 @@ D2. RECOVERY: the entrant's passport is no longer visible anywhere on the desk (
    dragging its tab (left end of the open stamp bar) back to the RIGHT (drop it on the "right edge of the
    desk" target). The hidden passport
    reappears; then continue with C.
-E. The stamp tray is open, the passport lies under a stamp head (the state block says which head), and it
-   is NOT stamped yet (none of the three "stamped" signs of F is in the state block): decide with section 5,
-   then click APPROVED or DENIED (ONE click) -- only the stamp whose head the passport lies under. If it lies
-   under the other head, first drag it to the landing strip under the head you need. Decide only when the issuing country is known -- the state block shows it either as read in this
+E. The stamp tray is open, the passport lies under a stamp head (the state block says "The passport is
+   under: APPROVED" or "DENIED"), and it is NOT stamped yet (none of the three "stamped" signs of F is in the
+   state block): decide with section 5, then click the stamp the passport is lying under; if you want the
+   other decision, first drag the passport to the other strip. ONE click. Clicking the stamp the passport is
+   NOT under stamps nothing. Decide only when the issuing country is known -- the state block shows it either as read in this
    frame or as "passport read as <COUNTRY> at tick N". If the country is not known yet (the bottom of the
    passport with the country name is not visible), do not stamp: drag the passport to the "desk" target so
    the whole page can be read, then put it under the stamp you need.
@@ -181,6 +183,8 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
   the tray (drag its tab right) to get the passport back (rule D2).
 - Run 20261002_092612: the stamped passport was dropped on the counter shelf 5 times; it just lay there and
   the entrant never took it. Drop it ON THE PERSON in the window instead.
+- Clicking the stamp the passport is NOT under: the stamp comes down on the empty strip and nothing is
+  marked. Click the stamp the passport is lying under, or drag the passport to the other strip first.
 """
 
 # --------------------------------------------------------------------------
@@ -351,11 +355,29 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     for t, side in facts.get("stamp_clicks") or []:
         lines.append(f"- A stamp was clicked at tick {t} ({side.upper()}) and the screen changed: the passport is "
                      f"stamped {side.upper()}")
+    for t, side in facts.get("missed_stamps") or []:
+        lines.append(f"- The {side.upper()} stamp was clicked at tick {t} while the passport lay under the other "
+                     "stamp: nothing was stamped")
     if (facts.get("tray_flips") or 0) >= 4:
         lines.append(f"- LOOP WARNING: the stamp tray was opened and closed {facts['tray_flips']} times in the last "
                      "8 ticks without a stamp. Toggling it again achieves nothing: leave the tray as it is and move a "
                      "DOCUMENT instead (the passport onto a stamp landing strip, or a visa/other paper back to the desk)")
-    if yes(state, "stamp_tray_open") and "passport_under" in facts:
+    if facts.get("under_source") == "static" and (facts.get("static") or {}).get("tray_open"):
+        # pixel check of the strip under each stamp head (layout.passport_under)
+        pu = facts.get("passport_under") or []
+        lines.append("- The passport is under: " + (" and ".join(x.upper() for x in pu) if pu else "none")
+                     + " (a document lies in the strip beneath "
+                     + (f"the {pu[0].upper()} stamp" if len(pu) == 1 else "both stamps" if pu else "neither stamp")
+                     + ")")
+        if len(pu) == 1:
+            other = "approved" if pu[0] == "denied" else "denied"
+            lines.append(f"- Click the stamp the passport is lying under ({pu[0].upper()}); if you want "
+                         f"{other.upper()} instead, first drag the passport to the strip under the {other.upper()} "
+                         f"stamp. Clicking {other.upper()} now would stamp nothing.")
+        elif not pu:
+            lines.append("- No document lies under either stamp: clicking a stamp now stamps nothing; drag the "
+                         "passport to the landing strip under the stamp you want first")
+    elif yes(state, "stamp_tray_open") and "passport_under" in facts:
         pu = facts["passport_under"]
         if pu:
             other = [x for x in ("approved", "denied") if x not in pu]
@@ -469,8 +491,10 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         return "F", "drag stamped passport -> entrant (hand back)"
     if yes(state, "bulletin_or_rulebook_covering_desk") and yes(state, "document_open_on_desk"):
         return "6", "drag bulletin/rulebook -> desk (aside)"
-    if yes(state, "stamp_tray_open"):
-        if yes(state, "document_under_stamp_heads"):
+    f = facts or {}
+    static_under = f.get("under_source") == "static" and (f.get("static") or {}).get("tray_open")
+    if yes(state, "stamp_tray_open") or static_under:
+        if (bool(f.get("passport_under")) if static_under else yes(state, "document_under_stamp_heads")):
             if not kc:
                 return "E?", "country unknown: drag passport -> desk to read it"
             need = "approved" if ok else "denied"
@@ -507,6 +531,11 @@ def input_class(box, booth: bool) -> str | None:
     """'click' (horn, stamps, buttons, page corners), 'drag' (documents, tray tab,
     lever) or None (unconstrained). Regions are drop targets only ('target')."""
     kind = getattr(box, "kind", "")
+    aff = getattr(box, "affordance", "")
+    if aff in ("click", "drag"):
+        return aff   # layout.py element (static / hybrid extractor)
+    if aff == "target":
+        return "target"
     cap = getattr(box, "caption", "") or ""
     text = getattr(box, "text", "") or ""
     if kind == "region":

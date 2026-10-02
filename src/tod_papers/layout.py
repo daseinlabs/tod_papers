@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 from dataclasses import dataclass
 
@@ -72,7 +73,9 @@ MENU_SLOTS = {
     "quit": (543, 10, 560, 27),
     "settings": (10, 281, 39, 310),
     "select_header": (157, 11, 412, 27),
-    "day1_tile": (0, 41, 80, 105),
+    # only the inner dashed "NEW" box of a day tile takes the click; the "DAY 1" label above it does not
+    # (run 20261002_110614: 6 clicks at native y=73 did nothing; earlier runs clicked y=90 and it worked)
+    "day1_tile": (6, 74, 74, 104),
     "trash": (527, 285, 556, 310),
     "bottom_button": (220, 293, 349, 308),   # BACK / NEXT / WALK TO WORK (same slot)
 }
@@ -96,15 +99,20 @@ LAYOUT: list[Element] = [
     Element("counter_shelf", "region", "counter shelf under the window -- drop documents here (onto the "
             "hand-back slot) to hand them back", "target", (10, 212, 172, 266), "booth"),
     Element("desk", "region", "desk (drop documents here to read them)", "target", (196, 230, 340, 304), "booth"),
+    # the person behind the glass (head + chest); documents dropped here are handed back (run 092612: dropped on
+    # the counter shelf they just lay there). Measured on runs 083908 raw_0000 / 090556 raw_0022.
+    Element("hand_back", "region", "the entrant at the booth window -- drop documents ON THE PERSON to hand them "
+            "back", "target", (45, 135, 135, 205), "booth"),
     # ---------------- stamp tray ----------------
     Element("tray_tab", "object", "stamp tray tab at the right edge of the desk -- drag it left onto the "
             "desk to pull out the stamp tray", "drag", (558, 128, 570, 177), "booth+tray_closed"),
     Element("tray_tab_open", "object", "stamp tray tab (left end of the open stamp bar) -- drag it right to "
             "put the tray away", "drag", (284, 135, 298, 180), "booth+tray_open"),
-    Element("stamp_denied", "object", "red DENIED stamp on the open tray -- click it to stamp the document "
-            "lying beneath it", "click", (333, 128, 402, 171), "booth+tray_open"),
-    Element("stamp_approved", "object", "green APPROVED stamp on the open tray -- click it to stamp the "
-            "document lying beneath it", "click", (453, 128, 522, 171), "booth+tray_open"),
+    # whole stamp, knob + body (the game stamps on a click anywhere on it; run 101448 t11 clicked the knob)
+    Element("stamp_denied", "object", "red DENIED stamp (knob and body) on the open tray -- click it to stamp "
+            "the passport lying in the strip beneath it", "click", (330, 106, 406, 174), "booth+tray_open"),
+    Element("stamp_approved", "object", "green APPROVED stamp (knob and body) on the open tray -- click it to "
+            "stamp the passport lying in the strip beneath it", "click", (450, 106, 526, 174), "booth+tray_open"),
     Element("landing_denied", "region", "stamp landing strip (under the DENIED stamp head)", "target",
             (340, 180, 400, 218), "booth+tray_open"),
     Element("landing_approved", "region", "stamp landing strip (under the APPROVED stamp head)", "target",
@@ -123,9 +131,9 @@ LAYOUT: list[Element] = [
     Element("quit_title", "icon", "quit-game button (top right; never click)", "avoid", MENU_SLOTS["quit"], "title"),
     Element("day1_tile", "object", "Day 1 tile (NEW) -- click to start Day 1", "click", MENU_SLOTS["day1_tile"],
             "day_select"),
-    Element("day2_tile", "object", "Day 2 tile -- click to continue from Day 2", "click", (80, 41, 160, 105),
+    Element("day2_tile", "object", "Day 2 tile -- click to continue from Day 2", "click", (86, 74, 154, 104),
             "day_select+tile2", False),
-    Element("day3_tile", "object", "Day 3 tile -- click to continue from Day 3", "click", (160, 41, 240, 105),
+    Element("day3_tile", "object", "Day 3 tile -- click to continue from Day 3", "click", (166, 74, 234, 104),
             "day_select+tile3", False),
     Element("back", "text", "BACK button", "click", MENU_SLOTS["bottom_button"], "btn:back"),
     Element("trash", "icon", "delete-save (trash) button (never click)", "avoid", MENU_SLOTS["trash"], "day_select"),
@@ -145,7 +153,11 @@ DESK = (178, 103, 570, 320)
 TRAY_BAR = (288, 133, 570, 212)  # open stamp bar + its shadow (docs show only above it)
 COUNTER = (0, 211, 178, 276)
 DOC_MIN_AREA = 120
-KNOB_X = ((331, 404), (451, 524))   # stamp knob columns above TRAY_BAR when open               # native px
+KNOB_X = ((331, 404), (451, 524))   # stamp knob columns above TRAY_BAR when open (native px)
+# the dark strip under the stamp bar where a document must lie to be stamped, per stamp head (native)
+STRIP_Y = (194, 212)
+STRIP_X = {"denied": (335, 401), "approved": (455, 521)}
+STRIP_PAPER_FRAC = 0.45   # paper pixels (max channel > 100) in a strip -> a document lies under that head
 TPL_MIN_IOU = 0.6
 
 
@@ -260,6 +272,18 @@ def tray_open(n: np.ndarray) -> bool:
     """Open-tray signature: red DENIED and green APPROVED stamp bodies in place."""
     return bool(_red(_crop(n, (340, 145, 395, 170))).mean() > 0.3
                 and _green(_crop(n, (460, 145, 515, 170))).mean() > 0.3)
+
+
+def passport_under(n: np.ndarray) -> list[str]:
+    """Stamp heads ('denied', 'approved') with a document lying in the strip beneath them (native frame, tray
+    open). The desk there is near-black; paper (cream passport, grey visa) is bright. The rulebook's dark blue
+    cover scores ~0.3 and is not counted."""
+    out = []
+    y1, y2 = STRIP_Y
+    for side, (x1, x2) in STRIP_X.items():
+        if float((n[y1:y2, x1:x2].max(2) > 100).mean()) >= STRIP_PAPER_FRAC:
+            out.append(side)
+    return out
 
 
 def _visible(when: str, screen: str, flags: dict) -> bool:
@@ -392,8 +416,8 @@ def find_documents(n: np.ndarray, is_tray_open: bool | None = None) -> list[dict
 
 
 _DOC_DESC = {
-    "desk": "document on the desk -- drag it (onto a stamp landing strip to stamp it, onto the counter shelf "
-            "to hand it back)",
+    "desk": "document on the desk -- drag it (onto a stamp landing strip to stamp it, onto the person at the "
+            "window to hand it back)",
     "desk_under_tray": "document under the open stamp tray (only its top edge shows) -- drag it out onto the "
                        "desk, or it is already beneath the stamps",
     "counter": "document on the counter shelf -- drag it onto the desk to read it",
@@ -450,6 +474,7 @@ def extract_static(frame_bgr: np.ndarray, targets: bool = True, informational: b
         flags["tray_closed"] = not flags["tray_open"]
         flags["rulebook_in_slot"] = _diff(n, ref, (114, 280, 138, 311)) <= 30
         flags["inspect_button"] = int(_red(_crop(n, BY_NAME["inspect_toggle"].box)).sum()) > 40
+        flags["passport_under"] = passport_under(n) if flags["tray_open"] else []
     out: list[Box] = []
     for e in LAYOUT:
         if not _visible(e.when, screen, flags):
@@ -477,7 +502,11 @@ def extract_static(frame_bgr: np.ndarray, targets: bool = True, informational: b
     return out
 
 
-def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: float = 0.3) -> list[Box]:
+_TRAY_LABEL = re.compile(r"BENEATH|ALIGN|DRAG DOC", re.I)
+
+
+def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: float = 0.3,
+                 frame_wh: tuple[int, int] | None = None) -> list[Box]:
     """Static fixed-layout elements (never missed) + vision's boxes for everything
     else (document panels with identity/text, per-paper splits). A vision box
     overlapping a static fixed element (IoU >= iou_drop) is dropped. Static's own
@@ -489,8 +518,36 @@ def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: flo
         u = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - i
         return i / u if u > 0 else 0.0
 
+    def inside(a, b):   # fraction of a lying inside b
+        ix = max(0, min(a.x2, b.x2) - max(a.x1, b.x1))
+        iy = max(0, min(a.y2, b.y2) - max(a.y1, b.y1))
+        return ix * iy / a.area if a.area > 0 else 0.0
+
     fixed = [b for b in static_boxes if not getattr(b, "name", "").startswith("doc")]
     docs = [b for b in static_boxes if getattr(b, "name", "").startswith("doc")]
-    keep = [v for v in vision_boxes if all(iou(v, f) < iou_drop for f in fixed)]
+    objs = [f for f in fixed if f.kind != "region"]
+    # a vision box overlapping a fixed element, or lying mostly inside a fixed object (the stamp knob, the
+    # APPROVED/DENIED text on a stamp body, the horn) is the same control: keep only the static one
+    keep = [v for v in vision_boxes if all(iou(v, f) < iou_drop for f in fixed)
+            and all(inside(v, f) < 0.6 for f in objs)]
+    if frame_wh is not None and any(getattr(f, "name", "") == "horn" for f in fixed):
+        # booth: vision is only asked for the DOCUMENTS (desk + counter shelf). Its boxes on the yard, the person,
+        # the drawer row, the stamp bar and the tray label are clutter next to the static controls.
+        W, H = frame_wh
+        sx, sy = W / NATIVE_W, H / NATIVE_H
+        tray = any(getattr(f, "name", "") == "tray_tab_open" for f in fixed)
+        bar = Box(int(TRAY_BAR[0] * sx), int(TRAY_BAR[1] * sy), int(TRAY_BAR[2] * sx), int(TRAY_BAR[3] * sy))
+
+        def doc_area(v) -> bool:
+            cx, cy = v.center[0] / sx, v.center[1] / sy
+            if DESK[0] <= cx <= DESK[2] and DESK[1] <= cy <= DESK[3]:
+                return True
+            # on the counter shelf only a document-sized box (a passport is ~40x45 native px), not the shelf
+            return (COUNTER[0] <= cx <= COUNTER[2] and COUNTER[1] <= cy <= COUNTER[3]
+                    and v.w / sx <= 70 and v.h / sy <= 70 and v.w / sx >= 15 and v.h / sy >= 15)
+
+        keep = [v for v in keep if doc_area(v)
+                and not (v.text and _TRAY_LABEL.search(v.text) and len(v.text) <= 26)
+                and not (tray and inside(v, bar) >= 0.8)]
     vdocs = [v for v in keep if any(iou(v, d) > 0.1 for d in docs)]
     return fixed + keep + ([] if vdocs else docs)
