@@ -1,7 +1,7 @@
 """loop.py -- the TOD Set-of-Mark agent loop.
 
 Each tick:  wait-until-stable grab
-            -> REQUEST 1 (state, unmarked frame; concurrent with extract): screen, day, the
+            -> extract -> REQUEST 1 (state, unmarked frame + desk OCR text): screen, day, the
                booth facts the manual is keyed on (person at window, document on counter,
                open passport, tray open, passport under stamp, stamp mark, covered) and the
                inspection decisions (issuing country, expiry, photo) -- all read by TOD
@@ -43,6 +43,9 @@ import numpy as np
 import win32gui
 
 from . import extract as ex
+if os.environ.get("TOD_EXTRACT_URL"):   # cloud L4 extraction (docs/remote_extraction.md)
+    from . import extract_remote as _exr
+    ex.extract, ex.warmup = _exr.extract, _exr.warmup
 from .extract import Box
 from . import manual as man
 from .som import annotate
@@ -205,7 +208,22 @@ def describe(b: Box, W: int, H: int) -> str:
         return BG_DESC
     if b.kind == "region":
         return f"drop target - {b.caption}"
-    return ex.describe(b, W, H)
+    d = ex.describe(b, W, H)
+    t = b.text or ""
+    if b.caption == "tab at screen edge" and b.center[0] > 0.9 * W and 0.35 * H < b.center[1] < 0.65 * H:
+        # run 091053 t10-20: tray closed, passport open on the desk, TOD re-dragged the passport for 11 ticks
+        return ("stamp tray tab (the stamp tray is CLOSED; drag this tab left onto the desk to open the stamp "
+                "tray) -- " + d)
+    if b.kind != "text" and len(t) > 12 and (PASSPORT_FIELD_RE.search(t) or ocr_country(t)):
+        # the OCR shows passport fields / a country name: this sheet is the entrant's passport
+        return "the entrant's PASSPORT (open; drag it) -- " + d
+    if b.kind == "text" and b.center[0] > 0.34 * W and b.center[1] > 0.555 * H:
+        up = t.upper()
+        for word in re.findall(r"[A-Z]{3,}", up):
+            side = "APPROVED" if _INK_APPROVED.search(word) else ("DENIED" if _INK_DENIED.search(word) else None)
+            if side and not _STAMP_TXT.match(up):
+                return f"{side} stamp ink on the passport page (part of the passport) -- " + d
+    return d
 
 
 def short(desc: str, n: int = 70) -> str:
@@ -320,16 +338,19 @@ def _small_for_send(frame: np.ndarray, args) -> np.ndarray:
     return frame
 
 
-def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown"):
-    """REQUEST 1: plain (unmarked) frame + one-line text + screen, day and the
-    manual's state/inspection questions (manual.state_questions). Asked inside
-    the long prompt over the marked frame `screen` was near-uniform; asked on its
-    own it was right on 4/4 frames. Runs concurrently with extract()."""
+def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", inspect: tuple = (),
+                facts: dict | None = None):
+    """REQUEST 1: plain (unmarked) frame + short text + screen, day and the
+    manual's state questions (manual.state_questions). The text carries the OCR'd
+    text of the documents on the desk ("readable text on the desk"); the inspection
+    questions in `inspect` are asked only when that OCR shows a passport
+    (inspect_keys). Runs after extract() (it needs the OCR)."""
     today = man.DAY_DATES.get(day, man.DAY_DATES["1"])
     q = {"screen": choice("Which kind of screen is currently shown?", dict(SCREENS)), "day": DAY_Q}
-    q.update(man.state_questions(today))
+    q.update(man.state_questions(today, inspect))
     small = _small_for_send(frame, args)
-    return tod.ask(q, text=man.STATE_TEXT, image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
+    text = man.STATE_TEXT + "\n\n" + man.desk_text_block(facts)
+    return tod.ask(q, text=text, image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
 
 
 def parse_state(res) -> dict:
@@ -367,6 +388,137 @@ def state_line(state: dict) -> str:
 
 
 # --------------------------------------------------------------------------
+# desk text (OCR of the documents on the desk) -> both requests
+# --------------------------------------------------------------------------
+
+_DIGIT2LETTER = str.maketrans({"2": "Z", "0": "O", "1": "I", "5": "S", "8": "B", "4": "A"})
+COUNTRY_TOKENS = [
+    ("ARSTOTZKA", re.compile(r"ARST|RSTOT|STOTZ|TOTZK|OTZKA")),
+    ("KOLECHIA", re.compile(r"KOLEC|OLECH|LECHI")),
+    ("IMPOR", re.compile(r"IMPOR")),
+    ("ANTEGRIA", re.compile(r"ANTEG|NTEGR|TEGRI")),
+    ("OBRISTAN", re.compile(r"OBRIS|BRIST|RISTAN")),
+    ("REPUBLIA", re.compile(r"REPUB|EPUBL|PUBLIA")),
+    ("UNITED FEDERATION", re.compile(r"UNITED|FEDERA|EDERAT")),
+]
+PASSPORT_FIELD_RE = re.compile(r"\b(ISS|EXP|DOB|D0B)\b\.?|ID\s?#", re.I)
+_TRAY_LABEL_RE = re.compile(r"BENEATH|ALIGN|STAM[PI]|DRAG DOC", re.I)
+# stamp ink on a passport page (pixel font + overprinted text -> partial words, e.g. 'DENETAS' at run 083908 t10)
+_INK_APPROVED = re.compile(r"APPRO|PPROV|PROVED|ROVED|GRANT|RANTED")   # APPROVED ink reads "ENTRY GRANTED"
+_INK_DENIED = re.compile(r"DENIE|ENIED|DENI|\bDEN[EI]")
+
+
+def ocr_country(text: str):
+    """(country, raw token) when the OCR text contains a country-like token."""
+    up = text.upper()
+    for raw in re.findall(r"[A-Z0-9]{4,}", up):
+        norm = raw.translate(_DIGIT2LETTER)
+        for name, rx in COUNTRY_TOKENS:
+            if rx.search(norm):
+                return name, raw
+    return None
+
+
+def desk_facts(boxes: list, W: int, H: int, regions: list | None = None) -> dict:
+    """Extraction facts about the documents on the desk, from this tick's OCR:
+    - desk_text: the OCR'd text of every document on the desk (top to bottom);
+    - ocr_country: a country-like token in that text;
+    - has_fields: passport fields (ISS/EXP/DOB/ID#) in that text;
+    - stamped_ocr: APPROVED/DENIED ink text on a document page (below the stamp bar,
+      i.e. not the stamp bodies on the tray)."""
+    strip_top = 0.555 * H
+    for r in regions or []:
+        if r.caption and r.caption.startswith("stamp landing strip"):
+            strip_top = min(strip_top, r.y1 - 0.01 * H)
+    lines, seen, ink, page_x = [], set(), None, []
+    for b in sorted(boxes, key=lambda b: (b.y1, b.x1)):
+        t = (b.text or "").strip()
+        if not t or b.kind == "region":
+            continue
+        cx, cy = b.center
+        if cx < 0.34 * W or cy < 0.45 * H:
+            continue   # yard, booth window, counter shelf, drawer readouts
+        up = t.upper()
+        is_stamp_word = bool(_STAMP_TXT.match(up))
+        if is_stamp_word and cy < strip_top:
+            continue   # the APPROVED/DENIED stamp bodies on the tray
+        if _TRAY_LABEL_RE.search(up) and len(up) <= 24:
+            continue   # 'ALIGN VISA BENEATH STAMP' / 'DRAG DOCUMENTS HERE'
+        if t in seen:
+            continue
+        seen.add(t)
+        lines.append(t)
+        if cy >= strip_top and len(t) >= 4:
+            page_x.append((b.x1, b.x2))   # text on a document page below the stamp bar
+        if ink is None and cy >= strip_top:
+            for word in re.findall(r"[A-Z]{3,}", up):
+                side = "approved" if _INK_APPROVED.search(word) else ("denied" if _INK_DENIED.search(word) else None)
+                if side:
+                    ink = {"text": t, "side": side, "box": [b.x1, b.y1, b.x2, b.y2]}
+                    break
+    joined = " | ".join(lines)
+    c = ocr_country(joined)
+    return {"desk_text": lines,
+            "ocr_country": {"value": c[0], "token": c[1]} if c else None,
+            "has_fields": bool(PASSPORT_FIELD_RE.search(joined)),
+            "stamped_ocr": ink,
+            "page_xr": _main_cluster(page_x, W)}
+
+
+def _main_cluster(xs, W: int):
+    """x-range of the biggest cluster of page text (runs of text spans whose gaps are < 4 % of the width).
+    Run 094930: a Chrome toast at the right edge stretched the min/max range over both stamp strips."""
+    if not xs:
+        return None
+    groups, cur = [], [list(sorted(xs)[0])]
+    for a, b in sorted(xs)[1:]:
+        if a - max(e for _, e in cur) <= 0.04 * W:
+            cur.append([a, b])
+        else:
+            groups.append(cur)
+            cur = [[a, b]]
+    groups.append(cur)
+    g = max(groups, key=len)
+    return [min(a for a, _ in g), max(b for _, b in g)]
+
+
+def passport_under(page_xr, regions) -> list[str]:
+    """Which stamp heads the document page lies under: x-overlap of the OCR'd page text with the landing
+    strip under each head (>= 40 % of the strip width). Run 091053 t2: the passport lay under DENIED only,
+    APPROVED was clicked, the stamp hit the empty strip ('changed' from the stamp animation)."""
+    if not page_xr:
+        return []
+    out = []
+    for r in regions or []:
+        cap = r.caption or ""
+        if not cap.startswith("stamp landing strip"):
+            continue
+        side = "approved" if "APPROVED" in cap else "denied"
+        ov = min(page_xr[1], r.x2) - max(page_xr[0], r.x1)
+        if ov >= 0.4 * (r.x2 - r.x1):
+            out.append(side)
+    return out
+
+
+def inspect_keys(df: dict) -> tuple:
+    """Which inspection questions request 1 asks this tick (gated on the desk OCR):
+    issuing_country only when a country-like token was OCR'd (run 083908 t8 read
+    'other' with only the visa page and EXP visible); expiry/photo when a country
+    token or passport fields were OCR'd. Answers are used only when request 1 also
+    says document_open_on_desk >= 0.6."""
+    keys = []
+    if df.get("ocr_country"):
+        keys.append("issuing_country")
+    if df.get("ocr_country") or df.get("has_fields"):
+        keys += ["expiry_after_today", "photo_matches_person"]
+    return tuple(keys)
+
+
+INSPECT_OPEN_P = 0.6
+CARRY_COUNTRY_P = 0.85
+
+
+# --------------------------------------------------------------------------
 # drop-target regions (stamp landing strip, counter shelf, desk)
 # --------------------------------------------------------------------------
 
@@ -376,7 +528,8 @@ _ANCHORS = None
 REGION_CAPS = {
     "stamp_landing_approved": "stamp landing strip (under the APPROVED stamp head)",
     "stamp_landing_denied": "stamp landing strip (under the DENIED stamp head)",
-    "counter_shelf": "counter shelf (hand documents back here)",
+    "counter_shelf": "counter shelf under the window",
+    "hand_back": "the entrant at the booth window -- drop documents ON THE PERSON to hand them back",
     "desk": "desk (drop documents here to read them)",
     "tray_stow": "right edge of the desk (drag the tray tab here to put the stamp tray away)",
 }
@@ -507,7 +660,22 @@ def derive_regions(boxes: list, frame: np.ndarray, state: dict):
     else:
         shelf = _anchor("counter_shelf", W, H)
         src["counter_shelf"] = "fallback"
-    regions.append(shelf)
+    # The counter shelf itself is NOT a hand-back target: run 092612 dropped the stamped passport on it
+    # 5 times and it just lay there; dropped on the person above it, the entrant said "Thank you." and left.
+    # --- hand back: the person at the window (face box, upper torso)
+    hb = None
+    if persons:
+        p = max(persons, key=lambda b: b.area)
+        cand = Box(p.x1, p.y1 + int(0.25 * p.h), p.x2, p.y2 - int(0.03 * H), "", "region", 0.0,
+                   caption=REGION_CAPS["hand_back"])
+        if cand.h >= 0.08 * H and cand.w >= 0.06 * W:
+            hb = cand
+    if hb is not None:
+        src["hand_back"] = "derived"
+    else:
+        hb = _anchor("hand_back", W, H)
+        src["hand_back"] = "fallback"
+    regions.append(hb)
 
     # --- desk: right of the shelf, below the tray
     if src["counter_shelf"] == "derived":
@@ -666,15 +834,19 @@ def encode_image(img: np.ndarray, fmt: str = "png", quality: int = 90) -> str:
 
 
 def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str, args,
-            stuck: "StuckTracker | None" = None, tick: int = 0) -> dict:
+            stuck: "StuckTracker | None" = None, tick: int = 0, facts: dict | None = None) -> dict:
     """Everything between (extract + request 1) and request 2: drop-target
     regions, Set-of-Mark annotation, criteria (extract.describe), questions,
     the manual text and the encoded (downscaled) image."""
     t0 = time.perf_counter()
     H, W = frame.shape[:2]
     screen = state.get("screen", {}).get("value", "")
-    booth = screen in BOOTH_SCREENS
+    # a person at the window means the booth even if the screen answer drifted (counter shelf must be offered)
+    booth = screen in BOOTH_SCREENS or man.yes(state, "person_at_window", 0.6)
     regions, region_src = derive_regions(boxes, frame, state) if booth else ([], {})
+    if facts is not None:
+        facts["passport_under"] = passport_under(facts.get("page_xr"), regions) \
+            if booth and man.yes(state, "stamp_tray_open") else []
     handle = derive_tray_handle(boxes, frame, state) if booth else None
     if handle is not None:
         boxes = list(boxes) + [handle]
@@ -697,6 +869,8 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     # regions are drop targets only; the background is a click source only
     src_ids = {k: v for k, v in desc.items() if k not in banned_ids and idmap[int(k)].kind != "region"}
     tgt_ids = {k: v for k, v in desc.items() if idmap[int(k)].kind != "background"} or dict(desc)
+    if booth:   # in the booth every drag ends on a drop-target region (manual section 3); nothing else is a target
+        tgt_ids = {k: v for k, v in tgt_ids.items() if idmap[int(k)].kind == "region"} or tgt_ids
     region_ids = {k: idmap[int(k)].caption for k in desc if idmap[int(k)].kind == "region"}
     region_info = {}
     for k, cap in region_ids.items():
@@ -704,12 +878,13 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         b = idmap[int(k)]
         region_info[name] = {"id": k, "box": [b.x1, b.y1, b.x2, b.y2], "target_source": region_src.get(name, "?")}
     questions = build_questions(src_ids, tgt_ids)
-    state_text = man.build(state, history, day, ban_lines)
+    state_text = man.build(state, history, day, ban_lines, facts)
     send = _small_for_send(annotated, args)
     url = encode_image(send, args.send_format, args.jpeg_quality)
     return dict(annotated=annotated, idmap=idmap, desc=desc, banned_ids=banned_ids, src_ids=src_ids,
                 tgt_ids=tgt_ids, regions=region_info, booth=booth, questions=questions, state_text=state_text,
                 image_url=url, image_kb=round(len(url) * 3 / 4 / 1024, 1),
+                tray_flips=(facts or {}).get("tray_flips", 0),
                 prep_ms=round((time.perf_counter() - t0) * 1e3, 1))
 
 
@@ -727,6 +902,13 @@ def _clean_state(state: dict) -> dict:
             for k, v in state.items()}
 
 
+TRAY_FLIP_LIMIT = 4
+
+
+def _is_tray_tab(b) -> bool:
+    return b is not None and "stamp tray tab" in (b.caption or "")
+
+
 def decide(res, P: dict) -> dict:
     """TOD's request-2 answers -> the input to perform (after the click/drag
     convention). Pure: no I/O."""
@@ -734,6 +916,16 @@ def decide(res, P: dict) -> dict:
     src = str(res["source"].value)
     tod_pick = (action, src)
     action, src, note = enforce_input(action, src, res, P["idmap"], P["src_ids"], P["booth"])
+    if P.get("tray_flips", 0) >= TRAY_FLIP_LIMIT and action == "drag" and _is_tray_tab(P["idmap"].get(int(src))):
+        # run 094930/101021: TOD toggled the tray open/closed for 48 ticks; the warning in the state block did
+        # not stop it. Take TOD's best other drag-able element (the documents) instead of the tab.
+        ps = res["source"].probabilities
+        alt = [k for k in sorted(P["src_ids"], key=lambda k: -float(ps.get(k, 0)))
+               if not _is_tray_tab(P["idmap"].get(int(k))) and _cls(P["idmap"].get(int(k)), P["booth"]) == "drag"]
+        if alt:
+            note = (note + "; " if note else "") + (f"tray toggled {P['tray_flips']}x without a stamp -> "
+                                                    f"tab #{src} skipped, re-picked #{alt[0]}")
+            src = alt[0]
     tgt = str(res["target"].value)
     if action == "drag" and tgt == src:
         # dropping an item on itself is a no-op: take TOD's best other target
@@ -742,6 +934,74 @@ def decide(res, P: dict) -> dict:
             tgt = alt[0]
     return dict(action=action, src=src, tgt=tgt, note=note, tod_pick=tod_pick,
                 p_src=float(res["source"].probabilities.get(src, 0.0)))
+
+
+@dataclass
+class Entrant:
+    """What the loop remembers about the entrant being processed (fed back to TOD
+    as facts in the state block and the history block; TOD still decides):
+    the most recent confident issuing-country reading, stamp clicks that changed
+    the screen while the passport lay under the stamp heads, and the hand-back."""
+    country: dict | None = None          # {"value", "p", "tick"}
+    stamp_clicks: list = field(default_factory=list)   # [(tick, 'approved'|'denied')]
+    handed_back: int | None = None
+    started: int = 0
+    last_under: list = field(default_factory=list)   # stamp heads the passport lay under this tick
+    tray_seen: list = field(default_factory=list)    # [(tick, tray_open)] -- open/close oscillation check
+
+    def reset(self, tick: int, why: str) -> None:
+        self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
+        print(f"           entrant memory reset ({why})")
+
+    def observe(self, tick: int, state: dict) -> None:
+        """Start-of-tick update from request 1."""
+        person = man.yes(state, "person_at_window")
+        if not person and (self.handed_back is not None or not (
+                man.yes(state, "document_open_on_desk") or man.yes(state, "document_on_counter_shelf"))):
+            if self.country or self.stamp_clicks or self.handed_back is not None:
+                self.reset(tick, "window empty")
+        self.tray_seen = (self.tray_seen + [(tick, man.yes(state, "stamp_tray_open"))])[-9:]
+        c = state.get("issuing_country")
+        if c and c["p"] >= CARRY_COUNTRY_P:
+            self.country = {"value": c["value"], "p": c["p"], "tick": tick}
+
+    def after_action(self, tick: int, state: dict, action: str, sb, tb, frame, changed) -> None:
+        if not changed or sb is None:
+            return
+        if action == "click":
+            side = _stamp_side(sb, frame)
+            if side and side in (self.last_under or []) and man.yes(state, "stamp_tray_open"):
+                self.stamp_clicks.append((tick, side))
+            elif (sb.caption == "speaker/horn" and self.handed_back is not None
+                  and not man.yes(state, "person_at_window")):
+                self.reset(tick, "horn clicked after hand-back")
+        elif (action == "drag" and tb is not None and tb.kind == "region"
+              and tb.caption == REGION_CAPS["hand_back"] and man.input_class(sb, True) == "drag"
+              and sb.caption not in (TRAY_HANDLE_CAP, "tab at screen edge", "lever handle")
+              and (self.stamp_clicks or man.yes(state, "passport_shows_stamp_mark"))):
+            self.handed_back = tick
+
+    def facts(self, tick: int, df: dict) -> dict:
+        return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
+                "handed_back": self.handed_back, "tray_flips": self.tray_flips()}
+
+    def tray_flips(self) -> int:
+        """Open<->closed changes of the stamp tray over the last 8 ticks with no stamp click in between.
+        Run 094930 t10-57: open, close, open, close ... 48 ticks (each toggle 'changed', so no stall stop)."""
+        last_stamp = self.stamp_clicks[-1][0] if self.stamp_clicks else -1
+        seq = [o for t, o in self.tray_seen if t > last_stamp]
+        return sum(1 for a, b in zip(seq, seq[1:]) if a != b)
+
+
+def gate_inspection(state: dict, asked: tuple) -> dict:
+    """Drop inspection answers unless request 1 also says an open passport is on
+    the desk (p >= INSPECT_OPEN_P). Returns the dropped answers (logged only)."""
+    dropped = {}
+    if asked and state.get("document_open_on_desk", {}).get("p", 0.0) < INSPECT_OPEN_P:
+        for k in man.INSPECT_KEYS:
+            if k in state:
+                dropped[k] = state.pop(k)
+    return dropped
 
 
 def offline(args) -> int:
@@ -759,21 +1019,27 @@ def offline(args) -> int:
             print(f"[offline] cannot read {path}")
             continue
         t0 = time.perf_counter()
-        fut = _PROBE_POOL.submit(_timed, state_probe, tod, frame, args, "unknown")
         boxes = ex.extract(frame)
         t_ex = (time.perf_counter() - t0) * 1e3
-        probe, t_probe = fut.result()
+        df = desk_facts(boxes, frame.shape[1], frame.shape[0])
+        asked = inspect_keys(df)
+        probe, t_probe = _timed(state_probe, tod, frame, args, "unknown", asked, df)
         state = parse_state(probe)
-        P = prepare(frame, boxes, state, deque(), "unknown", args)
+        gate_inspection(state, asked)
+        ent = Entrant()
+        ent.observe(0, state)
+        facts = ent.facts(0, df)
+        P = prepare(frame, boxes, state, deque(), "unknown", args, facts=facts)
         t1 = time.perf_counter()
         res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
         t_tod = (time.perf_counter() - t1) * 1e3
         D = decide(res, P)
-        step = man.situation(state, "1")
+        step = man.situation(state, "1", facts)
         r = {
             "frame": path, "n_boxes_raw": len(boxes), "n_sources": len(P["src_ids"]), "n_targets": len(P["tgt_ids"]),
             "extract_ms": round(t_ex), "state_ms": round(t_probe), "tod_ms": round(t_tod),
             "image_kb": P["image_kb"], "state": _clean_state(state), "state_line": state_line(state),
+            "inspect_asked": list(asked), "desk_facts": df,
             "manual_step_for_state (diagnostic, not sent)": step, "regions": P["regions"],
             "target_source": {n: v["target_source"] for n, v in P["regions"].items()},
             "state_text": P["state_text"], "state_text_words": len(P["state_text"].split()),
@@ -847,6 +1113,7 @@ def run(args) -> int:
     stop_run = 0
     stop_reason = None
     stall_key, stall_n = None, 0
+    ent = Entrant()
 
     def park_cursor():
         if not args.dry_run and is_foreground(hwnd):
@@ -859,15 +1126,15 @@ def run(args) -> int:
             rows.append(row)
             stuck.decay(tick)
             # capture needs the game unoccluded (Desktop Duplication grabs the screen region)
-            if not try_foreground(hwnd):
-                fg_misses += 1
-                print(f"[tick {tick:03d}] game is not foreground ({fg_misses}x); not acting")
-                row.update(action="none", effect="skipped: game not foreground")
-                if fg_misses >= 3:
-                    raise AbortSafety("game window lost foreground 3 ticks in a row")
-                time.sleep(1.0)
-                continue
+            # if another window holds the foreground, wait (no input, no tick spent) instead of aborting
             fg_misses = 0
+            while not try_foreground(hwnd):
+                fg_misses += 1
+                print(f"[tick {tick:03d}] game is not foreground ({fg_misses}x); waiting, not acting")
+                if fg_misses >= args.fg_patience:
+                    row.update(action="none", effect="skipped: game not foreground")
+                    raise AbortSafety(f"game window lost foreground {fg_misses} times in a row")
+                time.sleep(2.0)
             park_cursor()
             time.sleep(0.1)
             frame, waited, af, stable, ambient = wait_stable(grab.grab, interval=0.15, thresh=args.stable_thresh,
@@ -877,14 +1144,16 @@ def run(args) -> int:
             if not stable:
                 print(f"[tick {tick:03d}] screen still animating after {waited:.1f}s (frac {af:.4f}); proceeding anyway")
 
-            # ---- REQUEST 1 (state, unmarked frame) concurrently with extract -------
+            # ---- extract, then REQUEST 1 (state, unmarked frame + desk OCR text) ------
             t0 = time.perf_counter()
-            fut = _PROBE_POOL.submit(_timed, state_probe, tod, frame, args, day)
             boxes = ex.extract(frame)
             rec["extract_ms"] = round((time.perf_counter() - t0) * 1e3, 1)
             rec["extract_timings"] = {k: round(v, 1) for k, v in getattr(ex, "LAST_TIMINGS", {}).items()}
+            df = desk_facts(boxes, frame.shape[1], frame.shape[0])
+            asked = inspect_keys(df)
+            rec["desk_facts"], rec["inspect_asked"] = df, list(asked)
             try:
-                probe, rec["state_ms"] = fut.result()
+                probe, rec["state_ms"] = _timed(state_probe, tod, frame, args, day, asked, df)
                 state = parse_state(probe)
             except RuntimeError as e:  # never act on a stale picture of the screen
                 print(f"[tick {tick:03d}] state request failed: {e}; skipping tick")
@@ -894,12 +1163,18 @@ def run(args) -> int:
                     json.dump(rec, fh, indent=1)
                 time.sleep(2.0)
                 continue
-            rec["probe_wait_ms"] = round((time.perf_counter() - t0) * 1e3 - rec["extract_ms"], 1)
+            dropped = gate_inspection(state, asked)
+            if dropped:
+                rec["inspect_dropped (open<0.6)"] = _clean_state(dropped)
             screen = state["screen"]["value"]
             dv = state.get("day", {})
             if dv.get("value") in DAY_RULES and dv.get("p", 0) >= 0.5:
                 day = dv["value"]
-            step = man.situation(state, day if day in DAY_RULES else "1")
+            ent.observe(tick, state)
+            facts = ent.facts(tick, df)
+            rec["entrant"] = {"country": ent.country, "stamp_clicks": list(ent.stamp_clicks),
+                              "handed_back": ent.handed_back}
+            step = man.situation(state, day if day in DAY_RULES else "1", facts)
             sline = state_line(state)
             rec.update(state=_clean_state(state), state_line=sline,
                        manual_step_for_state=list(step))  # diagnostic only, never sent to TOD
@@ -909,7 +1184,7 @@ def run(args) -> int:
                 stop_run = stop_run + 1 if screen in stop_screens else 0
                 if stop_run >= args.stop_consecutive:
                     stop_reason = f"screen in {sorted(stop_screens)} for {stop_run} consecutive ticks"
-            key = (screen, man.state_summary(state))
+            key = (screen, man.state_summary(state, facts))
             stall_key, stall_n = key, (stall_n + 1 if key == stall_key else 1)
             if args.stall_stop and stall_n >= args.stall_stop:
                 stop_reason = f"stalled: same state {key} for {stall_n} ticks"
@@ -917,7 +1192,7 @@ def run(args) -> int:
                 print(f"[tick {tick:03d}] state: {sline}")
                 print(f"[loop] STOP: {stop_reason}")
                 rec.update(executed="none (stop condition)", stop_reason=stop_reason)
-                row.update(screen=screen, state=man.state_summary(state), step=step[0], action="none",
+                row.update(screen=screen, state=man.state_summary(state, facts), step=step[0], action="none",
                            effect="stop: " + stop_reason)
                 cv2.imwrite(os.path.join(run_dir, f"raw_{tick:04d}.png"), frame)
                 with open(os.path.join(run_dir, f"tick_{tick:04d}.json"), "w", encoding="utf-8") as fh:
@@ -925,7 +1200,7 @@ def run(args) -> int:
                 break
 
             # ---- REQUEST 2 (action, SoM frame) -------------------------------------
-            P = prepare(frame, boxes, state, history, day, args, stuck=stuck, tick=tick)
+            P = prepare(frame, boxes, state, history, day, args, stuck=stuck, tick=tick, facts=facts)
             annotated, idmap, desc, banned_ids = P["annotated"], P["idmap"], P["desc"], P["banned_ids"]
             rec["prep_ms"] = P["prep_ms"]
             rec["regions"] = P["regions"]
@@ -970,7 +1245,7 @@ def run(args) -> int:
                 f"({short(src_desc)}) target={top(res['target'].probabilities, 2)}"
                 + (f" excluded={sorted(banned_ids, key=int)}" if banned_ids else "")
             )
-            row.update(screen=screen, state=man.state_summary(state), step=step[0], action=action,
+            row.update(screen=screen, state=man.state_summary(state, facts), step=step[0], action=action,
                        src_desc=src_desc, p_src=p_src)
             if action == "drag":
                 row["tgt_desc"] = desc.get(tgt, tgt)
@@ -1038,7 +1313,7 @@ def run(args) -> int:
             row["effect"] = effect
 
             # ---- history: one line per action (tick | state | input | element | effect)
-            ssum = man.state_summary(state)
+            ssum = man.state_summary(state, facts)
             el = f"'{short(src_desc, 60)}'" if sb else "-"
             eff = "not verified (dry-run)" if changed is None else ("changed" if changed else "NO change")
             if veto:
@@ -1051,6 +1326,9 @@ def run(args) -> int:
             else:
                 history.append(f"t{tick} | {ssum} | wait | - | -")
             last_state = state
+            ent.last_under = facts.get("passport_under") or []
+            rec["passport_under"] = ent.last_under
+            ent.after_action(tick, state, action, sb, tb, frame, changed)
 
             # ---- log -----------------------------------------------------------------
             stem = os.path.join(run_dir, f"tick_{tick:04d}")
@@ -1111,6 +1389,8 @@ def main(argv=None, result: dict | None = None) -> int:
     ap.add_argument("--stop-on-screen", default="", help="comma list of request-1 screens; stop (without acting) "
                     "once one of them is seen --stop-consecutive ticks in a row (used by tools/reset_game.py)")
     ap.add_argument("--stop-consecutive", type=int, default=2)
+    ap.add_argument("--fg-patience", type=int, default=60, help="foreground checks (2 s apart) to wait for the game "
+                    "window before a safety abort; no input is sent while waiting")
     ap.add_argument("--stall-stop", type=int, default=0, help="stop when screen + state summary stay identical "
                     "for N ticks (0 = off)")
     args = ap.parse_args(argv)

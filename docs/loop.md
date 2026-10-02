@@ -154,3 +154,48 @@ photo start on Day 2. Request 1 still asks and logs `expiry_after_today` / `phot
 Day 1 (or unknown day) the state block leaves them out. Both landing strips are valid; the passport goes
 under the stamp TOD intends to use. Recovery rule D2: passport no longer visible -> close the tray (drag its
 tab right) to reveal it.
+
+## Desk OCR, stamp detection, hand-back (2026-10-02, loop6)
+
+- **Order per tick changed**: `extract` runs first, then request 1 (it needs the OCR). Costs ~1-3 s per tick.
+- `desk_facts(boxes)`: OCR text of every document on the desk (x > 0.34 W, y > 0.45 H; stamp bodies on the tray,
+  the ALIGN VISA BENEATH STAMP label and the drawer readouts excluded). It goes into BOTH request texts as a
+  "READABLE TEXT ON THE DESK" block, with a note when a country-like token is present
+  (`ARSTOT2HA` -> ARSTOTZKA; digit->letter normalised; ARSTOTZKA/KOLECHIA/IMPOR/ANTEGRIA/OBRISTAN/REPUBLIA/
+  UNITED FEDERATION).
+- **Inspection gating** (`inspect_keys`, `gate_inspection`): `issuing_country` is asked only when the desk OCR
+  contains a country token; `expiry_after_today` / `photo_matches_person` when it contains a country token or
+  passport fields (ISS/EXP/DOB/ID#). Answers are used only if request 1 says `document_open_on_desk >= 0.6`
+  (otherwise logged as `inspect_dropped`). Stricter than "country OR fields" for the country question on
+  purpose: run 083908 t8 had EXP visible but the country off-frame and read "other".
+- **Entrant memory** (`Entrant`): the most recent issuing-country reading with p >= 0.85 is carried forward
+  ("Passport read as ARSTOTZKA at tick 9" in the state block and a "THIS ENTRANT SO FAR" line at the top of the
+  history). A click on a stamp (OCR/caption side) whose effect was `changed` while request 1 said tray open and
+  passport under the heads is recorded as a stamp. A changed drag of a document onto the counter shelf after a
+  stamp marks the hand-back. Reset when the window is empty.
+- **Stamped = any of three** (manual rule F): TOD's `passport_shows_stamp_mark`, `stamped=yes (OCR)` (APPROVED/
+  DENIED-like word below the stamp bar, e.g. `DENETAS` = DENIED ink over ENTRY VISA), or the history line
+  "A stamp was clicked at tick N ... the passport is stamped". F2: APPROVED by mistake -> click DENIED (DENIED
+  overrules APPROVED, Fandom "Entry denial"); DENIED by mistake cannot be undone -> hand back (first two
+  citations a day are warnings).
+- Descriptions: a desk sheet whose OCR has passport fields or a country is described as
+  "the entrant's PASSPORT (open; drag it)"; stamp-ink text as "DENIED stamp ink on the passport page".
+- On booth screens the `target` options are the drop-target regions only.
+- **Hand-back target = the person, not the shelf.** Run 092612 dropped the stamped passport on the counter
+  shelf 5 times; it lay there closed and the entrant never took it. Dropped on the person (face/torso box) the
+  entrant said "Thank you." and left. The region `hand_back` ("the entrant at the booth window -- drop
+  documents ON THE PERSON to hand them back") is derived from the `person face` box (fallback
+  `anchors.json` `hand_back`) and offered on every booth frame with a person; the counter shelf is no longer
+  a target (still used to place the desk region). The entrant memory records the hand-back on a changed drag
+  onto `hand_back`, and resets on the horn only when the window is empty.
+- **passport_under** (`passport_under(page_xr, regions)`): which stamp heads the passport page lies under
+  (x-overlap of the OCR'd page text with each landing strip >= 40 %). Shown in the state block ("lies under
+  the APPROVED head; NOT under DENIED ..."); a stamp click is recorded only for a head the passport was under.
+- **Tray hints**: the closed tray's "tab at screen edge" is described as the stamp tray tab; the state block
+  says "desk text shows passport fields: an open passport IS lying on the desk" when request 1 says not
+  open, and "passport already open and tray closed: next step is C".
+- The APPROVED ink on the passport reads **"ENTRY GRANTED"**; the OCR ink regex matches GRANT/RANTED too.
+- Remote extraction hook: with `TOD_EXTRACT_URL` set, `extract`/`warmup` come from `extract_remote`
+  (cloud L4, see remote_extraction.md).
+- Foreground guard: waits (2 s polls, no input, no tick spent) up to `--fg-patience` (default 60) before the
+  safety abort.
