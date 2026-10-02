@@ -1,6 +1,10 @@
 """som.py -- Set-of-Mark annotation.
 
-`annotate(frame_bgr, boxes, max_marks=60, excluded=None) -> (annotated_bgr, {id: Box})`
+`annotate(frame_bgr, boxes, max_marks=40, excluded=None) -> (annotated_bgr, {id: Box})`
+
+Before drawing, `select()` collapses same-caption duplicates (overlap > 50% of
+the smaller box -> keep the larger) and prunes untexted, weakly-labelled
+icon/panel boxes down to `max_marks`.
 
 Draws each box outline plus a high-contrast numbered tag (white digits on a
 solid coloured plate with black border) at the box's top-left corner (moved
@@ -28,41 +32,77 @@ _COLORS = [
 ]
 _GREY = (128, 128, 128)
 
-# share of the mark budget per box family when there are more boxes than marks.
-# Without a quota, long text lines crowd out small untexted icons (levers,
-# speakers, buttons), which are exactly the controls an agent most needs.
-_QUOTA = {"text": 0.5, "icon": 0.3, "other": 0.2}
+# captions that come from the open-vocabulary detector's vocabulary (the
+# interactive things: lever, speaker, stamps, papers ...). CLIP-only labels on
+# scenery fragments ("pole", "road barrier", "possibly door") are weaker.
+try:
+    from .extract import GDINO_VOCAB as _GV
+    STRONG_CAPS = {c for c, _ in _GV.values()} | {"page corner"}
+except Exception:  # pragma: no cover - older extract.py
+    STRONG_CAPS = set()
 
 
-def _family(b: Box) -> str:
-    if b.text and b.kind != "page_corner":
-        return "text"
-    if b.kind == "icon":
-        return "icon"
-    return "other"
+def _overlap(a: Box, b: Box) -> float:
+    """intersection / area of the smaller box"""
+    ix = max(0, min(a.x2, b.x2) - max(a.x1, b.x1))
+    iy = max(0, min(a.y2, b.y2) - max(a.y1, b.y1))
+    m = min(a.area, b.area)
+    return ix * iy / m if m else 0.0
 
 
-def select(boxes: list[Box], max_marks: int = 60) -> list[Box]:
-    """Keep at most max_marks boxes with a per-family quota (text / icon / other),
-    unused quota flowing to the remaining families."""
-    if len(boxes) <= max_marks:
-        return list(boxes)
-    fam: dict[str, list[Box]] = {"text": [], "icon": [], "other": []}
-    for b in boxes:
-        fam[_family(b)].append(b)
-    fam["text"].sort(key=lambda b: (len(b.text) > 2, b.area), reverse=True)
-    fam["icon"].sort(key=lambda b: (b.conf, b.area), reverse=True)
-    fam["other"].sort(key=lambda b: (b.kind == "page_corner", b.area), reverse=True)
-    take = {k: min(len(v), int(max_marks * _QUOTA[k])) for k, v in fam.items()}
-    spare = max_marks - sum(take.values())
-    for k in ("text", "icon", "other"):
-        extra = min(spare, len(fam[k]) - take[k])
-        take[k] += extra
-        spare -= extra
-    return [b for k in ("text", "icon", "other") for b in fam[k][: take[k]]]
+def collapse(boxes: list[Box], thresh: float = 0.5) -> list[Box]:
+    """Boxes sharing a caption and overlapping > thresh (of the smaller) collapse
+    to the larger one. Never collapses page corners, and keeps a smaller box whose
+    OCR text is not already part of the larger box's text."""
+    order = sorted(boxes, key=lambda b: -b.area)
+    kept: list[Box] = []
+    for b in order:
+        cap = getattr(b, "caption", "")
+        if cap and b.kind != "page_corner":
+            dup = False
+            for k in kept:
+                if k.kind == "page_corner" or getattr(k, "caption", "") != cap or _overlap(b, k) <= thresh:
+                    continue
+                if b.text and b.text.lower() not in k.text.lower():
+                    continue
+                dup = True
+                break
+            if dup:
+                continue
+        kept.append(b)
+    return [b for b in boxes if any(b is k for k in kept)]
 
 
-def annotate(frame_bgr: np.ndarray, boxes: list[Box], max_marks: int = 60,
+def _drop_tier(b: Box) -> int | None:
+    """Prune order for the mark cap: lower tiers go first; None = never pruned
+    (text, page corners, detector objects, detector-vocabulary captions)."""
+    cap = getattr(b, "caption", "")
+    if b.text or b.kind == "page_corner" or b.kind not in ("icon", "panel"):
+        return None
+    if not cap:
+        return 0
+    if cap.startswith("possibly "):
+        return 1
+    if cap not in STRONG_CAPS:
+        return 2
+    return None
+
+
+def select(boxes: list[Box], max_marks: int = 40) -> list[Box]:
+    """Collapse same-caption duplicates, then (if still over max_marks) drop
+    untexted icon/panel boxes - uncaptioned first, then weak 'possibly' labels,
+    then non-detector scenery labels; smallest first within a tier. Text, page
+    corners, detector objects and detector-captioned boxes are never dropped, so
+    the cap is soft."""
+    out = collapse(boxes)
+    if len(out) <= max_marks:
+        return out
+    cand = sorted((b for b in out if _drop_tier(b) is not None), key=lambda b: (_drop_tier(b), b.area))
+    drop = {id(b) for b in cand[: len(out) - max_marks]}
+    return [b for b in out if id(b) not in drop]
+
+
+def annotate(frame_bgr: np.ndarray, boxes: list[Box], max_marks: int = 40,
              excluded: Optional[Callable[[Box], bool]] = None):
     H, W = frame_bgr.shape[:2]
     kept = select(boxes, max_marks)
