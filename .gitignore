@@ -12,3 +12,4 @@ runs/
 deploy/.zone
 deploy/.zone.spot
 deploy/.name
+private/
