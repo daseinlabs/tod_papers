@@ -510,7 +510,7 @@ def extract_static(frame_bgr: np.ndarray, targets: bool = True, informational: b
             _ocr_docs(frame_bgr, n, [b for b in out if getattr(b, "name", "").startswith("doc_")])
             flags["ocr_ms"] = round((time.perf_counter() - t) * 1e3, 1)
     LAST.clear()
-    LAST.update(screen=screen, flags=flags, n_docs=len(docs), ms=round((time.perf_counter() - t0) * 1e3, 2))
+    LAST.update(screen=screen, flags=flags, docs=docs, n_docs=len(docs), ms=round((time.perf_counter() - t0) * 1e3, 2))
     return out
 
 

@@ -23,8 +23,6 @@ states, used by loop.py to enforce it on TOD's pick.
 """
 from __future__ import annotations
 
-import re
-
 # --------------------------------------------------------------------------
 # days (docs/game.md section 5)
 # --------------------------------------------------------------------------

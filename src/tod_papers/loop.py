@@ -473,7 +473,7 @@ def passport_sides(strip: dict) -> list[str]:
 
 
 INSPECT_OPEN_P = 0.6
-CARRY_COUNTRY_P = 0.85
+CARRY_COUNTRY_P = 0.6   # 114927 re-ask: correct readings came at 0.65-0.84; the choice has an 'unreadable' option
 
 
 # --------------------------------------------------------------------------
@@ -489,7 +489,8 @@ def get_boxes(frame: np.ndarray, extractor: str):
     if extractor == "vision":
         return ex.extract(frame), None, None
     st = layout.extract_static(frame, targets=False)
-    info = {**layout.LAST.get("flags", {}), "screen": layout.LAST.get("screen")}
+    info = {**layout.LAST.get("flags", {}), "screen": layout.LAST.get("screen"),
+            "docs": layout.LAST.get("docs") or []}   # paper boxes -> desk_facts -> per-document TOD questions
     if extractor == "static":
         return st, None, info
     vis = ex.extract(frame)
@@ -551,17 +552,8 @@ def _stamp_side(b: Box, frame: np.ndarray):
         return name[6:]
     if b.caption in ("green rubber stamp", "red rubber stamp"):
         return "approved" if b.caption.startswith("green") else "denied"
-    if b.caption == "rubber stamp":
-        # Grounding DINO 'rubber stamp' hits the knob: decide by the colour just below it
-        y1, y2 = b.y2, min(frame.shape[0], b.y2 + max(8, b.h // 2))
-        roi = frame[y1:y2, b.x1:b.x2]
-        if roi.size == 0:
-            return None
-        bgr = roi.reshape(-1, 3).mean(0)
-        if bgr[1] > bgr[2] + 15:
-            return "approved"
-        if bgr[2] > bgr[1] + 15:
-            return "denied"
+    # a bare 'rubber stamp' box (vision extractor only) is not classified by pixel colour any more (no heuristic
+    # judgements about the screen); the static layout names both stamps
     return None
 
 
@@ -746,15 +738,17 @@ def build_questions(src_ids: dict, tgt_ids: dict) -> dict:
     }
 
 
-def _cls(b, booth: bool):
+def _cls(b, booth: bool, doc: bool = False):
     if b is None:
         return None
     if b.kind == "background":
         return "click"
+    if doc:
+        return "drag"   # TOD's request-1 identity says this element is a paper (documents are drag-only)
     return man.input_class(b, booth)
 
 
-def enforce_input(action: str, src: str, res, idmap: dict, src_ids: dict, booth: bool):
+def enforce_input(action: str, src: str, res, idmap: dict, src_ids: dict, booth: bool, doc_ids=()):
     """Apply the manual's click-only / drag-only convention to TOD's pick.
     On a conflict (e.g. drag on a stamp) take the better of
       (a) same element, its allowed input:  P(src) * P(allowed action)
@@ -762,7 +756,7 @@ def enforce_input(action: str, src: str, res, idmap: dict, src_ids: dict, booth:
     Returns (action, src, note); note == '' when nothing changed."""
     if action not in ("click", "drag") or not src.isdigit():
         return action, src, ""
-    cls = _cls(idmap.get(int(src)), booth)
+    cls = _cls(idmap.get(int(src)), booth, int(src) in doc_ids)
     if cls in (None, action):
         return action, src, ""
     pa, ps = res["action"].probabilities, res["source"].probabilities
@@ -771,7 +765,7 @@ def enforce_input(action: str, src: str, res, idmap: dict, src_ids: dict, booth:
         opts.append((float(ps.get(src, 0)) * float(pa.get(cls, 0)), cls, src))
     best = None
     for k in src_ids:
-        if _cls(idmap.get(int(k)), booth) in (None, action) and (best is None or ps.get(k, 0) > ps.get(best, 0)):
+        if _cls(idmap.get(int(k)), booth, int(k) in doc_ids) in (None, action) and (best is None or ps.get(k, 0) > ps.get(best, 0)):
             best = k
     if best:
         opts.append((float(pa.get(action, 0)) * float(ps.get(best, 0)), action, best))
@@ -862,13 +856,17 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if not booth:  # text/cutscene screens without a button are advanced by clicking the screen itself
         idmap[len(idmap) + 1] = Box(W // 4, H // 4, 3 * W // 4, 3 * H // 4, "", "background", 0.0)
     desc = {str(i): describe(b, W, H) for i, b in idmap.items()}
+    doc_ids = set()   # element ids TOD (request 1) named as a paper -> drag-only, whatever the detector label says
     for i, b in idmap.items():   # name each paper by TOD's request-1 identity answer (geometry: centre inside)
         if b.kind in ("region", "background"):
             continue
         for d in (facts or {}).get("docs_named") or []:
             x1, y1, x2, y2 = d["box"]
             if x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 and getattr(b, "name", "") not in layout.BY_NAME:
-                desc[str(i)] = f"{d['id'].upper()} (p={d['p']:.2f}) -- {desc[str(i)]}"
+                rest = desc[str(i)].split(" — ", 1)[-1]   # drop the detector kind; TOD's identity names it
+                desc[str(i)] = f"{d['id']} (TOD {d['p']:.2f}) — {rest}"
+                if d["id"] != "other":
+                    doc_ids.add(i)   # run 114927 t30-86: the counter passport was labelled 'rubber stamp' (click-only)
                 break
     banned_ids, ban_lines = {}, []
     if stuck is not None:
@@ -895,7 +893,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     state_text = man.build(state, history, day, ban_lines, facts)
     send = _small_for_send(annotated, args)
     url = encode_image(send, args.send_format, args.jpeg_quality)
-    return dict(annotated=annotated, idmap=idmap, desc=desc, banned_ids=banned_ids, src_ids=src_ids,
+    return dict(annotated=annotated, idmap=idmap, desc=desc, banned_ids=banned_ids, doc_ids=doc_ids, src_ids=src_ids,
                 tgt_ids=tgt_ids, regions=region_info, booth=booth, questions=questions, state_text=state_text,
                 image_url=url, image_kb=round(len(url) * 3 / 4 / 1024, 1),
                 tray_flips=(facts or {}).get("tray_flips", 0),
@@ -933,7 +931,7 @@ def decide(res, P: dict) -> dict:
     action = res["action"].value
     src = str(res["source"].value)
     tod_pick = (action, src)
-    action, src, note = enforce_input(action, src, res, P["idmap"], P["src_ids"], P["booth"])
+    action, src, note = enforce_input(action, src, res, P["idmap"], P["src_ids"], P["booth"], P.get("doc_ids", ()))
     if P.get("tray_flips", 0) >= TRAY_FLIP_LIMIT and action == "drag" and _is_tray_tab(P["idmap"].get(int(src))):
         # run 094930/101021: TOD toggled the tray open/closed for 48 ticks; the warning in the state block did
         # not stop it. Take TOD's best other drag-able element (the documents) instead of the tab.
@@ -1008,7 +1006,8 @@ class Entrant:
                 self.reset(tick, "window empty")
         self.tray_seen = (self.tray_seen + [(tick, man.yes(state, "stamp_tray_open"))])[-9:]
         c = state.get("issuing_country")
-        if c and c["p"] >= CARRY_COUNTRY_P and c["value"] != "unreadable":
+        if (c and c["p"] >= CARRY_COUNTRY_P and c["value"] != "unreadable"
+                and (self.country is None or c["p"] >= self.country["p"] or c["value"] == self.country["value"])):
             self.country = {"value": c["value"], "p": c["p"], "tick": tick}
 
     def after_action(self, tick: int, state: dict, action: str, sb, tb, frame, changed) -> None:
@@ -1031,7 +1030,7 @@ class Entrant:
                   and self.handed_back is not None and not man.yes(state, "person_at_window")):
                 self.reset(tick, "horn clicked after hand-back")
         elif (action == "drag" and tb is not None and tb.kind == "region"
-              and tb.caption == REGION_CAPS["hand_back"] and man.input_class(sb, True) == "drag"
+              and tb.caption == REGION_CAPS["hand_back"]   # the drag passed the click/drag convention
               and sb.caption not in (TRAY_HANDLE_CAP, "tab at screen edge", "lever handle")
               and getattr(sb, "name", "") not in layout.BY_NAME):   # a paper, not a booth fixture (114927 t36)
             if self.stamp_clicks or man.yes(state, "passport_shows_stamp_mark"):
@@ -1058,10 +1057,15 @@ class Entrant:
 
 
 def gate_inspection(state: dict, asked: tuple) -> dict:
-    """Drop inspection answers unless request 1 also says a passport lies open on the desk with its data
-    page readable (passport_open_readable p >= INSPECT_OPEN_P). Returns the dropped answers (logged only)."""
+    """Drop inspection answers unless request 1 also says a passport lies open on the desk (document_open_on_desk)
+    or its data page is readable (passport_open_readable), p >= INSPECT_OPEN_P. The country choice has its own
+    'unreadable' option. (114927 t13/t14: the open Impor passport half under the tray got readable=0.10,
+    open=0.62 and IMPOR 0.65-0.72 -- the readable-only gate dropped a correct reading.) Returns the dropped
+    answers (logged only)."""
     dropped = {}
-    if asked and state.get("passport_open_readable", {}).get("p", 0.0) < INSPECT_OPEN_P:
+    gate_p = max(state.get("passport_open_readable", {}).get("p", 0.0),
+                 state.get("document_open_on_desk", {}).get("p", 0.0))
+    if asked and gate_p < INSPECT_OPEN_P:
         for k in man.INSPECT_KEYS:
             if k in state:
                 dropped[k] = state.pop(k)
@@ -1183,6 +1187,7 @@ def run(args) -> int:
     recent_inputs: deque = deque(maxlen=REPEAT_WINDOW)
     menu_bounces = 0
     ent = Entrant()
+    pick_key, pick_n, refused_n = None, 0, 0   # --pick-stop / --refuse-stop counters
 
     def park_cursor():
         if not args.dry_run and is_foreground(hwnd):
@@ -1427,6 +1432,15 @@ def run(args) -> int:
                 n_top = list(recent_inputs).count(top_in)
                 if n_top >= REPEAT_STOP and top_in not in ("wait",):
                     stop_reason = f"stalled: '{top_in}' {n_top} times in the last {REPEAT_WINDOW} ticks"
+            # hard stall stops: same manual step + same TOD pick N ticks running; stamp press refused M times
+            pk = (step[0], D["tod_pick"][0], short(desc.get(D["tod_pick"][1], D["tod_pick"][1]), 60))
+            pick_key, pick_n = pk, (pick_n + 1 if pk == pick_key else 1)
+            if args.pick_stop and pick_n >= args.pick_stop:
+                stop_reason = f"stalled: manual step {pk[0]} + TOD pick {pk[1]} '{pk[2]}' {pick_n} ticks running"
+            if veto and veto.startswith("refused"):
+                refused_n += 1
+                if args.refuse_stop and refused_n >= args.refuse_stop:
+                    stop_reason = f"stalled: stamp press refused {refused_n} times"
             ent.last_under = facts.get("passport_under") or []
             rec["passport_under"] = ent.last_under
             ent.after_action(tick, state, action, sb, tb, frame, changed)
@@ -1501,6 +1515,9 @@ def main(argv=None, result: dict | None = None) -> int:
                     "window before a safety abort; no input is sent while waiting")
     ap.add_argument("--stall-stop", type=int, default=0, help="stop when screen + state summary stay identical "
                     "for N ticks (0 = off)")
+    ap.add_argument("--pick-stop", type=int, default=10, help="stop when the manual step and TOD's pick stay the "
+                    "same for N ticks (0 = off)")
+    ap.add_argument("--refuse-stop", type=int, default=5, help="stop after N refused stamp presses (0 = off)")
     args = ap.parse_args(argv)
     if args.frames:
         return offline(args)
