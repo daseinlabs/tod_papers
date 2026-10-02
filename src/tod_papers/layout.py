@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import time
 from dataclasses import dataclass
 
@@ -158,6 +157,7 @@ COUNTER = (0, 211, 178, 276)
 DOC_MIN_AREA = 120
 KNOB_X = ((331, 404), (451, 524))   # stamp knob columns above TRAY_BAR when open (native px)
 # the dark strip under the stamp bar where a document must lie to be stamped, per stamp head (native)
+DESK_LABEL = (326, 305, 436, 318)   # 'DRAG DOCUMENTS HERE' text printed on the desk (native)
 STRIP_Y = (194, 212)
 STRIP_X = {"denied": (335, 401), "approved": (455, 521)}
 STRIP_PAPER_FRAC = 0.45   # paper pixels (max channel > 100) in a strip -> a document lies under that head
@@ -514,11 +514,9 @@ def extract_static(frame_bgr: np.ndarray, targets: bool = True, informational: b
     return out
 
 
-_TRAY_LABEL = re.compile(r"BENEATH|ALIGN|DRAG DOC", re.I)
 
 
 _MENU_NAMES = {"story", "day1_tile", "day2_tile", "day3_tile"}
-_MENU_AVOID = re.compile(r"\b(BACK|QUIT|EXIT|DELETE|ENDLESS)\b", re.I)
 
 
 def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: float = 0.3,
@@ -547,10 +545,9 @@ def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: flo
     keep = [v for v in vision_boxes if all(iou(v, f) < iou_drop for f in fixed)
             and all(inside(v, f) < 0.6 for f in objs)]
     if screen in ("title", "day_select") or any(getattr(f, "name", "") in _MENU_NAMES for f in fixed):
-        # title / day-select: the static layout has every control; vision's icon captions on the black screen
-        # ("speaker/horn" on the trash icon, "bulletin board" on the header) are clutter. Keep only OCR text
-        # that is not a back/quit/delete control.
-        keep = [v for v in keep if v.text and not _MENU_AVOID.search(v.text)]
+        # title / day-select: the static layout has every control; vision's boxes there (icon captions on the
+        # black screen, the BACK text the layout deliberately does not offer) are dropped
+        keep = []
     if frame_wh is not None and any(getattr(f, "name", "") == "horn" for f in fixed):
         # booth: vision is only asked for the DOCUMENTS (desk + counter shelf). Its boxes on the yard, the person,
         # the drawer row, the stamp bar and the tray label are clutter next to the static controls.
@@ -558,6 +555,7 @@ def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: flo
         sx, sy = W / NATIVE_W, H / NATIVE_H
         tray = any(getattr(f, "name", "") == "tray_tab_open" for f in fixed)
         bar = Box(int(TRAY_BAR[0] * sx), int(TRAY_BAR[1] * sy), int(TRAY_BAR[2] * sx), int(TRAY_BAR[3] * sy))
+        label = Box(*scale_box(DESK_LABEL, W, H), "", "region", 0.0)   # 'DRAG DOCUMENTS HERE' printed on the desk
 
         def doc_area(v) -> bool:
             cx, cy = v.center[0] / sx, v.center[1] / sy
@@ -568,7 +566,7 @@ def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: flo
                     and v.w / sx <= 70 and v.h / sy <= 70 and v.w / sx >= 15 and v.h / sy >= 15)
 
         keep = [v for v in keep if doc_area(v)
-                and not (v.text and _TRAY_LABEL.search(v.text) and len(v.text) <= 26)
+                and not inside(v, label) >= 0.6
                 and not (tray and inside(v, bar) >= 0.8)]
     vdocs = [v for v in keep if any(iou(v, d) > 0.1 for d in docs)]
     return fixed + keep + ([] if vdocs else docs)

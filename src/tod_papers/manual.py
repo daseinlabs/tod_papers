@@ -100,7 +100,8 @@ Dragging a stamp does nothing. Clicking a document does nothing. Clicking empty 
 
 4. PROCESSING ONE ENTRANT -- FIND THE FIRST LINE THAT MATCHES WHAT IS CURRENTLY TRUE
 A. Nobody is at the window and no document is on the counter or desk: click the loudspeaker on the booth
-   roof to call the next person. The person then walks up to the window by themselves; if someone is
+   roof to call the next person. The loudspeaker ONLY works when the window is empty and the desk is clear;
+   while a person stands at the window it does nothing (it is then not even offered). The person then walks up to the window by themselves; if someone is
    already walking up, wait.
 B. A person is at the window and their passport lies on the counter shelf under the window: drag the
    passport down to the desk ("desk" target) to open it. Clicking it does nothing.
@@ -121,6 +122,10 @@ D2. RECOVERY: the entrant's passport is no longer visible anywhere on the desk o
    dragging its tab (left end of the open stamp bar) back to the RIGHT (drop it on the "right edge of the
    desk" target). The hidden passport
    reappears; then continue with C.
+E0. A paper that is NOT the passport (the rulebook, the bulletin, a transcript) lies under a stamp (the state
+   block says "the RULEBOOK ... lies under the DENIED stamp, not the passport"): stamping it is useless and
+   will be refused. Drag that paper off the strip to the "desk" target, then drag the PASSPORT (from the
+   counter shelf or the desk) to the strip under the stamp you need. The rulebook is never needed on Day 1.
 E. The stamp tray is open, the passport lies under a stamp head (the state block says "The passport is
    under: APPROVED" or "DENIED"), and it is NOT stamped yet (none of the three "stamped" signs of F is in the
    state block): decide with section 5, then click the stamp the passport is lying under; if you want the
@@ -131,8 +136,7 @@ E. The stamp tray is open, the passport lies under a stamp head (the state block
    the whole page can be read, then put it under the stamp you need.
 F. The passport IS STAMPED. Any ONE of these lines in the state block is enough:
    (1) "A passport shows a stamp mark: yes";
-   (2) "stamped=yes (OCR)" -- the desk text contains APPROVED/DENIED ink on the passport page;
-   (3) "A stamp was clicked at tick N and the screen changed: the passport is stamped".
+   (2) "A stamp was clicked at tick N and the screen changed: the passport is stamped".
    Then STOP clicking stamps: drag the stamped passport onto the person at the window ("the entrant at the
    booth window -- drop documents ON THE PERSON to hand them back") to hand it back. The person takes it and
    leaves on their own. Hand back every document the entrant gave you. The open stamp tray does not have to
@@ -198,8 +202,18 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
 # request 1: state questions (answered from the UNMARKED frame)
 # --------------------------------------------------------------------------
 
-STATE_KEYS = ("person_at_window", "document_on_counter_shelf", "document_open_on_desk", "stamp_tray_open",
-              "document_under_stamp_heads", "passport_shows_stamp_mark", "bulletin_or_rulebook_covering_desk")
+STATE_KEYS = ("person_at_window", "document_on_counter_shelf", "document_open_on_desk", "passport_open_readable",
+              "stamp_tray_open", "passport_shows_stamp_mark", "bulletin_or_rulebook_covering_desk")
+STRIP_KEYS = ("passport_under_denied", "passport_under_approved")
+COUNTRIES = ("ARSTOTZKA", "KOLECHIA", "IMPOR", "ANTEGRIA", "OBRISTAN", "REPUBLIA", "UNITED FEDERATION")
+DOC_KINDS = {"passport": "the entrant's passport (a small booklet or its open data page: photo, name, DOB, SEX, ISS., "
+                         "EXP., the issuing country name in large letters)",
+             "rulebook": "the inspector's rulebook (blue-grey cover 'RULES & REGULATIONS', or open pages: CONTENTS, "
+                         "Basic Rules, Regional Map, Booth Info)",
+             "bulletin": "the Ministry of Admission bulletin (a sheet with today's rules / news)",
+             "entry_ticket": "an entry ticket (small slip with a date)",
+             "transcript": "the interview transcript printout",
+             "other": "something else, or not a paper"}
 INSPECT_KEYS = ("issuing_country", "expiry_after_today", "photo_matches_person")
 
 STATE_TEXT = ("A screenshot of the game Papers, Please (border inspection booth). Answer each question only "
@@ -236,12 +250,27 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
             "green APPROVED stamp on it?",
             "yes - the red DENIED and green APPROVED stamps are visible on a bar over the desk",
             "no - no stamps visible (only a small grey tab at the right edge of the desk)"),
-        "document_under_stamp_heads": _noul(
-            "Look at the dark band directly BELOW the grey bar with the words ALIGN VISA BENEATH STAMP, under "
-            "the red and green stamps. Is a cream passport page lying inside that dark band, under the red or "
-            "green stamp?",
-            "yes - a cream passport page lies in the dark band below the bar, under a stamp",
-            "no - that dark band is empty, or there is no stamp bar"),
+        "passport_open_readable": _noul(
+            "Is the entrant's PASSPORT lying open on the dark desk (right half) with its data page readable: photo, "
+            "name, dates and the issuing country? The rulebook, the bulletin or a closed booklet do not count.",
+            "yes - an open passport data page is readable on the desk",
+            "no - no open, readable passport on the desk"),
+        "passport_under_denied": _noul(
+            "Look at the dark band directly BELOW the red DENIED stamp (under the grey bar with the words ALIGN "
+            "VISA BENEATH STAMP). Is the paper lying in that band, under the DENIED stamp, the entrant's PASSPORT? "
+            "The rulebook (pages with CONTENTS / Basic Rules / Regional Map), the bulletin or any other paper is NOT "
+            "a passport.",
+            "yes - the entrant's passport lies under the DENIED stamp",
+            "no - nothing, or a paper that is not the passport (rulebook, bulletin ...), lies under the DENIED stamp, "
+            "or there is no stamp bar"),
+        "passport_under_approved": _noul(
+            "Look at the dark band directly BELOW the green APPROVED stamp (under the grey bar with the words ALIGN "
+            "VISA BENEATH STAMP). Is the paper lying in that band, under the APPROVED stamp, the entrant's PASSPORT? "
+            "The rulebook (pages with CONTENTS / Basic Rules / Regional Map), the bulletin or any other paper is NOT "
+            "a passport.",
+            "yes - the entrant's passport lies under the APPROVED stamp",
+            "no - nothing, or a paper that is not the passport (rulebook, bulletin ...), lies under the APPROVED "
+            "stamp, or there is no stamp bar"),
         "passport_shows_stamp_mark": _noul(
             "Does a passport visible anywhere on screen carry a stamp mark: green APPROVED or red DENIED ink "
             "printed on its page (not the stamps on the tray themselves)?",
@@ -254,10 +283,11 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
             "no - nothing covers the passport (or there is no passport)"),
         "issuing_country": {
             "type": "choice",
-            "instructions": "If an open passport is visible: which issuing country is printed on it (large "
-                            "letters at the bottom of the passport page)?",
-            "criteria": {"ARSTOTZKA": "the passport says ARSTOTZKA",
-                         "other": "another country name, or no open passport / not readable"}},
+            "instructions": "Issuing country of the open passport: the country name printed in large letters on "
+                            "the passport (bottom of the data page / cover). The rulebook and bulletin mention "
+                            "'Arstotzkan' too -- only the PASSPORT counts.",
+            "criteria": {**{c: f"the passport is issued by {c}" for c in COUNTRIES},
+                         "unreadable": "no open passport, or its country name cannot be read"}},
         "expiry_after_today": _noul(
             f"Today is {today}. If an open passport is visible: is its EXP. (expiry) date after today?",
             f"yes - the EXP. date is later than {today}",
@@ -280,10 +310,34 @@ _LABEL = {
     "document_on_counter_shelf": "A document lies on the counter shelf under the window",
     "document_open_on_desk": "An open passport lies on the desk",
     "stamp_tray_open": "The stamp tray is pulled out (APPROVED/DENIED stamps visible)",
-    "document_under_stamp_heads": "A passport lies under a stamp head (in the strip under the tray)",
+    "passport_open_readable": "An open passport data page is readable on the desk",
     "passport_shows_stamp_mark": "A passport shows a stamp mark",
     "bulletin_or_rulebook_covering_desk": "A bulletin/rulebook covers the passport",
 }
+
+
+def doc_question(d: dict) -> dict:
+    """Request-1 identity question for one paper the layout found (position + the OCR text inside it)."""
+    where = "on the counter shelf under the booth window" if d["where"] == "counter" else "on the dark desk"
+    txt = "; ".join(repr(t) for t in d.get("text") or []) or "(no readable text)"
+    return {"type": "choice",
+            "instructions": f"Look at the paper lying {where}, at the {d['pos']} of the picture. OCR read inside "
+                            f"it: {txt}. What is this paper?",
+            "criteria": dict(DOC_KINDS)}
+
+
+def under_phrase(facts: dict, side: str) -> str:
+    """'the RULEBOOK (p=0.93) lies under the DENIED stamp, not the passport' etc. (from TOD's answers)."""
+    v = (facts.get("strip") or {}).get(side) or {}
+    S = side.upper()
+    if v.get("paper") is False:
+        return f"nothing lies under the {S} stamp (the strip is empty)"
+    if v.get("doc") and v["doc"] != "passport":
+        return f"the {v['doc'].upper()} (p={v['doc_p']:.2f}) lies under the {S} stamp, not the passport"
+    pp = v.get("passport_p")
+    if pp is not None and pp < 0.5:
+        return f"the paper under the {S} stamp is not the passport (p={1 - pp:.2f})"
+    return f"no passport under the {S} stamp"
 
 
 def yes(state: dict, k: str, thr: float = 0.5) -> bool:
@@ -309,9 +363,6 @@ def desk_text_block(facts: dict | None) -> str:
     out = ["READABLE TEXT ON THE DESK (OCR of the documents on the desk, top to bottom; pixel font, may "
            "contain misreads):"]
     out += [f"- {t}" for t in lines]
-    c = facts.get("ocr_country")
-    if c:
-        out.append(f"- (country name in this text: {c['token']!r} looks like {c['value']})")
     return "\n".join(out)
 
 
@@ -321,8 +372,6 @@ def stamped(state: dict, facts: dict | None) -> list[str]:
     out = []
     if yes(state, "passport_shows_stamp_mark"):
         out.append("mark")
-    if facts.get("stamped_ocr"):
-        out.append("ocr")
     if facts.get("stamp_clicks"):
         out.append("history")
     return out
@@ -349,16 +398,12 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         lines.append(f"- Screen: {scr['value']} (p={scr['p']:.2f})")
     for k in STATE_KEYS:
         lines.append(f"- {_LABEL[k]}: {_yn(state, k)}")
-    if (facts.get("has_fields") or facts.get("ocr_country")) and not yes(state, "document_open_on_desk"):
-        lines.append("- The desk text (below) shows passport fields: an open passport IS lying on the desk (count it "
-                     "as 'passport open on the desk' for section 4)")
-    if (facts.get("has_fields") or facts.get("ocr_country")) and not yes(state, "stamp_tray_open"):
+    for d in facts.get("docs_named") or []:
+        where = "counter shelf" if d["where"] == "counter" else "desk"
+        lines.append(f"- Paper on the {where} ({d['pos']}): {d['id'].upper()} (p={d['p']:.2f})")
+    if yes(state, "passport_open_readable") and not yes(state, "stamp_tray_open"):
         lines.append("- The passport is already open on the desk and the stamp tray is closed: dragging the passport "
                      "to the desk again changes nothing; the next step is C (drag the stamp tray tab to the desk)")
-    so = facts.get("stamped_ocr")
-    if so:
-        lines.append(f"- stamped=yes (OCR): the desk text {so['text']!r} is {so['side'].upper()} stamp ink on the "
-                     "passport page -- the passport is stamped")
     for t, side in facts.get("stamp_clicks") or []:
         lines.append(f"- A stamp was clicked at tick {t} ({side.upper()}) and the screen changed: the passport is "
                      f"stamped {side.upper()}")
@@ -369,41 +414,36 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         lines.append(f"- LOOP WARNING: the stamp tray was opened and closed {facts['tray_flips']} times in the last "
                      "8 ticks without a stamp. Toggling it again achieves nothing: leave the tray as it is and move a "
                      "DOCUMENT instead (the passport onto a stamp landing strip, or a visa/other paper back to the desk)")
-    if facts.get("under_source") == "static" and (facts.get("static") or {}).get("tray_open"):
-        # pixel check of the strip under each stamp head (layout.passport_under)
+    if "strip" in facts and (yes(state, "stamp_tray_open") or facts.get("tray_open_px")):
         pu = facts.get("passport_under") or []
-        lines.append("- The passport is under: " + (" and ".join(x.upper() for x in pu) if pu else "none")
-                     + " (a document lies in the strip beneath "
-                     + (f"the {pu[0].upper()} stamp" if len(pu) == 1 else "both stamps" if pu else "neither stamp")
-                     + ")")
+        for side in ("denied", "approved"):
+            lines.append(f"- Under the {side.upper()} stamp: " + (
+                f"the PASSPORT (p={facts['strip'][side]['passport_p']:.2f})" if side in pu
+                else under_phrase(facts, side)))
+        lines.append("- The passport is under: " + (" and ".join(x.upper() for x in pu) if pu else "none"))
+        wrong = [s_ for s_ in ("denied", "approved") if (facts["strip"][s_].get("doc") or "passport") != "passport"
+                 and s_ not in pu]
+        if wrong:
+            lines.append(f"- A paper that is NOT the passport lies under the {' and '.join(w.upper() for w in wrong)} "
+                         "stamp: stamping it is useless (the stamp press will be refused). Drag that paper off the "
+                         "strip to the 'desk' target, then drag the PASSPORT to the strip under the stamp you need")
         if len(pu) == 1:
             other = "approved" if pu[0] == "denied" else "denied"
             lines.append(f"- Click the stamp the passport is lying under ({pu[0].upper()}); if you want "
                          f"{other.upper()} instead, first drag the passport to the strip under the {other.upper()} "
                          f"stamp. Clicking {other.upper()} now would stamp nothing.")
         elif not pu:
-            lines.append("- No document lies under either stamp: clicking a stamp now stamps nothing; drag the "
-                         "passport to the landing strip under the stamp you want first")
-    elif yes(state, "stamp_tray_open") and "passport_under" in facts:
-        pu = facts["passport_under"]
-        if pu:
-            other = [x for x in ("approved", "denied") if x not in pu]
-            msg = f"- The passport page lies under the {' and '.join(x.upper() for x in pu)} stamp head"
-            if other:
-                msg += (f"; it is NOT under the {other[0].upper()} head (clicking {other[0].upper()} would stamp "
-                        f"nothing -- to use it, first drag the passport to the strip under the {other[0].upper()} head)")
-            lines.append(msg)
-        elif facts.get("page_xr"):
-            lines.append("- The passport page is not under either stamp head (drag it to a stamp landing strip)")
+            lines.append("- The passport lies under neither stamp: clicking a stamp now stamps nothing (it will be "
+                         "refused); drag the passport to the landing strip under the stamp you want first")
     if facts.get("handed_back") is not None:
         lines.append(f"- Documents were handed back at tick {facts['handed_back']}: this entrant is finished and "
                      "leaves by themselves; call the next person once the window is empty")
-    open_ok = yes(state, "document_open_on_desk")
+    open_ok = yes(state, "passport_open_readable")
     c = state.get("issuing_country")
     if c:
         lines.append(f"- Passport issuing country (read in this frame): {c['value']} (p={c['p']:.2f})")
     elif open_ok:
-        lines.append("- Passport issuing country: not readable in this frame (no country name in the desk text)")
+        lines.append("- Passport issuing country: not readable in this frame")
     cc = facts.get("country_carried")
     if cc and cc.get("tick") != facts.get("tick"):
         lines.append(f"- Passport read as {cc['value']} at tick {cc['tick']} (p={cc['p']:.2f})")
@@ -433,8 +473,8 @@ def state_summary(state: dict, facts: dict | None = None) -> str:
     if yes(state, "document_open_on_desk"):
         bits.append("passport on desk")
     bits.append("tray open" if yes(state, "stamp_tray_open") else "tray closed")
-    if yes(state, "document_under_stamp_heads"):
-        bits.append("passport under stamp")
+    if (facts or {}).get("passport_under"):
+        bits.append("passport under " + "+".join((facts or {})["passport_under"]))
     st = stamped(state, facts)
     if st:
         bits.append("STAMPED(" + "+".join(st) + ")")
@@ -492,6 +532,8 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     if (facts or {}).get("handed_back") is not None:
         return ("G", "wait for the entrant to leave") if yes(state, "person_at_window") else ("A", "click loudspeaker")
     kc = known_country(state, facts)
+    if kc and kc[0] == "unreadable":
+        kc = None
     ok = bool(kc) and kc[0] == "ARSTOTZKA"   # Day 1: the only rule
     if day == "2":
         ok = yes(state, "expiry_after_today") and yes(state, "photo_matches_person")
@@ -503,9 +545,11 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     if yes(state, "bulletin_or_rulebook_covering_desk") and yes(state, "document_open_on_desk"):
         return "6", "drag bulletin/rulebook -> desk (aside)"
     f = facts or {}
-    static_under = f.get("under_source") == "static" and (f.get("static") or {}).get("tray_open")
-    if yes(state, "stamp_tray_open") or static_under:
-        if (bool(f.get("passport_under")) if static_under else yes(state, "document_under_stamp_heads")):
+    if yes(state, "stamp_tray_open") or f.get("tray_open_px"):
+        wrong = [s_ for s_, v in (f.get("strip") or {}).items() if v.get("doc") and v["doc"] != "passport"]
+        if wrong and not f.get("passport_under"):
+            return "E0", f"drag the {f['strip'][wrong[0]]['doc']} off the {wrong[0].upper()} strip -> desk"
+        if f.get("passport_under"):
             if not kc:
                 return "E?", "country unknown: drag passport -> desk to read it"
             need = "approved" if ok else "denied"
@@ -531,7 +575,6 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
 # click-only / drag-only convention (manual section 2)
 # --------------------------------------------------------------------------
 
-_STAMP_RE = re.compile(r"\b(APPRO\w*|DENI\w*)\b", re.I)
 CLICK_CAPS = {"speaker/horn", "rubber stamp", "red rubber stamp", "green rubber stamp", "button"}
 DRAG_CAPS = {"closed passport", "open passport", "rulebook / ring binder", "document on counter",
              "passport booklet", "paper document", "ticket", "bulletin board", "tab at screen edge",
@@ -556,10 +599,6 @@ def input_class(box, booth: bool) -> str | None:
         return "click"
     if cap in CLICK_CAPS:
         return "click"
-    if text and _STAMP_RE.search(text) and len(text) <= 12:
-        return "click"
     if cap in DRAG_CAPS:
         return "drag"
-    if booth and kind == "panel" and text and len(text) > 12:
-        return "drag"   # a texted sheet on the desk is a document
     return None

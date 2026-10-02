@@ -215,15 +215,6 @@ def describe(b: Box, W: int, H: int) -> str:
         # run 091053 t10-20: tray closed, passport open on the desk, TOD re-dragged the passport for 11 ticks
         return ("stamp tray tab (the stamp tray is CLOSED; drag this tab left onto the desk to open the stamp "
                 "tray) -- " + d)
-    if b.kind != "text" and len(t) > 12 and (PASSPORT_FIELD_RE.search(t) or ocr_country(t)):
-        # the OCR shows passport fields / a country name: this sheet is the entrant's passport
-        return "the entrant's PASSPORT (open; drag it) -- " + d
-    if b.kind == "text" and b.center[0] > 0.34 * W and b.center[1] > 0.555 * H:
-        up = t.upper()
-        for word in re.findall(r"[A-Z]{3,}", up):
-            side = "APPROVED" if _INK_APPROVED.search(word) else ("DENIED" if _INK_DENIED.search(word) else None)
-            if side and not _STAMP_TXT.match(up):
-                return f"{side} stamp ink on the passport page (part of the passport) -- " + d
     return d
 
 
@@ -339,19 +330,39 @@ def _small_for_send(frame: np.ndarray, args) -> np.ndarray:
     return frame
 
 
-def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", inspect: tuple = (),
+def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", inspect: tuple = man.INSPECT_KEYS,
                 facts: dict | None = None):
-    """REQUEST 1: plain (unmarked) frame + short text + screen, day and the
-    manual's state questions (manual.state_questions). The text carries the OCR'd
-    text of the documents on the desk ("readable text on the desk"); the inspection
-    questions in `inspect` are asked only when that OCR shows a passport
-    (inspect_keys). Runs after extract() (it needs the OCR)."""
+    """REQUEST 1: plain (unmarked) frame + short text + screen, day, the manual's state questions
+    (manual.state_questions, incl. the passport-under-each-stamp and passport-readable questions) and one
+    identity question per paper the layout found on the desk/counter (its position + the OCR text inside it).
+    Every judgement about the screen is a TOD answer here; the loop only does geometry and bookkeeping."""
     today = man.DAY_DATES.get(day, man.DAY_DATES["1"])
     q = {"screen": choice("Which kind of screen is currently shown?", dict(SCREENS)), "day": DAY_Q}
     q.update(man.state_questions(today, inspect))
+    for i, d in enumerate((facts or {}).get("docs") or []):
+        q[f"doc{i}"] = man.doc_question(d)
     small = _small_for_send(frame, args)
     text = man.STATE_TEXT + "\n\n" + man.desk_text_block(facts)
     return tod.ask(q, text=text, image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
+
+
+def add_tod_facts(facts: dict, state: dict, df: dict, sinfo: dict | None) -> None:
+    """facts += TOD's document identities, what lies under each stamp head, and the passport_under sides."""
+    facts["static"] = sinfo
+    facts["docs_named"] = df["docs_named"] = name_docs(state, df)
+    facts["strip"] = strip_facts(state, df, sinfo)
+    facts["passport_under"] = passport_sides(facts["strip"])
+    facts["tray_open_px"] = bool((sinfo or {}).get("tray_open"))
+
+
+def name_docs(state: dict, df: dict) -> list[dict]:
+    """df['docs'] + TOD's identity answer for each (state['doc<i>'])."""
+    out = []
+    for i, d in enumerate(df.get("docs") or []):
+        a = state.get(f"doc{i}")
+        if a:
+            out.append({**d, "id": a["value"], "p": a["p"]})
+    return out
 
 
 def parse_state(res) -> dict:
@@ -368,7 +379,7 @@ def parse_state(res) -> dict:
 
 
 _STATE_ABBR = {"person_at_window": "person", "document_on_counter_shelf": "counter",
-               "document_open_on_desk": "open", "stamp_tray_open": "tray", "document_under_stamp_heads": "under",
+               "document_open_on_desk": "open", "stamp_tray_open": "tray", "passport_open_readable": "readable", "passport_under_denied": "pD", "passport_under_approved": "pA",
                "passport_shows_stamp_mark": "mark", "bulletin_or_rulebook_covering_desk": "cover",
                "expiry_after_today": "exp_ok", "photo_matches_person": "photo"}
 
@@ -392,46 +403,16 @@ def state_line(state: dict) -> str:
 # desk text (OCR of the documents on the desk) -> both requests
 # --------------------------------------------------------------------------
 
-_DIGIT2LETTER = str.maketrans({"2": "Z", "0": "O", "1": "I", "5": "S", "8": "B", "4": "A"})
-COUNTRY_TOKENS = [
-    ("ARSTOTZKA", re.compile(r"ARST|RSTOT|STOTZ|TOTZK|OTZKA")),
-    ("KOLECHIA", re.compile(r"KOLEC|OLECH|LECHI")),
-    ("IMPOR", re.compile(r"IMPOR")),
-    ("ANTEGRIA", re.compile(r"ANTEG|NTEGR|TEGRI")),
-    ("OBRISTAN", re.compile(r"OBRIS|BRIST|RISTAN")),
-    ("REPUBLIA", re.compile(r"REPUB|EPUBL|PUBLIA")),
-    ("UNITED FEDERATION", re.compile(r"UNITED|FEDERA|EDERAT")),
-]
-PASSPORT_FIELD_RE = re.compile(r"\b(ISS|EXP|DOB|D0B)\b\.?|ID\s?#", re.I)
-_TRAY_LABEL_RE = re.compile(r"BENEATH|ALIGN|STAM[PI]|DRAG DOC", re.I)
-# stamp ink on a passport page (pixel font + overprinted text -> partial words, e.g. 'DENETAS' at run 083908 t10)
-_INK_APPROVED = re.compile(r"APPRO|PPROV|PROVED|ROVED|GRANT|RANTED")   # APPROVED ink reads "ENTRY GRANTED"
-_INK_DENIED = re.compile(r"DENIE|ENIED|DENI|\bDEN[EI]")
-
-
-def ocr_country(text: str):
-    """(country, raw token) when the OCR text contains a country-like token."""
-    up = text.upper()
-    for raw in re.findall(r"[A-Z0-9]{4,}", up):
-        norm = raw.translate(_DIGIT2LETTER)
-        for name, rx in COUNTRY_TOKENS:
-            if rx.search(norm):
-                return name, raw
-    return None
-
-
-def desk_facts(boxes: list, W: int, H: int, regions: list | None = None) -> dict:
-    """Extraction facts about the documents on the desk, from this tick's OCR:
-    - desk_text: the OCR'd text of every document on the desk (top to bottom);
-    - ocr_country: a country-like token in that text;
-    - has_fields: passport fields (ISS/EXP/DOB/ID#) in that text;
-    - stamped_ocr: APPROVED/DENIED ink text on a document page (below the stamp bar,
-      i.e. not the stamp bodies on the tray)."""
-    strip_top = 0.555 * H
-    for r in regions or []:
-        if r.caption and r.caption.startswith("stamp landing strip"):
-            strip_top = min(strip_top, r.y1 - 0.01 * H)
-    lines, seen, ink, page_x = [], set(), None, []
+def desk_facts(boxes: list, W: int, H: int, sinfo: dict | None = None) -> dict:
+    """Extraction facts about the papers on the desk (geometry + OCR text only -- no judgement; TOD reads them):
+    - desk_text: the OCR'd text lines lying on the desk (top to bottom), excluding text on the stamp bar;
+    - docs: the static layout's paper boxes (desk + counter) with the OCR text inside each and a coarse
+      position, so request 1 can ask TOD what each paper is."""
+    sinfo = sinfo or {}
+    sx, sy = W / layout.NATIVE_W, H / layout.NATIVE_H
+    tray = bool(sinfo.get("tray_open"))
+    bx1, by1, bx2, _ = layout.TRAY_BAR
+    lines, seen = [], set()
     for b in sorted(boxes, key=lambda b: (b.y1, b.x1)):
         t = (b.text or "").strip()
         if not t or b.kind == "region":
@@ -439,86 +420,56 @@ def desk_facts(boxes: list, W: int, H: int, regions: list | None = None) -> dict
         cx, cy = b.center
         if cx < 0.34 * W or cy < 0.45 * H:
             continue   # yard, booth window, counter shelf, drawer readouts
-        up = t.upper()
-        is_stamp_word = bool(_STAMP_TXT.match(up))
-        if is_stamp_word and cy < strip_top:
-            continue   # the APPROVED/DENIED stamp bodies on the tray
-        if _TRAY_LABEL_RE.search(up) and len(up) <= 24:
-            continue   # 'ALIGN VISA BENEATH STAMP' / 'DRAG DOCUMENTS HERE'
-        if re.search(r"BENEATH|ALIGN V", up) or (re.search(r"APPRO", up) and re.search(r"DENI", up)):
-            continue   # an OCR line running across the tray bar (stamp bodies + strip label), not a page
+        nx, ny = cx / sx, cy / sy
+        if tray and bx1 <= nx <= bx2 and ny < layout.STRIP_Y[0]:
+            continue   # on the open stamp bar (stamp bodies, ALIGN VISA BENEATH STAMP label)
         if t in seen:
             continue
         seen.add(t)
         lines.append(t)
-        if cy >= strip_top and len(t) >= 4:
-            page_x.append((b.x1, b.x2))   # text on a document page below the stamp bar
-        # an OCR line running across the tray (both stamp bodies and/or the ALIGN VISA BENEATH STAMP label,
-        # run 20261002_111831: 'DENIED APPROVED ISA BENEATH STAMP') is the tray, not ink on a page
-        tray_line = bool(_TRAY_LABEL_RE.search(up) or re.search(r"BENEATH|ALIGN", up)) or (
-            bool(re.search(r"APPRO", up)) and bool(re.search(r"DENI", up)))
-        if ink is None and cy >= strip_top and not tray_line:
-            for word in re.findall(r"[A-Z]{3,}", up):
-                side = "approved" if _INK_APPROVED.search(word) else ("denied" if _INK_DENIED.search(word) else None)
-                if side:
-                    ink = {"text": t, "side": side, "box": [b.x1, b.y1, b.x2, b.y2]}
-                    break
-    joined = " | ".join(lines)
-    c = ocr_country(joined)
-    return {"desk_text": lines,
-            "ocr_country": {"value": c[0], "token": c[1]} if c else None,
-            "has_fields": bool(PASSPORT_FIELD_RE.search(joined)),
-            "stamped_ocr": ink,
-            "page_xr": _main_cluster(page_x, W)}
+    docs = []
+    for d in sinfo.get("docs") or []:
+        x1, y1, x2, y2 = layout.scale_box(d["box"], W, H)
+        texts = [b.text.strip() for b in sorted(boxes, key=lambda b: (b.y1, b.x1))
+                 if (b.text or "").strip() and x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2]
+        docs.append({"where": d["where"], "native": list(d["box"]), "box": [x1, y1, x2, y2],
+                     "text": texts[:6], "pos": ex.coarse_pos(Box(x1, y1, x2, y2, "", "panel", 1.0), W, H)})
+    return {"desk_text": lines, "docs": docs[:MAX_DOC_Q]}
 
 
-def _main_cluster(xs, W: int):
-    """x-range of the biggest cluster of page text (runs of text spans whose gaps are < 4 % of the width).
-    Run 094930: a Chrome toast at the right edge stretched the min/max range over both stamp strips."""
-    if not xs:
-        return None
-    groups, cur = [], [list(sorted(xs)[0])]
-    for a, b in sorted(xs)[1:]:
-        if a - max(e for _, e in cur) <= 0.04 * W:
-            cur.append([a, b])
-        else:
-            groups.append(cur)
-            cur = [[a, b]]
-    groups.append(cur)
-    g = max(groups, key=len)
-    return [min(a for a, _ in g), max(b for _, b in g)]
+MAX_DOC_Q = 5   # per-document identity questions in request 1
 
 
-def passport_under(page_xr, regions) -> list[str]:
-    """Which stamp heads the document page lies under: x-overlap of the OCR'd page text with the landing
-    strip under each head (>= 40 % of the strip width). Run 091053 t2: the passport lay under DENIED only,
-    APPROVED was clicked, the stamp hit the empty strip ('changed' from the stamp animation)."""
-    if not page_xr:
-        return []
-    out = []
-    for r in regions or []:
-        cap = r.caption or ""
-        if not cap.startswith("stamp landing strip"):
-            continue
-        side = "approved" if "APPROVED" in cap else "denied"
-        ov = min(page_xr[1], r.x2) - max(page_xr[0], r.x1)
-        if ov >= 0.4 * (r.x2 - r.x1):
-            out.append(side)
+def strip_facts(state: dict, df: dict, sinfo: dict | None) -> dict:
+    """Which paper lies under each stamp head, from TOD's answers (request 1) + layout geometry:
+    {'denied'|'approved': {'paper': pixel check says paper in the strip (None if unknown),
+                           'passport_p': TOD P(the paper under that stamp is a passport),
+                           'doc': TOD's identity of the paper overlapping that strip (or None), 'doc_p'}}."""
+    sinfo = sinfo or {}
+    paper = sinfo.get("passport_under") if sinfo.get("screen") == "booth" else None   # pixel 'paper here' check
+    named = df.get("docs_named") or []
+    out = {}
+    for side, (x1, x2) in layout.STRIP_X.items():
+        q = state.get(f"passport_under_{side}")
+        best, bov = None, 0
+        for d in named:
+            if d["where"] != "desk":
+                continue
+            a, b, c, e = d["native"]
+            ov = max(0, min(c, x2) - max(a, x1))
+            if ov >= 0.4 * (x2 - x1) and b <= layout.STRIP_Y[1] and e >= layout.STRIP_Y[0] and ov > bov:
+                best, bov = d, ov
+        out[side] = {"paper": (side in paper) if paper is not None else None,
+                     "passport_p": q["p"] if q else None,
+                     "doc": best["id"] if best else None, "doc_p": best["p"] if best else None}
     return out
 
 
-def inspect_keys(df: dict) -> tuple:
-    """Which inspection questions request 1 asks this tick (gated on the desk OCR):
-    issuing_country only when a country-like token was OCR'd (run 083908 t8 read
-    'other' with only the visa page and EXP visible); expiry/photo when a country
-    token or passport fields were OCR'd. Answers are used only when request 1 also
-    says document_open_on_desk >= 0.6."""
-    keys = []
-    if df.get("ocr_country"):
-        keys.append("issuing_country")
-    if df.get("ocr_country") or df.get("has_fields"):
-        keys += ["expiry_after_today", "photo_matches_person"]
-    return tuple(keys)
+def passport_sides(strip: dict) -> list[str]:
+    """Stamp heads with the PASSPORT under them: paper in the strip (when the pixel check ran) and TOD says the
+    paper under that stamp is a passport."""
+    return [s for s, v in strip.items()
+            if v["paper"] is not False and (v["passport_p"] or 0.0) >= 0.5]
 
 
 INSPECT_OPEN_P = 0.6
@@ -594,16 +545,10 @@ def _anchor(name: str, W: int, H: int) -> Box:
     return Box(int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy), "", "region", 0.0, caption=REGION_CAPS[name])
 
 
-_STAMP_TXT = re.compile(r"^\W*(APPRO\w*|DENI\w*)\W*$", re.I)
-
-
 def _stamp_side(b: Box, frame: np.ndarray):
     name = getattr(b, "name", "")
     if name in ("stamp_denied", "stamp_approved"):
         return name[6:]
-    t = (b.text or "").upper()
-    if _STAMP_TXT.match(t):
-        return "approved" if t.strip(" '\"").startswith("APPRO") else "denied"
     if b.caption in ("green rubber stamp", "red rubber stamp"):
         return "approved" if b.caption.startswith("green") else "denied"
     if b.caption == "rubber stamp":
@@ -901,14 +846,13 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         regions, region_src = static_regions(frame, bool(sinfo.get("tray_open", man.yes(state, "stamp_tray_open"))))
     else:
         regions, region_src = derive_regions(boxes, frame, state) if booth else ([], {})
-    if facts is not None:
-        if booth and static and sinfo.get("screen") == "booth":
-            # pixel check of the strip under each stamp head (layout.passport_under), not the OCR x-range
-            facts["passport_under"] = list(sinfo.get("passport_under") or [])
-            facts["under_source"] = "static"
-        else:
-            facts["passport_under"] = passport_under(facts.get("page_xr"), regions) \
-                if booth and man.yes(state, "stamp_tray_open") else []
+    if booth and man.yes(state, "person_at_window", HORN_HIDE_P):
+        # the horn only calls someone when the window is empty (runs 114927 t38-97: 50 horn clicks with the
+        # entrant standing at the window); TOD says someone is there, so it is not offered
+        nb = [b for b in boxes if getattr(b, "name", "") != "horn" and b.caption != "speaker/horn"]
+        if len(nb) < len(boxes) and facts is not None:
+            facts["horn_hidden"] = True
+        boxes = nb
     handle = derive_tray_handle(boxes, frame, state) if booth else None
     if handle is not None:
         boxes = list(boxes) + [handle]
@@ -918,6 +862,14 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if not booth:  # text/cutscene screens without a button are advanced by clicking the screen itself
         idmap[len(idmap) + 1] = Box(W // 4, H // 4, 3 * W // 4, 3 * H // 4, "", "background", 0.0)
     desc = {str(i): describe(b, W, H) for i, b in idmap.items()}
+    for i, b in idmap.items():   # name each paper by TOD's request-1 identity answer (geometry: centre inside)
+        if b.kind in ("region", "background"):
+            continue
+        for d in (facts or {}).get("docs_named") or []:
+            x1, y1, x2, y2 = d["box"]
+            if x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 and getattr(b, "name", "") not in layout.BY_NAME:
+                desc[str(i)] = f"{d['id'].upper()} (p={d['p']:.2f}) -- {desc[str(i)]}"
+                break
     banned_ids, ban_lines = {}, []
     if stuck is not None:
         for i, b in idmap.items():
@@ -965,6 +917,9 @@ def _clean_state(state: dict) -> dict:
 
 
 TRAY_FLIP_LIMIT = 4
+HORN_HIDE_P = 0.7
+HANDBACK_STAY = 4   # ticks a person may stay at the window after a hand-back before it is discounted
+REPEAT_WINDOW, REPEAT_STOP = 12, 10   # same executed input 10 of the last 12 ticks -> stall stop (run 114927)    # person_at_window P(yes) above which the horn is not offered
 
 
 def _is_tray_tab(b) -> bool:
@@ -1042,13 +997,18 @@ class Entrant:
             self.reset(tick, f"hand-back drop at tick {self.hb_drop} + person gone")
         elif self.hb_drop is not None and tick - self.hb_drop > 3:
             self.hb_drop = None   # the person stayed: the drop was not a hand-back
+        elif self.handed_back is not None and person and tick - self.handed_back > HANDBACK_STAY:
+            # the person is still at the window long after the 'hand-back': it was not one (run 114927 t36: the
+            # transcript printer was dragged onto the person; the state block then said 'finished' for 60 ticks)
+            self.reset(tick, f"person still at the window {tick - self.handed_back} ticks after the hand-back at "
+                             f"tick {self.handed_back}: not a hand-back")
         elif not person and (self.handed_back is not None or not (
                 man.yes(state, "document_open_on_desk") or man.yes(state, "document_on_counter_shelf"))):
             if self.country or self.stamp_clicks or self.handed_back is not None:
                 self.reset(tick, "window empty")
         self.tray_seen = (self.tray_seen + [(tick, man.yes(state, "stamp_tray_open"))])[-9:]
         c = state.get("issuing_country")
-        if c and c["p"] >= CARRY_COUNTRY_P:
+        if c and c["p"] >= CARRY_COUNTRY_P and c["value"] != "unreadable":
             self.country = {"value": c["value"], "p": c["p"], "tick": tick}
 
     def after_action(self, tick: int, state: dict, action: str, sb, tb, frame, changed) -> None:
@@ -1056,6 +1016,8 @@ class Entrant:
             return
         if action == "click":
             side = _stamp_side(sb, frame)
+            if side and self.handed_back is not None:
+                self.reset(tick, f"stamp pressed after the hand-back at tick {self.handed_back}: a new entrant")
             if side:
                 # any click on a stamp (knob or body) that changed the screen is a stamp press (run 101448 t11:
                 # the knob click stamped the passport but was not recorded). Only when the strip check says the
@@ -1071,7 +1033,7 @@ class Entrant:
         elif (action == "drag" and tb is not None and tb.kind == "region"
               and tb.caption == REGION_CAPS["hand_back"] and man.input_class(sb, True) == "drag"
               and sb.caption not in (TRAY_HANDLE_CAP, "tab at screen edge", "lever handle")
-              and getattr(sb, "name", "") not in ("tray_tab", "tray_tab_open", "shutter_lever")):
+              and getattr(sb, "name", "") not in layout.BY_NAME):   # a paper, not a booth fixture (114927 t36)
             if self.stamp_clicks or man.yes(state, "passport_shows_stamp_mark"):
                 # a stamped passport dropped on the person and the frame changed: this entrant is done. Reset
                 # now (the next entrant must not inherit the country/stamps) but keep handed_back so the
@@ -1096,10 +1058,10 @@ class Entrant:
 
 
 def gate_inspection(state: dict, asked: tuple) -> dict:
-    """Drop inspection answers unless request 1 also says an open passport is on
-    the desk (p >= INSPECT_OPEN_P). Returns the dropped answers (logged only)."""
+    """Drop inspection answers unless request 1 also says a passport lies open on the desk with its data
+    page readable (passport_open_readable p >= INSPECT_OPEN_P). Returns the dropped answers (logged only)."""
     dropped = {}
-    if asked and state.get("document_open_on_desk", {}).get("p", 0.0) < INSPECT_OPEN_P:
+    if asked and state.get("passport_open_readable", {}).get("p", 0.0) < INSPECT_OPEN_P:
         for k in man.INSPECT_KEYS:
             if k in state:
                 dropped[k] = state.pop(k)
@@ -1123,15 +1085,15 @@ def offline(args) -> int:
         t0 = time.perf_counter()
         boxes, vis, sinfo = get_boxes(frame, args.extractor)
         t_ex = (time.perf_counter() - t0) * 1e3
-        df = desk_facts(boxes, frame.shape[1], frame.shape[0])   # hybrid: merged (tray clutter dropped)
-        asked = inspect_keys(df)
+        df = desk_facts(boxes, frame.shape[1], frame.shape[0], sinfo)
+        asked = man.INSPECT_KEYS
         probe, t_probe = _timed(state_probe, tod, frame, args, "unknown", asked, df)
         state = parse_state(probe)
         gate_inspection(state, asked)
         ent = Entrant()
         ent.observe(0, state)
         facts = ent.facts(0, df)
-        facts["static"] = sinfo
+        add_tod_facts(facts, state, df, sinfo)
         P = prepare(frame, boxes, state, deque(), "unknown", args, facts=facts)
         t1 = time.perf_counter()
         res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
@@ -1183,9 +1145,6 @@ def offline(args) -> int:
     return 0
 
 
-MENU_AVOID_RE = re.compile(r"\b(BACK|QUIT|EXIT|DELETE|TRASH|ENDLESS)\b", re.I)
-
-
 def run(args) -> int:
     hwnd = find_game_window()
     x, y, w, h = io_win.client_rect_physical(hwnd)
@@ -1221,6 +1180,7 @@ def run(args) -> int:
     stop_reason = None
     stall_key, stall_n = None, 0
     screen_seq: list[str] = []
+    recent_inputs: deque = deque(maxlen=REPEAT_WINDOW)
     menu_bounces = 0
     ent = Entrant()
 
@@ -1268,8 +1228,8 @@ def run(args) -> int:
             if sinfo is not None:
                 rec["static_layout"] = {k: v for k, v in sinfo.items() if k in (
                     "screen", "tray_open", "passport_under", "ms")}
-            df = desk_facts(boxes, frame.shape[1], frame.shape[0])   # hybrid: merged (tray clutter dropped)
-            asked = inspect_keys(df)
+            df = desk_facts(boxes, frame.shape[1], frame.shape[0], sinfo)
+            asked = man.INSPECT_KEYS
             rec["desk_facts"], rec["inspect_asked"] = df, list(asked)
             try:
                 probe, rec["state_ms"] = _timed(state_probe, tod, frame, args, day, asked, df)
@@ -1291,7 +1251,9 @@ def run(args) -> int:
                 day = dv["value"]
             ent.observe(tick, state)
             facts = ent.facts(tick, df)
-            facts["static"] = sinfo
+            add_tod_facts(facts, state, df, sinfo)
+            rec["docs_named"] = [{k: d[k] for k in ("where", "id", "p", "text")} for d in facts["docs_named"]]
+            rec["strip"] = facts["strip"]
             rec["entrant"] = {"country": ent.country, "stamp_clicks": list(ent.stamp_clicks),
                               "missed_stamps": list(ent.missed_stamps), "handed_back": ent.handed_back}
             step = man.situation(state, day if day in DAY_RULES else "1", facts)
@@ -1325,12 +1287,6 @@ def run(args) -> int:
                     menu_bounces += 1
                 screen_seq.append(screen)
             facts["menu_bounces"] = menu_bounces
-            if menu_bounces >= 1 and screen in ("menu", "day_select"):
-                # after one no-progress cycle, back/quit/delete controls are not offered on menu screens
-                nb = [b for b in boxes if not MENU_AVOID_RE.search(f"{b.text} {getattr(b, 'caption', '')}")]
-                if len(nb) < len(boxes):
-                    rec["menu_avoid_dropped"] = len(boxes) - len(nb)
-                    boxes = nb
 
             # ---- REQUEST 2 (action, SoM frame) -------------------------------------
             P = prepare(frame, boxes, state, history, day, args, stuck=stuck, tick=tick, facts=facts)
@@ -1388,6 +1344,12 @@ def run(args) -> int:
             if action in ("click", "drag") and sb is not None and screen in ("day_select", "menu") \
                     and RISKY_RE.search(src_desc) and p_src <= 0.9:
                 veto = f"declined '{short(src_desc, 50)}' on {screen} (destructive-looking, p={p_src:.2f} <= 0.9)"
+            side = _stamp_side(sb, frame) if (action == "click" and sb is not None) else None
+            if side and side not in (facts.get("passport_under") or []):
+                # run 114927 t37-94: 9 DENIED presses on the RULEBOOK lying under the strip. A stamp press is executed
+                # only when TOD's request-1 answer says the paper under THAT stamp is the passport.
+                veto = "refused: " + man.under_phrase(facts, side)
+                print(f"           {veto}")
             # ---- execute ---------------------------------------------------------
             if veto:
                 executed = "vetoed: " + veto
@@ -1459,6 +1421,12 @@ def run(args) -> int:
             else:
                 history.append(f"t{tick} | {ssum} | wait | - | -")
             last_state = state
+            recent_inputs.append(executed.split(";")[0] if not veto else "veto")
+            if len(recent_inputs) >= REPEAT_WINDOW:
+                top_in = max(set(recent_inputs), key=list(recent_inputs).count)
+                n_top = list(recent_inputs).count(top_in)
+                if n_top >= REPEAT_STOP and top_in not in ("wait",):
+                    stop_reason = f"stalled: '{top_in}' {n_top} times in the last {REPEAT_WINDOW} ticks"
             ent.last_under = facts.get("passport_under") or []
             rec["passport_under"] = ent.last_under
             ent.after_action(tick, state, action, sb, tb, frame, changed)
