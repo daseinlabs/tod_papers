@@ -1,0 +1,6 @@
+**
+!requirements-extract.txt
+!deploy/requirements-server.txt
+!deploy/fetch_models.py
+!src/**
+**/__pycache__

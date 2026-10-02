@@ -1,0 +1,22 @@
+# Any Linux box with an NVIDIA GPU + nvidia-container-toolkit:
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#   curl localhost:8765/health
+services:
+  extract:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: tod-extract:latest
+    ports:
+      - "127.0.0.1:8765:8765"   # loopback only; reach it via `ssh -L 8765:localhost:8765`
+    environment:
+      - TOD_EXTRACT_TOKEN=${TOD_EXTRACT_TOKEN:-}
+      - TOD_OCR_THREADS=${TOD_OCR_THREADS:-8}
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

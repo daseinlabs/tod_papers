@@ -1,0 +1,7 @@
+# HTTP layer for src/tod_papers/extract_server.py / extract_remote.py
+# (installed into .venv-loop 2026-10-02; the extraction stack itself is requirements-extract.txt)
+fastapi==0.142.2
+uvicorn==0.54.0
+python-multipart==0.0.32
+requests==2.34.2
+anyio==4.15.1
