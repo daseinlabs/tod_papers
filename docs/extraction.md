@@ -342,3 +342,52 @@ pipeline costs about as much as the old OCR-only one did. To trim further:
 Test dumps (described criteria lists, SoM images, before/after JSON) for menu,
 newspaper, NEXT and two booth frames are in the session scratchpad `percept/`
 (`criteria_*.txt`, `som_*.jpg`, `percept_summary.json`).
+
+## Static layout extractor (no GPU) — `layout.py`, 2026-10-02
+
+`src/tod_papers/layout.py` is a hand-measured layout of the Day 1–3 booth and the menus, in native 570×320 coordinates scaled at runtime (frame width / 570). Each element has a `kind`, a `desc`, an `affordance` (click/drag/target/read/avoid) and a visibility rule.
+
+Visibility rules:
+- Screen class (booth/title/day_select/button screen) comes from probe-strip diffs against `layout_assets.npz`, which is built by `tools/build_layout_assets.py`.
+- Tray open is detected from the red/green stamp fraction.
+- Buttons are matched with binary templates.
+
+Document finder:
+- Desk documents: non-black components on the desk (max channel > 60), with the open tray bar and the stamp knobs masked. Knob-cut strips are merged and papers split by brightness.
+- Counter documents: differences against the empty reference counter.
+- Optional CPU OCR (`ocr=True` / `TOD_STATIC_OCR=1`) reads only the document crops, cached by crop hash.
+
+Entry points:
+- `layout.extract_static(frame)` returns `LBox` (a `Box` with `name` and `affordance`), in about 20 ms.
+- `extract.extract_static(frame)` is a new module path; `extract()` is unchanged.
+- `layout.merge_hybrid(static, vision)` returns static fixed elements plus vision's non-overlapping boxes.
+
+Comparison on 6 frames (003519 raw_0000/0014/0020/0033, 221705 raw_0030, live grab), with one TOD request-2 call per frame per variant (details in `scratchpad/static/compare.md`):
+
+| | vision | static | static+doc OCR |
+|---|---|---|---|
+| boxes / SoM marks | 56–67 / 26–29 | 8–11 / 10–15 | same as static |
+| actionable missed (of 6 frames) | 3 (stamp_approved, tray_tab_open ×2) | 0 | 0 |
+| extract latency | 5.7–9.4 s (GPU, contended) | 19–34 ms | 29–101 ms cached, 1.3–16 s cold |
+| TOD top-1 = manual step | 4/6 | 2/6 (+4 near) | 2/6 |
+
+**Static pros:**
+- Deterministic and about 250× faster.
+- Needs no GPU.
+- Never misses the fixed affordances: stamps, open/closed tray tab, horn, lever, slots.
+- Its descriptions carry the affordance, e.g. "drag it right to put the tray away".
+- The SoM is less cluttered.
+
+**Static cons:**
+- Documents have no identity ("document on the desk").
+- Overlapping papers merge into one box, whose centre may grab the paper underneath.
+- It knows only Days 1–3 and the measured menus. The inspect mode and the scanner are nominal or unmeasured.
+- Any new screen is "other" and yields nothing.
+- Naive doc OCR misleads: stamp ink bleeds into the crop text.
+
+**Recommended hybrid:**
+- Use the static layout for every fixed element.
+- Take documents from the vision extractor, whose panel/CLIP identity and per-paper split it does well. `merge_hybrid` drops vision boxes duplicating a static element.
+- When the GPU or remote extractor is unavailable or slow, fall back to static alone: it is still actionable at 20 ms, with only document identity lost.
+- A later cheap improvement is to label static doc boxes by template/colour (the passport cover and the rulebook guide), so the GPU is not needed at all on Days 1–3.
+- Hook (loop.py is owned by another agent, so this is not applied): `--extractor {vision,static,hybrid}` choosing between `ex.extract`, `ex.extract_static` and `layout.merge_hybrid(ex.extract_static(f), ex.extract(f))` at the two `ex.extract(frame)` call sites (offline ~l.958, run ~l.1085).

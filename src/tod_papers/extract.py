@@ -1089,6 +1089,15 @@ def extract(frame_bgr: np.ndarray) -> list[Box]:
     return boxes
 
 
+def extract_static(frame_bgr: np.ndarray, ocr: bool | None = None) -> list[Box]:
+    """No-GPU path: static layout (tod_papers.layout) + cheap document finder,
+    ~20 ms; ocr=True adds CPU OCR of document crops only (cached per crop).
+    Does not touch extract(); see docs/extraction.md "Static layout extractor"."""
+    from .layout import extract_static as _xs
+
+    return _xs(frame_bgr, targets=False, ocr=ocr)
+
+
 if __name__ == "__main__":
     import sys
 
