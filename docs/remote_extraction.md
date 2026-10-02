@@ -213,6 +213,11 @@ deploy/gcp_l4_spot.sh stop        # when done (stops GPU billing)
 gcloud compute instances stop tod-extract --zone=us-west4-a --project=REDACTED
 ```
 
+After a preemption plus `start`, the VM gets a new IP and host key, and PuTTY's
+"Store key in cache?" prompt silently stalls `tunnel`. Run
+`echo y | gcloud compute ssh tod-extract --zone=us-west4-a --command=true` once, then
+`tunnel` again. The container restarts on its own, warm in ~23 s.
+
 Use `deploy/gcp_l4_spot.sh down` to delete it together with its disk, which stops the
 ~$8/month disk charge.
 
