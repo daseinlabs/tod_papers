@@ -3,15 +3,19 @@
 Verified against the live API 2026-10-01:
 - Cloudflare rejects the default python-urllib User-Agent with 403 "error code: 1010".
   Always send a custom UA.
+- Retries: 3 retries with 1/2/4 s backoff on 429/5xx, connection errors, SSL resets and read timeouts.
 - Several questions per request; image goes in the state list as a data URL.
 - Response per question: choice/noul/score + probabilities + confidence.
 """
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import json
 import os
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -89,6 +93,15 @@ class TodResult:
         return self.answers[k]
 
 
+RETRY_HTTP = (429, 500, 502, 503, 504)
+# URLError covers refused/reset connections and DNS; ssl.SSLError/ConnectionError cover SSL EOF / resets raised
+# while reading the body; TimeoutError/socket.timeout cover read timeouts; http.client errors cover a dropped
+# response (RemoteDisconnected, IncompleteRead).
+RETRY_EXC = (urllib.error.URLError, ConnectionError, TimeoutError, socket.timeout, ssl.SSLError,
+             http.client.HTTPException, OSError)
+BACKOFF_S = (1.0, 2.0, 4.0)
+
+
 class TodClient:
     def __init__(self, api_key: str | None = None, timeout: float = 60.0, retries: int = 3):
         self.key = api_key or _load_key()
@@ -96,6 +109,17 @@ class TodClient:
         self.retries = retries
         self.total_cost = 0.0
         self.total_calls = 0
+        self.total_retries = 0
+
+    def _backoff(self, attempt: int, why: str, retry_after: str | None = None) -> None:
+        d = BACKOFF_S[min(attempt, len(BACKOFF_S) - 1)]
+        try:
+            d = max(d, float(retry_after)) if retry_after else d
+        except ValueError:
+            pass
+        self.total_retries += 1
+        print(f"[tod] retry {attempt + 1}/{self.retries} in {d:.0f}s ({why[:160]})")
+        time.sleep(d)
 
     def ask(
         self,
@@ -124,7 +148,7 @@ class TodClient:
             },
         )
         last: Exception | None = None
-        for attempt in range(self.retries):
+        for attempt in range(self.retries + 1):
             t0 = time.perf_counter()
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:
@@ -132,16 +156,19 @@ class TodClient:
                 break
             except urllib.error.HTTPError as e:
                 msg = e.read().decode(errors="replace")[:500]
-                if e.code in (503, 502) and attempt < self.retries - 1:
-                    time.sleep(float(e.headers.get("Retry-After", 1.0)))
+                if e.code in RETRY_HTTP and attempt < self.retries:
                     last = e
+                    self._backoff(attempt, f"HTTP {e.code}", e.headers.get("Retry-After"))
                     continue
                 raise RuntimeError(f"TOD HTTP {e.code}: {msg}") from e
-            except urllib.error.URLError as e:
+            except RETRY_EXC as e:
+                # connection refused/reset, SSL EOF/reset, DNS hiccup, read timeout (runs 092612, 094930 crashed here)
                 last = e
-                time.sleep(0.5 * (attempt + 1))
+                if attempt < self.retries:
+                    self._backoff(attempt, f"{type(e).__name__}: {e}")
+                    continue
         else:
-            raise RuntimeError(f"TOD unreachable: {last}")
+            raise RuntimeError(f"TOD unreachable after {self.retries} retries: {type(last).__name__}: {last}")
         wall = (time.perf_counter() - t0) * 1000
         answers = {}
         for qid, a in data["answers"].items():

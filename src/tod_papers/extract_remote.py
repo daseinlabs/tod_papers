@@ -34,8 +34,14 @@ from . import extract as _ex
 from .extract import Box
 
 _BOX_FIELDS = {f.name for f in dataclasses.fields(Box)}
+# captured at import, before loop.py swaps ex.extract for the remote one (else the fallback would recurse)
+_LOCAL_EXTRACT = _ex.extract
+_LOCAL_WARMUP = _ex.warmup
+FALLBACK_LOG: list = []          # [(time, error)] every local fallback, for the run log
+_local_warm = False
 _session = requests.Session()
 TIMEOUT = float(os.environ.get("TOD_EXTRACT_TIMEOUT", "30"))
+CONNECT_TIMEOUT = float(os.environ.get("TOD_EXTRACT_CONNECT_TIMEOUT", "3"))
 LAST_RESPONSE: dict = {}
 
 
@@ -84,7 +90,8 @@ def extract_remote(frame_bgr: np.ndarray, url: str | None = None, fmt: str | Non
     tok = os.environ.get("TOD_EXTRACT_TOKEN")
     if tok:
         headers["Authorization"] = f"Bearer {tok}"
-    r = _session.post(f"{url}/extract", params={"scale": scale}, data=payload, headers=headers, timeout=TIMEOUT)
+    r = _session.post(f"{url}/extract", params={"scale": scale}, data=payload, headers=headers,
+                      timeout=(CONNECT_TIMEOUT, TIMEOUT))
     r.raise_for_status()
     t2 = time.perf_counter()
     js = r.json()
@@ -112,12 +119,38 @@ def extract_remote(frame_bgr: np.ndarray, url: str | None = None, fmt: str | Non
 
 
 def extract(frame_bgr: np.ndarray) -> list[Box]:
-    """Same signature as extract.extract(); URL from TOD_EXTRACT_URL."""
-    return extract_remote(frame_bgr)
+    """Same signature as extract.extract(); URL from TOD_EXTRACT_URL.
+    If the remote server fails (tunnel down, VM preempted, HTTP error, timeout) this tick falls back to the local
+    extract.extract() and logs it (FALLBACK_LOG, LAST_TIMINGS['fallback_local']=1). The next tick tries the
+    remote server again."""
+    global _local_warm
+    try:
+        return extract_remote(frame_bgr)
+    except (requests.RequestException, ValueError, KeyError) as e:
+        err = f"{type(e).__name__}: {str(e)[:200]}"
+        FALLBACK_LOG.append((time.time(), err))
+        print(f"[extract_remote] REMOTE FAILED ({err}); falling back to local extract()"
+              + ("" if _local_warm else " (first local call loads the models; slow)"))
+        t0 = time.perf_counter()
+        boxes = _LOCAL_EXTRACT(frame_bgr)
+        _local_warm = True
+        T = dict(_ex.LAST_TIMINGS)
+        T.update({"fallback_local": 1.0, "fallback_ms": (time.perf_counter() - t0) * 1e3})
+        _ex.LAST_TIMINGS.clear()
+        _ex.LAST_TIMINGS.update(T)
+        return boxes
 
 
 def warmup() -> None:
-    """Server warms its own models at startup; this just checks it is up and opens the connection."""
+    """Server warms its own models at startup; this just checks it is up and opens the connection.
+    If it is down, warm the local models instead so the fallback is ready."""
+    global _local_warm
     url = os.environ.get("TOD_EXTRACT_URL", "").rstrip("/")
-    h = _session.get(f"{url}/health", timeout=TIMEOUT).json()
-    print(f"[extract_remote] {url}: warm={h.get('warm')} gpu={h.get('gpu')} ocr={h.get('ocr_engine')}")
+    try:
+        h = _session.get(f"{url}/health", timeout=(CONNECT_TIMEOUT, TIMEOUT)).json()
+        print(f"[extract_remote] {url}: warm={h.get('warm')} gpu={h.get('gpu')} ocr={h.get('ocr_engine')}")
+    except (requests.RequestException, ValueError) as e:
+        print(f"[extract_remote] {url} unreachable ({type(e).__name__}); warming the local extractor for fallback")
+        FALLBACK_LOG.append((time.time(), f"warmup: {type(e).__name__}"))
+        _LOCAL_WARMUP()
+        _local_warm = True
