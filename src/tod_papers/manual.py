@@ -194,7 +194,11 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
   trash icon deletes the save. If no day tile is drawn yet, choose wait.
 - After the day tile, the intro, newspaper and bulletin screens advance with NEXT, then WALK TO WORK takes
   you to the booth. Full-screen text without a button: click the text.
-- End of day: click the button that continues to the next day.
+- End of day (the family budget screen: SAVINGS, SALARY, RENT, HEAT, FOOD, MEDICINE ..., a total, SLEEP): the
+  total at the bottom is your money after tonight. If it would be NEGATIVE (a minus sign, e.g. "$-5") you are
+  arrested for debt and the game is over. Click HEAT, FOOD (and MEDICINE) one at a time to untick them until
+  the total is zero or more, then click SLEEP. RENT cannot be unticked. If the total is not negative, click
+  SLEEP right away.
 - While something is moving (the person walking in, a screen fading), choose wait.
 
 8. MISTAKES SEEN BEFORE (do not repeat)
