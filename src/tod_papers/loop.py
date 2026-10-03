@@ -656,7 +656,7 @@ REGION_CAPS = {
     "hand_back": "the entrant at the booth window -- drop documents ON THE PERSON to hand them back",
     "desk": "desk (drop documents here to read them)",
     "tray_stow": "right edge of the desk (drag the tray tab here to put the stamp tray away)",
-    "stow_papers": "counter shelf left of the desk -- drop the rulebook or bulletin here to put it away (it closes "
+    "stow_papers": "counter shelf left of the desk -- drop the rulebook, bulletin or a flyer here to put it away (it closes "
                    "and leaves the desk)",
 }
 
@@ -1070,8 +1070,8 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
             if x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 and getattr(b, "name", "") not in layout.BY_NAME:
                 rest = desc[str(i)].split(" — ", 1)[-1]   # drop the detector kind; TOD's identity names it
                 desc[str(i)] = f"{d['id']} (TOD {d['p']:.2f}) — {rest}"
-                if d["id"] != "other":
-                    doc_ids.add(i)   # run 114927 t30-86: the counter passport was labelled 'rubber stamp' (click-only)
+                if d["id"] != "other" or b.kind == "text":   # a texted 'other' paper is still a paper (run
+                    doc_ids.add(i)                          # 090830 t22-43: the Pink Vice flyer clicked 8x)   # run 114927 t30-86: the counter passport was labelled 'rubber stamp' (click-only)
                     if b.kind != "page_corner":
                         doc_of[i] = j
                 break

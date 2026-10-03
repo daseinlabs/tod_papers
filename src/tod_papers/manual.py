@@ -103,7 +103,7 @@ Dragging a stamp does nothing. Clicking a document does nothing. Clicking empty 
   here to open and read them, or to move a bulletin/rulebook out of the way.
 - "right edge of the desk (drag the tray tab here to put the stamp tray away)": offered while the tray is
   out. Dragging the tray tab here closes the tray.
-- "counter shelf left of the desk -- drop the rulebook or bulletin here to put it away": an open rulebook or
+- "counter shelf left of the desk -- drop the rulebook, bulletin or a flyer here to put it away": an open rulebook or
   bulletin dropped here closes and leaves the desk. Neither is needed on Days 1-3.
 
 4. PROCESSING ONE ENTRANT -- FIND THE FIRST LINE THAT MATCHES WHAT IS CURRENTLY TRUE
@@ -190,6 +190,8 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
 - The bulletin (Ministry of Admission sheet) and the rulebook can lie open on the desk. If one covers the
   passport or the place you need to work, drag it aside to the left part of the desk ("desk" target). They
   are not needed to process day-1 entrants.
+- A loose flyer or note an entrant leaves (e.g. the pink "The Pink Vice" card) is not needed: if it lies on the
+  passport or under a stamp, DRAG it (clicking it does nothing) onto the "counter shelf left of the desk" target.
 - Multi-page papers (the bulletin shows "3/4" at its bottom) turn pages when you click their bottom-right
   corner. Do not drag a page corner.
 
@@ -242,6 +244,7 @@ DOC_KINDS = {"passport": "the entrant's passport (a small booklet, or its open p
              "bulletin": "the Ministry of Admission bulletin (a sheet with today's rules / news)",
              "entry_ticket": "an entry ticket (small slip with a date)",
              "transcript": "the interview transcript printout",
+             "flyer": "a loose flyer / advertisement or note an entrant left (e.g. a pink 'The Pink Vice' card)",
              "other": "something else, or not a paper"}
 # photo_matches_person is no longer asked (answers sat at p 0.4-0.68 all session; budget of 16 questions). The
 # expiry check is TOD's reading of the EXP. year and month, compared with today's date by the rule (section 5).

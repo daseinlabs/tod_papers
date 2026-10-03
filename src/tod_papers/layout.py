@@ -102,7 +102,7 @@ LAYOUT: list[Element] = [
     # the rulebook lay open over the desk and was only ever moved around on the desk)
     # run 044332 t35-38: drops on the drawer row (106-146, 272-316) did nothing; papers dragged left off the desk
     # onto the counter shrink to their closed form there
-    Element("stow_papers", "region", "counter shelf left of the desk -- drop the rulebook or bulletin here to put "
+    Element("stow_papers", "region", "counter shelf left of the desk -- drop the rulebook, bulletin or a flyer here to put "
             "it away (it closes and leaves the desk)", "target", (20, 222, 110, 262), "booth"),
     # the person behind the glass (head + chest); documents dropped here are handed back (run 092612: dropped on
     # the counter shelf they just lay there). Measured on runs 083908 raw_0000 / 090556 raw_0022.
