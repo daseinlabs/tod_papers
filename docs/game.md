@@ -152,3 +152,102 @@ Sources: Fandom "Official Bulletin" https://papersplease.fandom.com/wiki/Officia
 - Documents by day: https://www.sort-the-court.com/games/papers-please/documents-guide
 - Fandom: Official Bulletin / Rulebook / Day 2 / Day 3 / Citation / Inspection mode / Terrorism (papersplease.fandom.com)
 - Save location: https://3909.zendesk.com/hc/en-us/articles/360057528153-Savedata-Location
+
+---
+
+## Scripted entrants and desk objects, Days 1–3
+
+Sources are listed per subsection. "TAS" below refers to the open-source Papers, Please TAS bot by amari-calipso (https://github.com/amari-calipso/papers-please-tasbot), whose run script hard-codes an input sequence for each scripted entrant. The TAS does not try to avoid citations, so its approve/deny choices are not evidence of correctness; its input sequences are evidence of what the game accepts. Its pixel coordinates are for its own 1156x680 window and are given only to locate objects relative to each other.
+
+### Per-day rules (bulletin wording)
+- **Day 1 (1982-11-23):** "Stamp passport ENTRY VISA and return documents to entrant. Entry is restricted to Arstotzkan citizens only." Arstotzkan passport: approve. Any other passport: deny.
+- **Day 2 (1982-11-24):** "Foreigners with a valid passport are permitted to enter." Inspection hardware is installed; inspect mode compares two items and reports "Discrepancy Detected". An expired passport (compare with the date at the bottom left) is a deny.
+- **Day 3 (1982-11-25):** "Entry for non-citizens is now regulated. All foreigners require a valid ENTRY TICKET." Arstotzkans still need only a passport. The ticket carries a single "valid on" date; it is an effective date, not an expiry date: if it is not 1982.11.25, deny. A foreigner who does not present a ticket: deny (approving an entrant who is missing a required document produces a citation). A second bulletin page explains the no-documents procedure (see Jorji below).
+- Sources: https://paperspleaseloc.github.io/ (localization guideline containing the bulletin strings), https://strategywiki.org/wiki/Papers,_Please/Day_1, https://strategywiki.org/wiki/Papers,_Please/Day_2, https://strategywiki.org/wiki/Papers,_Please/Day_3, https://papersplease.fandom.com/wiki/Citation
+
+### Missing-document interrogation (general input sequence)
+1. Drag the rulebook from its slot onto the desk; open the **Basic Rules** page.
+2. Click the inspect button (red button, lower right of the desk).
+3. Click the rule that requires the missing document (e.g. "Entrant must have a passport"; on Day 3 the entry-ticket rule).
+4. Click the **empty counter** in front of the entrant (the booth-side area where entrants put their papers; the TAS clicks (275, 525), inside its counter box (8, 455)–(350, 565)).
+5. Click the interrogate prompt that appears (the TAS clicks (175, 610), just below the counter).
+6. Drag the rulebook back to its slot (the TAS does this; not required by the game).
+The entrant then answers: some hand over the missing document, some leave.
+- Sources: https://steamsolo.com/guide/gameplay-basics-documents-and-inspect-mode-papers-please/ ("highlight the empty counter and the correlating entry in your R&R-book"), https://papersplease.fandom.com/wiki/Frequent_sticking_points, https://raw.githubusercontent.com/amari-calipso/papers-please-tasbot/main/tas.py (`interrogateMissingDoc`, `noPassport`), https://raw.githubusercontent.com/amari-calipso/papers-please-tasbot/main/modules/constants/screen.py
+
+### Day 1 scripted entrants
+| # | Entrant | Correct action |
+|---|---|---|
+| 1 | Arstotzkan, passport only | Approve, return passport |
+| 2 | Imporian | Deny, return passport |
+| 3 | Republian | Deny, return passport |
+| 4 | Random | By rule |
+| 5 | Makes a remark and leaves on his own | Nothing to stamp or return. Call him with the horn, wait for him to leave, call the next entrant |
+| 6+ | Random | By rule |
+- TAS Day 1 (its comment: "process exactly 12 entrants"): approve, deny, deny, rule check, horn only for #5 (`nextPartial()`, no document input), then 7 rule checks.
+- The day does not end until all preset entrants have been handled.
+- Sources: https://strategywiki.org/wiki/Papers,_Please/Day_1, https://raw.githubusercontent.com/amari-calipso/papers-please-tasbot/main/runs/AllEndings.py
+
+### Day 2 scripted entrants
+| # | Entrant | Correct action |
+|---|---|---|
+| 1 | Foreigner, valid passport | Approve |
+| 2 | Expired passport | Deny |
+| 3 | Random | By rule |
+| 4 | Arstotzkan, valid | Approve |
+| 5 | Not documented as special | By rule |
+| 6 | Valid papers plus a Pink Vice flyer | Approve (flyer: see below) |
+| 7 | During this entrant an attacker climbs the wall and bombs the checkpoint; the day ends early | Process normally; the attack is a cutscene with no player input |
+- None of the sources documents a Day 2 entrant who hands over a message or note; the first note-giving scripted entrants (EZIC) appear later.
+- Sources: https://strategywiki.org/wiki/Papers,_Please/Day_2, https://papersplease.fandom.com/wiki/Terrorism, https://speeddemosarchive.com/PapersPlease.html ("Day 2 is first of those" terrorist-attack days)
+
+### Day 3 scripted entrants
+| # | Entrant | Correct action |
+|---|---|---|
+| 1 | Foreigner, valid passport + ticket | Approve |
+| 2 | Foreigner, presents passport only (forgot the ticket) | Deny; alternatively interrogate (entry-ticket rule + empty counter) and he hands over the ticket, then judge the full set |
+| 3 | Imporian woman, valid papers + Pink Vice flyer | Approve |
+| 4 | Random | By rule |
+| 5 | Valid papers | Approve |
+| 6 | Ticket with the wrong date | Deny |
+| 7 | Random | By rule |
+| 8 | Jorji Costava, no papers | Interrogate (below); he leaves |
+| 9+ | Random | By rule |
+- Speedrun notes: on Day 3 "entrants 1, 3, 5 always have correct papers and entrants 2, 6, 8 always have incorrect papers", so denying #2 without interrogation is correct.
+- TAS Day 3 sequence: approve (multi-doc), deny passport-only (#2, no interrogation), approve multi-doc (#3), rule check, approve, deny (#6), rule check, then for #8 horn + `noPassport()`, then rule checks until the day ends.
+- Sources: https://strategywiki.org/wiki/Papers,_Please/Day_3, https://speeddemosarchive.com/PapersPlease.html, https://raw.githubusercontent.com/amari-calipso/papers-please-tasbot/main/runs/AllEndings.py
+
+### Jorji Costava, Day 3 (first appearance)
+- He first appears on **Day 3** as entrant 8 (not Day 2). He puts nothing on the counter and claims Arstotzka is so great that no passport is required. He is not named on this visit.
+- There is nothing to stamp and nothing to hand back.
+- Required input: the missing-document interrogation above, linking the Basic Rules entry "Entrant must have a passport" with the **empty counter**, then the interrogate prompt. After his reply he leaves on his own; then call the next entrant with the horn.
+- If the player does not do this, after some time the game prints a slip: "THIS ENTRANT HAS NO DOCUMENTS / To proceed, use INSPECT mode to interrogate. Review page 2 of today's bulletin for full instructions." The day does not progress until the interrogation is done.
+- Later visits: Day 4 crude fake passport, Day 6 genuine passport without entry permit, Day 11 valid papers.
+- Sources: https://strategywiki.org/wiki/Papers,_Please/Day_3, https://papersplease.fandom.com/wiki/Jorji_Costava, https://www.pcgamer.com/great-moments-in-pc-gaming-dealing-with-jorji-costava-in-papers-please/, https://paperspleaseloc.github.io/, https://raw.githubusercontent.com/amari-calipso/papers-please-tasbot/main/tas.py (`noPassport` calls `interrogateMissingDoc("entrants-must-have-passport")` and clicks the counter position)
+
+### Pink Vice flyer (Day 2 entrant 6, Day 3 entrant 3)
+- The entrant places her normal papers plus a small flyer ("Come to Pink Vice. Ask for Ava.") on the counter. Entrants carrying the flyer always have valid papers: approve.
+- The flyer has no rule value. It cannot be thrown away; guides say to drag it out of the way (a desk corner, or the far left of the booth counter) and keep it.
+- The TAS treats it as an extra paper: drags it from the counter to a desk slot, and after stamping drags every non-passport paper, the flyer included, to the entrant. Both keeping it and handing it back are therefore accepted.
+- Sources: https://strategywiki.org/wiki/Papers,_Please/Day_2, https://strategywiki.org/wiki/Papers,_Please/Day_3, https://papersplease.fandom.com/wiki/The_Pink_Vice, https://raw.githubusercontent.com/amari-calipso/papers-please-tasbot/main/modules/documentStack.py
+
+### Citation slips
+- A citation is printed into the booth shortly after the entrant leaves when protocol was violated (approving with a discrepancy or a missing document, denying an entrant whose papers are all correct). The first two per day are warnings ("WARNING ISSUED - NO PENALTY", "LAST WARNING - NO PENALTY"); later ones assess a credit penalty.
+- Citations are for the inspector; they are not handed to the entrant. They do not block calling or processing the next entrant: the TAS contains no citation handling at all and its document loop works through days on which it takes citations.
+- None of the sources found states whether citation slips must be moved, or whether they stack in one spot or spread over the desk.
+- Sources: https://en.wikipedia.org/wiki/Papers,_Please, https://papersplease.fandom.com/wiki/Citation, https://paperspleaseloc.github.io/, https://digitalst0rytelling.wordpress.com/2016/02/19/vigilance-in-papers-please/, https://raw.githubusercontent.com/amari-calipso/papers-please-tasbot/main/tas.py
+
+### Scripted vs random entrants, determinism
+- Each day mixes scripted entrants at fixed positions with randomly generated ones. Fixed positions above: Day 1 #1–3 and #5; Day 2 #1, 2, 4, 6, 7; Day 3 #1–3, 5, 6, 8. "Every day, after entrant 10 everyone is always completely random and unpredictable."
+- Scripted entrants keep their position, dialogue and document validity on every play. Random entrants differ between playthroughs; the developer's test harness seeds each playthrough with a different random seed, so random entrants are not guaranteed to repeat after a restart.
+- Day 1 and Day 3 run until 18:00 game time (and not before all preset entrants are handled), so the total count depends on speed; Day 2 ends early with the bombing during entrant 7.
+- Sources: https://speeddemosarchive.com/PapersPlease.html, https://en.wikipedia.org/wiki/Papers,_Please, https://dukope.com/devlogs/papers-please/mobile/, https://strategywiki.org/wiki/Papers,_Please/Day_1, https://steamsolo.com/guide/gameplay-basics-documents-and-inspect-mode-papers-please/
+
+### Inputs other than stamping and dragging papers
+- **Horn/speaker** click: calls the next entrant (the first click starts the 06:00–18:00 clock).
+- **Inspect mode** button (lower right of the desk): required on Day 3 for Jorji; optional for Day 3 entrant 2; available from Day 2 for discrepancies.
+- **Rulebook**: drag out and click the Basic Rules page; required on Day 3 for Jorji.
+- **Interrogate prompt**: click after linking two items in inspect mode.
+- **Transcript**: usable in inspect mode to compare spoken answers with documents; not required on Days 1–3.
+- End of day: expense checkboxes (food, heat, medicine) on the summary screen, then the sleep button.
+- Sources: https://steamsolo.com/guide/gameplay-basics-documents-and-inspect-mode-papers-please/, https://raw.githubusercontent.com/amari-calipso/papers-please-tasbot/main/tas.py, https://raw.githubusercontent.com/amari-calipso/papers-please-tasbot/main/runs/AllEndings.py
