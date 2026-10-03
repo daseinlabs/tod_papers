@@ -1428,8 +1428,11 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         # hide under the open tray), the stamps are hidden below.
         boxes = [b for b in boxes if getattr(b, "name", "") != "tray_tab"
                  and not (b.caption or "").startswith("tab at screen edge")]
-    if undecided:
-        # E?: the page has to be read, not the tray closed (run 044332 t44: closing it started a C/E? loop)
+    if undecided and man.yes(state, "document_open_on_desk"):
+        # E?: the page has to be read, not the tray closed (run 044332 t44: closing it started a C/E? loop) -- but
+        # only while TOD sees the passport open on the desk; with it hidden under the open tray, closing the tray
+        # is the way to it (loop10 run 162909 t20-47: tray close hidden, 'document under the open stamp tray'
+        # dragged / wait for 28 ticks)
         boxes = [b for b in boxes if not (getattr(b, "name", "") == "tray_tab_open" or b.caption == TRAY_HANDLE_CAP)]
     if nopp:
         boxes = [b for b in boxes if not (_is_tray_tab(b) or b.caption == TRAY_HANDLE_CAP

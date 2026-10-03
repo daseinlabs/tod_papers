@@ -864,7 +864,10 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
             lines.append(f"- The passport is under the wrong stamp: drag it onto the {ws[1].upper()} landing strip")
         elif undecided_stamp(state, day, facts):
             lines.append("- The decision is not known yet (a check of section 5 could not be read): the stamps are not "
-                         "offered. Drag the passport to the 'desk' target so its data page can be read")
+                         "offered. Drag the passport to the 'desk' target so its data page can be read"
+                         + ("" if yes(state, "document_open_on_desk") else
+                            "; if no open passport is visible on the desk (it may be hidden under the open stamp "
+                            "tray), first drag the stamp tray tab right to put the tray away"))
         elif stamped(state, facts):
             lines.append("- The passport is already stamped: do not press a stamp again; hand the passport back "
                          "(drag it onto the entrant at the window)")
