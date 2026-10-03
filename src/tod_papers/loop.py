@@ -345,7 +345,7 @@ def _small_for_send(frame: np.ndarray, args) -> np.ndarray:
 
 
 def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", inspect: tuple = man.INSPECT_KEYS,
-                facts: dict | None = None):
+                facts: dict | None = None, with_docs: bool = True):
     """REQUEST 1: plain (unmarked) frame + short text + screen, day, the manual's state questions
     (manual.state_questions, incl. the passport-under-each-stamp and passport-readable questions) and one
     identity question per paper the layout found on the desk/counter (its position + the OCR text inside it).
@@ -360,35 +360,85 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
             q.pop(k, None)
     # lowest-value state questions give way to 2 paper identities, then a hard cap at TOD's limit
     for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable"):
-        if len(q) + min(2, len(docs)) > TOD_MAX_Q:
+        if len(q) + (min(2, len(docs)) if with_docs else 0) > TOD_MAX_Q:
             q.pop(k, None)
     for k in ("photo_matches_person", "entry_ticket_dated_today", "inspect_mode_on"):
         if len(q) > TOD_MAX_Q:
             q.pop(k, None)
-    for i, d in enumerate(docs[:max(0, TOD_MAX_Q - len(q))]):
-        q[f"doc{i}"] = man.doc_question(d)
+    room = max(0, TOD_MAX_Q - len(q)) if with_docs else 0
+    for i, d in enumerate(docs if with_docs else ()):
+        c = DOC_CACHE.get(_doc_key(d))
+        if c and (facts or {}).get("tick", 0) - c["tick"] <= DOC_CACHE_TICKS:
+            d["cached"] = c   # same paper, same place, same text as a recent tick: reuse TOD's answer
+        elif room > 0:
+            q[f"doc{i}"] = man.doc_question(d)
+            room -= 1
     small = _small_for_send(frame, args)
-    text = man.STATE_TEXT + "\n\n" + man.desk_text_block(facts)
+    # with_docs=False: sent in parallel with extraction, before the desk OCR exists (the image carries the text)
+    text = man.STATE_TEXT + ("\n\n" + man.desk_text_block(facts) if with_docs else "")
     return tod.ask(q, text=text, image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
+
+
+def doc_probe(tod: TodClient, frame: np.ndarray, args, facts: dict):
+    """REQUEST 1b (after extraction, only when a paper is not in DOC_CACHE): one identity question per new paper
+    box, unmarked frame + the OCR text inside each. Returns the TOD result or None when every paper is cached."""
+    q = {}
+    for i, d in enumerate(facts.get("docs") or []):
+        c = DOC_CACHE.get(_doc_key(d))
+        if c and facts.get("tick", 0) - c["tick"] <= DOC_CACHE_TICKS:
+            d["cached"] = c
+        elif len(q) < TOD_MAX_Q:
+            q[f"doc{i}"] = man.doc_question(d)
+    if not q:
+        return None
+    small = _small_for_send(frame, args)
+    return tod.ask(q, text=man.STATE_TEXT + "\n\n" + man.desk_text_block(facts),
+                   image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
 
 
 def add_tod_facts(facts: dict, state: dict, df: dict, sinfo: dict | None) -> None:
     """facts += TOD's document identities, what lies under each stamp head, and the passport_under sides."""
     facts["static"] = sinfo
     facts["docs_named"] = df["docs_named"] = name_docs(state, df)
+    for i, d in enumerate(df.get("docs") or []):
+        a = state.get(f"doc{i}")
+        if a:
+            DOC_CACHE[_doc_key(d)] = {"id": a["value"], "p": a["p"], "tick": facts.get("tick", 0)}
+    derive_open_on_desk(state, facts)
     facts["strip"] = strip_facts(state, df, sinfo)
     facts["passport_under"] = passport_sides(facts["strip"])
     facts["tray_open_px"] = bool((sinfo or {}).get("tray_open"))
 
 
+DOC_CACHE: dict = {}   # (where, native box, OCR text) -> {"id", "p", "tick"}: an unchanged paper is not re-asked
+DOC_CACHE_TICKS = 15
+
+
+def _doc_key(d: dict) -> tuple:
+    return d["where"], tuple(d["native"]), tuple(d.get("text") or ())
+
+
 def name_docs(state: dict, df: dict) -> list[dict]:
-    """df['docs'] + TOD's identity answer for each (state['doc<i>'])."""
+    """df['docs'] + TOD's identity answer for each (state['doc<i>'], or the cached answer for an unchanged paper)."""
     out = []
     for i, d in enumerate(df.get("docs") or []):
         a = state.get(f"doc{i}")
         if a:
             out.append({**d, "id": a["value"], "p": a["p"]})
+        elif d.get("cached"):
+            out.append({**d, "id": d["cached"]["id"], "p": d["cached"]["p"]})
     return out
+
+
+def derive_open_on_desk(state: dict, facts: dict) -> None:
+    """Run 015649/022439: 'passport open on the desk' answered no in 49 booth ticks while the same request named a desk
+    paper PASSPORT >= 0.5 -> the manual went to D2/'?'. TOD's own identity answer for a desk paper counts too."""
+    best = max([d["p"] for d in facts.get("docs_named") or [] if d["where"] == "desk" and d["id"] == "passport"],
+               default=0.0)
+    a = state.get("document_open_on_desk")
+    if best >= 0.5 and a and a["p"] < 0.5:
+        state["document_open_on_desk"] = {"value": True, "p": round(best, 3), "probs": a["probs"],
+                                          "derived_from": "desk paper identity = passport"}
 
 
 def parse_state(res) -> dict:
@@ -912,16 +962,19 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         idmap[len(idmap) + 1] = Box(W // 4, H // 4, 3 * W // 4, 3 * H // 4, "", "background", 0.0)
     desc = {str(i): describe(b, W, H) for i, b in idmap.items()}
     doc_ids = set()   # element ids TOD (request 1) named as a paper -> drag-only, whatever the detector label says
+    doc_of: dict = {}   # element id -> index of the paper it lies on
     for i, b in idmap.items():   # name each paper by TOD's request-1 identity answer (geometry: centre inside)
         if b.kind in ("region", "background"):
             continue
-        for d in (facts or {}).get("docs_named") or []:
+        for j, d in enumerate((facts or {}).get("docs_named") or []):
             x1, y1, x2, y2 = d["box"]
             if x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 and getattr(b, "name", "") not in layout.BY_NAME:
                 rest = desc[str(i)].split(" — ", 1)[-1]   # drop the detector kind; TOD's identity names it
                 desc[str(i)] = f"{d['id']} (TOD {d['p']:.2f}) — {rest}"
                 if d["id"] != "other":
                     doc_ids.add(i)   # run 114927 t30-86: the counter passport was labelled 'rubber stamp' (click-only)
+                    if b.kind != "page_corner":
+                        doc_of[i] = j
                 break
     banned_ids, ban_lines = {}, []
     if stuck is not None:
@@ -933,9 +986,14 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
             verb = "Clicking" if f.action == "click" else "Dragging"
             ban_lines.append(f"{verb} '{short(f.desc, 60)}' did nothing (tried {f.count}x); excluded for "
                              f"{f.banned_until - tick} more tick(s)")
+    # one drag source per paper (61% of booth ticks offered the same passport 2+ times): the largest box on it
+    dup_ids = set()
+    for j in set(doc_of.values()):
+        els = sorted((i for i, jj in doc_of.items() if jj == j), key=lambda i: -idmap[i].area)
+        dup_ids.update(str(i) for i in els[1:])
     # regions are drop targets only; the background is a click source only
     src_ids = {k: v for k, v in desc.items() if k not in banned_ids and idmap[int(k)].kind != "region"
-               and not hide_stamp(idmap[int(k)])}
+               and not hide_stamp(idmap[int(k)]) and k not in dup_ids}
     tgt_ids = {k: v for k, v in desc.items() if idmap[int(k)].kind != "background"} or dict(desc)
     if booth:   # in the booth every drag ends on a drop-target region (manual section 3); nothing else is a target
         tgt_ids = {k: v for k, v in tgt_ids.items() if idmap[int(k)].kind == "region"} or tgt_ids
@@ -1016,6 +1074,18 @@ def decide(res, P: dict) -> dict:
             note = (note + "; " if note else "") + (f"tray tab dragged onto #{tgt} -> #{ok[0]} "
                                                     f"({'stow edge' if is_open else 'desk'})")
             tgt = str(ok[0])
+    tb_ = P["idmap"].get(int(tgt)) if tgt.isdigit() else None
+    if (action == "drag" and sb is not None and tb_ is not None and tb_.kind == "region"
+            and tb_.caption == REGION_CAPS["desk"] and not _is_tray_tab(sb)
+            and tb_.x1 <= sb.center[0] <= tb_.x2 and tb_.y1 <= sb.center[1] <= tb_.y2):
+        # the paper already lies on the desk target: dropping it there again is a no-op (coordinator count: 26
+        # re-drops in runs 015649/022439) -> TOD's best other target
+        alt = [k for k, _ in sorted(res["target"].probabilities.items(), key=lambda kv: -kv[1])
+               if k != tgt and k != src and k.isdigit() and P["idmap"].get(int(k)) is not None
+               and P["idmap"][int(k)].caption != REGION_CAPS["hand_back"]]   # never an unplanned hand-back
+        if alt:
+            note = (note + "; " if note else "") + f"#{src} already lies on the desk target -> #{alt[0]}"
+            tgt = alt[0]
     if action == "drag" and tgt == src:
         # dropping an item on itself is a no-op: take TOD's best other target
         alt = [k for k, _ in sorted(res["target"].probabilities.items(), key=lambda kv: -kv[1]) if k != src]
@@ -1163,6 +1233,7 @@ def offline(args) -> int:
         boxes, vis, sinfo = get_boxes(frame, args.extractor)
         t_ex = (time.perf_counter() - t0) * 1e3
         df = desk_facts(boxes, frame.shape[1], frame.shape[0], sinfo)
+        DOC_CACHE.clear()   # offline frames are unrelated pictures
         oday = args.day or "unknown"   # offline only: the day the frames come from (live runs read it via request 1)
         asked = ("issuing_country",) if oday == "1" else man.INSPECT_KEYS
         probe, t_probe = _timed(state_probe, tod, frame, args, oday, asked, df)
@@ -1265,6 +1336,7 @@ def run(args) -> int:
     drag_key, drag_n = None, 0                  # repeat-drag rule (REPEAT_DRAG_N)
     n_resets = 0                                # len(ent.log) last seen -> entrant-scoped counters reset
     unreach_n = 0                               # --unreachable-stop counter (consecutive)
+    bad4xx_n = 0                                # consecutive TOD 4xx (bad request) ticks -> stop at 2
 
     def park_cursor():
         if not args.dry_run and is_foreground(hwnd):
@@ -1301,7 +1373,10 @@ def run(args) -> int:
             if not stable:
                 print(f"[tick {tick:03d}] screen still animating after {waited:.1f}s (frac {af:.4f}); proceeding anyway")
 
-            # ---- extract, then REQUEST 1 (state, unmarked frame + desk OCR text) ------
+            # ---- REQUEST 1 (state, unmarked frame) in parallel with extraction; then 1b (new papers only) -----
+            # Day 1 decides on the country only; expiry/photo are asked from Day 2 (frees 2 of TOD's 16 questions)
+            asked = ("issuing_country",) if day == "1" else man.INSPECT_KEYS
+            fut = _PROBE_POOL.submit(_timed, state_probe, tod, frame, args, day, asked, {"tick": tick}, False)
             t0 = time.perf_counter()
             boxes, vis, sinfo = get_boxes(frame, args.extractor)
             rec["extract_ms"] = round((time.perf_counter() - t0) * 1e3, 1)
@@ -1311,12 +1386,15 @@ def run(args) -> int:
                 rec["static_layout"] = {k: v for k, v in sinfo.items() if k in (
                     "screen", "tray_open", "passport_under", "ms")}
             df = desk_facts(boxes, frame.shape[1], frame.shape[0], sinfo)
-            # Day 1 decides on the country only; expiry/photo are asked from Day 2 (frees 2 of TOD's 16 questions)
-            asked = ("issuing_country",) if day == "1" else man.INSPECT_KEYS
+            df["tick"] = tick
             rec["desk_facts"], rec["inspect_asked"] = df, list(asked)
             try:
-                probe, rec["state_ms"] = _timed(state_probe, tod, frame, args, day, asked, df)
+                probe, rec["state_ms"] = fut.result()
                 state = parse_state(probe)
+                dres, rec["doc_ms"] = _timed(doc_probe, tod, frame, args, df)
+                if dres is not None:
+                    state.update(parse_state(dres))
+                rec["docs_cached"] = sum(1 for d in df.get("docs") or [] if d.get("cached"))
             except TodCreditExhausted as e:  # 402: every later call fails too -> stop once, do not skip ticks
                 stop_reason = "TOD credit exhausted (402)"
                 print(f"[tick {tick:03d}] {e}")
@@ -1331,6 +1409,12 @@ def run(args) -> int:
                 rec.update(tod_error=f"state: {e}", executed="none (state request error)")
                 row.update(action="none", effect="skipped: state request error")
                 unreach_n = unreach_n + 1 if isinstance(e, TodUnreachable) else 0
+                bad4xx_n = bad4xx_n + 1 if "TOD HTTP 4" in str(e) else 0
+                if bad4xx_n >= 2:   # run 015649 t41-58: the same 422 repeated 17 ticks; a bad request will not fix itself
+                    stop_reason = f"TOD rejected the request twice in a row ({str(e)[:80]})"
+                    print(f"[loop] STOP: {stop_reason}")
+                    rec["stop_reason"] = stop_reason
+                    row["effect"] = "stop: " + stop_reason
                 if args.unreachable_stop and unreach_n >= args.unreachable_stop:
                     stop_reason = "TOD unreachable"
                     print(f"[loop] STOP: {stop_reason} ({unreach_n} ticks in a row)")
@@ -1416,6 +1500,12 @@ def run(args) -> int:
                 rec.update(tod_error=str(e), executed="none (TOD error)")
                 row.update(action="none", effect="skipped: TOD error")
                 unreach_n = unreach_n + 1 if isinstance(e, TodUnreachable) else 0
+                bad4xx_n = bad4xx_n + 1 if "TOD HTTP 4" in str(e) else 0
+                if bad4xx_n >= 2:   # run 015649 t41-58: the same 422 repeated 17 ticks; a bad request will not fix itself
+                    stop_reason = f"TOD rejected the request twice in a row ({str(e)[:80]})"
+                    print(f"[loop] STOP: {stop_reason}")
+                    rec["stop_reason"] = stop_reason
+                    row["effect"] = "stop: " + stop_reason
                 if args.unreachable_stop and unreach_n >= args.unreachable_stop:
                     stop_reason = "TOD unreachable"
                     print(f"[loop] STOP: {stop_reason} ({unreach_n} ticks in a row)")
@@ -1428,7 +1518,7 @@ def run(args) -> int:
                 time.sleep(2.0)
                 continue
             rec["tod_ms"] = round((time.perf_counter() - t1) * 1e3, 1)
-            unreach_n = 0
+            unreach_n = bad4xx_n = 0
             rec["tod_request_id"] = res.request_id
             res.answers["screen"] = probe["screen"]  # overlay shows it alongside the other answers
 

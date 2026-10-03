@@ -270,11 +270,12 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
             "yes - a passport/document lies on the counter shelf under the window",
             "no - the counter shelf is empty"),
         "document_open_on_desk": _noul(
-            "Look at the dark desk on the right half of the picture. Is any part of a passport page (cream "
-            "paper with a name, numbers or a photo) visible there, even if only a thin strip sticks out above "
-            "or beside the grey stamp bar? The bulletin (dark blue sheet) does not count.",
-            "yes - some part of a cream passport page is visible on the right half",
-            "no - no passport paper visible on the right half"),
+            "Look at the dark desk: the whole lower part of the picture to the right of the grey-green counter "
+            "shelf (bottom-centre and bottom-right). Is an open passport (cream page with a name, numbers, a photo or "
+            "an ENTRY VISA box) lying there, even if only a thin strip sticks out above or beside the grey stamp "
+            "bar? The bulletin (dark blue sheet) and the rulebook do not count.",
+            "yes - an open passport page lies on the desk (bottom-centre or bottom-right)",
+            "no - no passport page anywhere on the desk"),
         "stamp_tray_open": _noul(
             "Is the stamp tray pulled out over the desk: a grey bar with a big red DENIED stamp and a big "
             "green APPROVED stamp on it?",
