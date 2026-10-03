@@ -947,6 +947,9 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if facts is not None:
         facts["e_undecided"] = bool(undecided)
     pu_now = (facts or {}).get("passport_under") or []
+    if undecided:
+        # E?: the page has to be read, not the tray closed (run 044332 t44: closing it started a C/E? loop)
+        boxes = [b for b in boxes if not (getattr(b, "name", "") == "tray_tab_open" or b.caption == TRAY_HANDLE_CAP)]
     if wrong or undecided:
         hide_stamp = lambda b: _stamp_side(b, frame) is not None
     elif booth and facts is not None and "strip" in facts:
@@ -1047,7 +1050,11 @@ def decide(res, P: dict) -> dict:
     src = str(res["source"].value)
     tod_pick = (action, src)
     action, src, note = enforce_input(action, src, res, P["idmap"], P["src_ids"], P["booth"], P.get("doc_ids", ()))
-    if P.get("tray_flips", 0) >= TRAY_FLIP_LIMIT and action == "drag" and _is_tray_tab(P["idmap"].get(int(src))):
+    sb0 = P["idmap"].get(int(src)) if src.isdigit() else None
+    closing = sb0 is not None and ("left end of the open" in (sb0.caption or "") or getattr(sb0, "name", "") == "tray_tab_open")
+    if P.get("tray_flips", 0) >= TRAY_FLIP_LIMIT and action == "drag" and _is_tray_tab(sb0) and closing:
+        # only the CLOSING half of the ping-pong is skipped: opening a closed tray is the next step (C) and run
+        # 044332 t43-51 sat in C because the guard replaced every opening drag with a document drag
         # run 094930/101021: TOD toggled the tray open/closed for 48 ticks; the warning in the state block did
         # not stop it. Take TOD's best other drag-able element (the documents) instead of the tab.
         ps = res["source"].probabilities
