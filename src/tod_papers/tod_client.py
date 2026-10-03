@@ -4,6 +4,7 @@ Verified against the live API 2026-10-01:
 - Cloudflare rejects the default python-urllib User-Agent with 403 "error code: 1010".
   Always send a custom UA.
 - Retries: 3 retries with 1/2/4 s backoff on 429/5xx, connection errors, SSL resets and read timeouts.
+- HTTP 402 or an insufficient_credit body raises TodCreditExhausted at once (no retry); loop.py stops on it.
 - Several questions per request; image goes in the state list as a data URL.
 - Response per question: choice/noul/score + probabilities + confidence.
 """
@@ -102,6 +103,10 @@ RETRY_EXC = (urllib.error.URLError, ConnectionError, TimeoutError, socket.timeou
 BACKOFF_S = (1.0, 2.0, 4.0)
 
 
+class TodCreditExhausted(RuntimeError):
+    """HTTP 402 / insufficient_credit: no retry will help; the caller must stop (run 20261002_123058 skipped 27 ticks)."""
+
+
 class TodClient:
     def __init__(self, api_key: str | None = None, timeout: float = 60.0, retries: int = 3):
         self.key = api_key or _load_key()
@@ -153,9 +158,13 @@ class TodClient:
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:
                     data = json.load(r)
+                if isinstance(data, dict) and "insufficient_credit" in json.dumps(data.get("error", "")):
+                    raise TodCreditExhausted(f"TOD insufficient_credit: {str(data.get('error'))[:500]}")
                 break
             except urllib.error.HTTPError as e:
                 msg = e.read().decode(errors="replace")[:500]
+                if e.code == 402 or "insufficient_credit" in msg:
+                    raise TodCreditExhausted(f"TOD HTTP {e.code}: {msg}") from e
                 if e.code in RETRY_HTTP and attempt < self.retries:
                     last = e
                     self._backoff(attempt, f"HTTP {e.code}", e.headers.get("Retry-After"))

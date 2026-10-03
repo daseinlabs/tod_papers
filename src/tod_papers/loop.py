@@ -50,7 +50,7 @@ from .extract import Box
 from . import layout
 from . import manual as man
 from .som import annotate
-from .tod_client import TodClient, choice, noul
+from .tod_client import TodClient, TodCreditExhausted, choice, noul
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -1239,6 +1239,15 @@ def run(args) -> int:
             try:
                 probe, rec["state_ms"] = _timed(state_probe, tod, frame, args, day, asked, df)
                 state = parse_state(probe)
+            except TodCreditExhausted as e:  # 402: every later call fails too -> stop once, do not skip ticks
+                stop_reason = "TOD credit exhausted (402)"
+                print(f"[tick {tick:03d}] {e}")
+                print(f"[loop] STOP: {stop_reason}")
+                rec.update(tod_error=f"state: {e}", executed="none (TOD credit exhausted)", stop_reason=stop_reason)
+                row.update(action="none", effect="stop: " + stop_reason)
+                with open(os.path.join(run_dir, f"tick_{tick:04d}.json"), "w", encoding="utf-8") as fh:
+                    json.dump(rec, fh, indent=1)
+                break
             except RuntimeError as e:  # never act on a stale picture of the screen
                 print(f"[tick {tick:03d}] state request failed: {e}; skipping tick")
                 rec.update(tod_error=f"state: {e}", executed="none (state request error)")
@@ -1302,6 +1311,15 @@ def run(args) -> int:
             t1 = time.perf_counter()
             try:
                 res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
+            except TodCreditExhausted as e:
+                stop_reason = "TOD credit exhausted (402)"
+                print(f"[tick {tick:03d}] {e}")
+                print(f"[loop] STOP: {stop_reason}")
+                rec.update(tod_error=str(e), executed="none (TOD credit exhausted)", stop_reason=stop_reason)
+                row.update(action="none", effect="stop: " + stop_reason)
+                with open(os.path.join(run_dir, f"tick_{tick:04d}.json"), "w", encoding="utf-8") as fh:
+                    json.dump(rec, fh, indent=1)
+                break
             except RuntimeError as e:  # network/HTTP failure: log, skip the tick, never act blind
                 print(f"[tick {tick:03d}] TOD request failed: {e}; skipping tick")
                 rec.update(tod_error=str(e), executed="none (TOD error)")
