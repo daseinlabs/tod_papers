@@ -397,7 +397,8 @@ def doc_question(d: dict) -> dict:
     return {"type": "choice",
             "instructions": f"Look at the paper lying {where}, at the {d['pos']} of the picture. OCR read inside "
                             f"it: {txt}. What is this paper? Text such as ENTRY VISA, a name, DOB, SEX, ISS. or EXP. "
-                            f"means the open passport.",
+                            f"means the open passport; ENTRY TICKET or VALID ON (a small slip, often with ARSTOTZKA "
+                            f"as its header) means the entry ticket.",
             "criteria": dict(DOC_KINDS)}
 
 

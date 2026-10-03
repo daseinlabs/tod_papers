@@ -1021,6 +1021,12 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if facts is not None:
         facts["e_undecided"] = bool(undecided)
     pu_now = (facts or {}).get("passport_under") or []
+    if (facts or {}).get("waiting_docs"):
+        # G2: passport already handed back, the entrant waits for the rest (run 072926 t125-167: 40 ticks of tray
+        # open/close with the entry ticket in view). Opening the tray is not offered; closing it stays (a paper can
+        # hide under the open tray), the stamps are hidden below.
+        boxes = [b for b in boxes if getattr(b, "name", "") != "tray_tab"
+                 and not (b.caption or "").startswith("tab at screen edge")]
     if undecided:
         # E?: the page has to be read, not the tray closed (run 044332 t44: closing it started a C/E? loop)
         boxes = [b for b in boxes if not (getattr(b, "name", "") == "tray_tab_open" or b.caption == TRAY_HANDLE_CAP)]
@@ -1028,7 +1034,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     # already stamped for this entrant (a press on record): a second press is useless (run 070005 t25-31: 7 more
     # DENIED presses on a stamped passport); re-offered after STAMP_REOFFER_TICKS in case the press did not mark
     restamp_block = bool(sc) and tick is not None and tick - sc[-1][0] < STAMP_REOFFER_TICKS
-    if wrong or undecided or restamp_block:
+    if wrong or undecided or restamp_block or (facts or {}).get("waiting_docs"):
         hide_stamp = lambda b: _stamp_side(b, frame) is not None
     elif booth and facts is not None and "strip" in facts:
         # a stamp is offered only when request 1 puts the passport under it -- the same test as the refusal veto
