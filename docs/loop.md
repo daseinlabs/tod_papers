@@ -215,3 +215,19 @@ tab right) to reveal it.
   misreading 'Paradizng' pulled the spelling answer to S1 on two valid passports).
 - Dry run on the 30 gt-labelled Day 2 frames (16 entrants): expiry 28 right / 0 wrong / 2 undecided (was 3/30),
   city 29 / 0 / 1 (the undecided frame had no country reading; live carries it). Photo unchanged.
+
+## `--pause-think` (harness timing feature, off by default; loop8, 2026-10-03)
+
+Not a TOD decision and not game input chosen by anyone: a harness pause so the game clock does not run while the
+loop is waiting for extraction and TOD. Per booth tick:
+1. grab the frame (game running) -> this is the only frame extraction and TOD ever see;
+2. press Esc -> the game's own pause menu; the loop waits until the screen differs from the grabbed frame by
+   >= 5% (`PAUSE_MIN_FRAC`, measured 0.73) and otherwise presses Esc again and runs that tick unpaused;
+3. extraction + request 1 / 1b / 2 as usual;
+4. press Esc -> resume; the loop waits until the frame matches the grabbed one again (< 5% changed, measured 0.000;
+   one retry), then executes TOD's input and the post-wait verification.
+Every pause/resume is printed (`[pause] ...`) and logged in the tick json (`pause`: opened, menu_frac, held_s,
+resumed, resume_frac). A tick that ends early (skip/stop) and the loop exit resume the game first.
+Checked with ground truth (eval only): the clock held 06:36 for 3 s under the menu and ran on after the resume.
+Reason: a day is 4-6 real minutes (~3 game-min per real second) and entrants after 18:00 are unpaid; at ~6.7 s per
+tick the runs ended Day 2 with savings 0 / 10 / 15 / -5 (game over).
