@@ -344,15 +344,38 @@ def _small_for_send(frame: np.ndarray, args) -> np.ndarray:
     return frame
 
 
+def screen_family(frame: np.ndarray) -> tuple[str, bool]:
+    """('booth'|other, tray open on the pixels) from the static layout (~8 ms, no model). Only chooses WHICH
+    questions request 1 asks; every answer still comes from TOD. Agreed with TOD's booth/non-booth answer in
+    284/286 ticks of runs 033604/053852/054238."""
+    try:
+        n = layout.to_native(frame)
+        fam, _ = layout.screen_of(n)
+        return fam, (bool(layout.tray_open(n)) if fam == "booth" else False)
+    except Exception:
+        return "booth", True
+
+
 def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", inspect: tuple = man.INSPECT_KEYS,
-                facts: dict | None = None, with_docs: bool = True):
+                facts: dict | None = None, with_docs: bool = True, family: tuple | None = None):
     """REQUEST 1: plain (unmarked) frame + short text + screen, day, the manual's state questions
     (manual.state_questions, incl. the passport-under-each-stamp and passport-readable questions) and one
     identity question per paper the layout found on the desk/counter (its position + the OCR text inside it).
     Every judgement about the screen is a TOD answer here; the loop only does geometry and bookkeeping."""
     today = man.DAY_DATES.get(day, man.DAY_DATES["1"])
     q = {"screen": choice("Which kind of screen is currently shown?", dict(SCREENS)), "day": DAY_Q}
+    fam, tray_px = family or ("booth", True)
+    if fam != "booth":
+        # menus, day-end, bulletins, cutscenes: the manual consumes only the screen kind and the date
+        small = _small_for_send(frame, args)
+        return tod.ask(q, text=man.STATE_TEXT, image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
+    if day in DAY_RULES:
+        del q["day"]   # the day only changes on the day-end / bulletin screens, where it is asked
     q.update(man.state_questions(today, inspect))
+    q.pop("passport_open_readable", None)   # the inspection gate also opens on open-on-desk / the paper identity
+    if not tray_px:
+        for k in man.STRIP_KEYS:
+            q.pop(k, None)
     # TOD takes at most 16 questions per request (run 015649 t41-58: HTTP 422 with 5 doc questions + 14 state)
     docs = (facts or {}).get("docs") or []
     if (facts or {}).get("tray_open_px") is False:
@@ -551,8 +574,11 @@ def strip_facts(state: dict, df: dict, sinfo: dict | None) -> dict:
 def passport_sides(strip: dict) -> list[str]:
     """Stamp heads with the PASSPORT under them: paper in the strip (when the pixel check ran) and TOD says the
     paper under that stamp is a passport."""
+    # also when TOD's identity of the paper over that strip says passport (14/26 strip drags landed while
+    # passport_under read 0.30-0.52: 005956 t8-9, 022439 t5-6/t67-76)
     return [s for s, v in strip.items()
-            if v["paper"] is not False and (v["passport_p"] or 0.0) >= 0.5]
+            if v["paper"] is not False and ((v["passport_p"] or 0.0) >= 0.5
+                                            or (v["paper"] and v["doc"] == "passport" and (v["doc_p"] or 0) >= 0.5))]
 
 
 INSPECT_OPEN_P = 0.6
@@ -797,7 +823,31 @@ ACTION_RULE = (
 )
 
 
-def build_questions(src_ids: dict, tgt_ids: dict) -> dict:
+WAIT_KEY = "wait"
+WAIT_DESC = "wait - do nothing this turn (someone is walking in / a screen is changing)"
+
+
+def build_questions(src_ids: dict, tgt_ids: dict, booth: bool = True) -> dict:
+    """Request 2: which element (its click/drag input follows from the element, manual section 2) and, in the booth,
+    which drop target. The separate action question was dropped (it cost ~1.7 s per tick with the long text; the
+    convention already fixed the input for every element)."""
+    q = {
+        "source": choice(
+            "Following the manual and what is currently true on screen: which numbered element is clicked "
+            "next, or, for a drag, picked up? Use the number drawn on its marker; choose 'wait' if nothing should "
+            "be done this turn. Stamping: click the stamp the passport is lying under; if you want the other "
+            "decision, first drag the passport to the other strip.",
+            {**src_ids, WAIT_KEY: WAIT_DESC}),
+    }
+    if booth:
+        q["target"] = choice(
+            "If the chosen element is dragged: onto which numbered drop target should it be released? (stamp "
+            "landing strip = under a stamp so it can be stamped; the entrant = hand documents back; desk = read a "
+            "document; tray stow edge / desk = close / open the stamp tray.) Ignored for a click.", tgt_ids)
+    return q
+
+
+def _build_questions_old(src_ids: dict, tgt_ids: dict) -> dict:
     return {
         "action": choice(
             "Following the manual and what is currently true on screen, what kind of mouse input is the next "
@@ -883,14 +933,15 @@ def write_summary(run_dir: str, rows: list[dict], meta: dict) -> None:
     lines = [f"# Run {os.path.basename(run_dir)}", ""]
     for k, v in meta.items():
         lines.append(f"- {k}: {v}")
-    lines += ["", "| tick | screen | state (TOD, request 1) | manual step | action | source desc | p(src) | effect |",
-              "|---:|---|---|---|---|---|---:|---|"]
+    lines += ["", "| tick | screen | state (TOD, request 1) | manual step | action | source desc | p(src) | effect | "
+              "gt (eval only) |", "|---:|---|---|---|---|---|---:|---|---|"]
     for r in rows:
         d = str(r.get("src_desc", "-")).replace("|", "/")
         if r.get("tgt_desc"):
             d += " -> " + str(r["tgt_desc"]).replace("|", "/")
         lines.append(f"| {r['tick']} | {r.get('screen', '-')} | {r.get('state', '-')} | {r.get('step', '-')} | "
-                     f"{r.get('action', '-')} | {short(d, 90)} | {r.get('p_src', 0):.2f} | {r.get('effect', '-')} |")
+                     f"{r.get('action', '-')} | {short(d, 90)} | {r.get('p_src', 0):.2f} | {r.get('effect', '-')} | "
+                     f"{r.get('gt', '-')} |")
     with open(os.path.join(run_dir, "summary.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -925,6 +976,10 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         regions, region_src = static_regions(frame, bool(sinfo.get("tray_open", man.yes(state, "stamp_tray_open"))))
     else:
         regions, region_src = derive_regions(boxes, frame, state) if booth else ([], {})
+    if booth and facts is not None and not man.stamped(state, facts):
+        # an unstamped passport is not handed back (run 054238 t62-137: 20+ unstamped hand-backs on a false mark
+        # reading); the entrant target is offered once a stamp press is on record for this entrant
+        regions = [r for r in regions if r.caption != REGION_CAPS["hand_back"]]
     if booth and man.yes(state, "person_at_window", HORN_HIDE_P):
         # the horn only calls someone when the window is empty (runs 114927 t38-97: 50 horn clicks with the
         # entrant standing at the window); TOD says someone is there, so it is not offered
@@ -1011,7 +1066,9 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         name = next(n for n, c in REGION_CAPS.items() if c == cap)
         b = idmap[int(k)]
         region_info[name] = {"id": k, "box": [b.x1, b.y1, b.x2, b.y2], "target_source": region_src.get(name, "?")}
-    questions = build_questions(src_ids, tgt_ids)
+    questions = build_questions(src_ids, tgt_ids, booth)
+    if facts is not None:
+        facts["booth"] = booth
     state_text = man.build(state, history, day, ban_lines, facts)
     send = _small_for_send(annotated, args)
     url = encode_image(send, args.send_format, args.jpeg_quality)
@@ -1023,6 +1080,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
 
 
 _PROBE_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="state-probe")
+_DOC_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="doc-probe")
 
 
 def _timed(fn, *a):
@@ -1048,11 +1106,27 @@ def _is_tray_tab(b) -> bool:
                               or getattr(b, "name", "") in ("tray_tab", "tray_tab_open"))
 
 
+def fill_derived(res, D: dict) -> None:
+    """Logs/overlay expect 'action' (and 'target') answers; request 2 no longer asks them. Insert the derived input
+    (marked derived=True) so the JSON and the overlay stay readable."""
+    from types import SimpleNamespace
+    if "action" not in res.answers:
+        res.answers["action"] = SimpleNamespace(value=D["action"], probabilities={D["action"]: 1.0}, confidence=None,
+                                                qtype="derived", derived=True)
+    if "target" not in res.answers:
+        res.answers["target"] = SimpleNamespace(value="none", probabilities={"none": 1.0}, confidence=None,
+                                                qtype="derived", derived=True)
+
+
 def decide(res, P: dict) -> dict:
     """TOD's request-2 answers -> the input to perform (after the click/drag
     convention). Pure: no I/O."""
-    action = res["action"].value
     src = str(res["source"].value)
+    if src == WAIT_KEY or not src.isdigit():
+        return dict(action="wait", src=src, tgt="none", note="", tod_pick=("wait", src),
+                    p_src=float(res["source"].probabilities.get(src, 0.0)))
+    cls = _cls(P["idmap"].get(int(src)), P["booth"], int(src) in P.get("doc_ids", ()))
+    action = "drag" if cls == "drag" else "click"   # the element's own input (manual section 2)
     tod_pick = (action, src)
     action, src, note = enforce_input(action, src, res, P["idmap"], P["src_ids"], P["booth"], P.get("doc_ids", ()))
     sb0 = P["idmap"].get(int(src)) if src.isdigit() else None
@@ -1073,7 +1147,10 @@ def decide(res, P: dict) -> dict:
             note = (note + "; " if note else "") + (f"tray toggled {P['tray_flips']}x without a stamp -> "
                                                     f"tab #{src} skipped, re-picked #{alt[0]}")
             src = alt[0]
-    tgt = str(res["target"].value)
+    if action == "drag" and "target" not in res.answers:
+        return dict(action="wait", src=src, tgt="none", note="drag-only element off the booth -> wait",
+                    tod_pick=tod_pick, p_src=float(res["source"].probabilities.get(src, 0.0)))
+    tgt = str(res["target"].value) if "target" in res.answers else "none"
     sb = P["idmap"].get(int(src)) if src.isdigit() else None
     if action == "drag" and _is_tray_tab(sb):
         # the tab only toggles the tray: an open tray's tab goes RIGHT onto the stow edge, a closed tray's tab LEFT
@@ -1271,6 +1348,7 @@ def offline(args) -> int:
         res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
         t_tod = (time.perf_counter() - t1) * 1e3
         D = decide(res, P)
+        fill_derived(res, D)
         step = man.situation(state, oday if oday in DAY_RULES else "1", facts)
         r = {
             "frame": path, "extractor": args.extractor, "passport_under": facts.get("passport_under"),
@@ -1315,6 +1393,31 @@ def offline(args) -> int:
         json.dump(results, fh, indent=1)
     print(f"[offline] TOD calls={tod.total_calls} cost=${tod.total_cost:.4f} -> {out_dir}")
     return 0
+
+
+_GT = None
+
+
+def _gt_snapshot() -> dict:
+    """tod_papers.gt label for the tick JSON (eval only). Never raises; {'ok': False} when unavailable."""
+    global _GT
+    if _GT is None:
+        try:
+            from . import gt as _g
+            _GT = _g
+        except Exception as e:   # pymem missing etc.
+            _GT = False
+            print(f"[loop] gt: unavailable ({e})")
+    if not _GT:
+        return {"ok": False, "error": "gt unavailable"}
+    try:
+        s = _GT.snapshot()
+        e = s.get("entrant") or {}
+        return {k: s.get(k) for k in ("ok", "screen", "day", "clock", "day_processed", "num_citations", "savings")} | {
+            "entrant": e.get("name"), "correct": e.get("correct_verdict"), "given": e.get("given_verdict"),
+            "errors": e.get("noticeable_errors")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def _raise_priority() -> None:
@@ -1407,6 +1510,11 @@ def run(args) -> int:
             time.sleep(0.1)
             frame, waited, af, stable, ambient = wait_stable(grab.grab, interval=0.15, thresh=args.stable_thresh,
                                                              max_wait=args.max_anim_wait)
+            rec["gt"] = _gt_snapshot()   # ground truth from game memory: logs/eval ONLY, never in any TOD text
+            _g = rec["gt"]
+            row["gt"] = (f"d{_g.get('day')} {_g.get('clock')} proc={_g.get('day_processed')} cit={_g.get('num_citations')}"
+                         f" {(_g.get('entrant') or '-')[:14]} correct={_g.get('correct')} given={_g.get('given')}"
+                         if _g.get("ok") else "-")
             rec.update(frame_shape=list(frame.shape), frame_hash=frame_hash(frame),
                        anim_wait_s=round(waited, 2), anim_frac=round(af, 5), stable=stable)
             if not stable:
@@ -1415,7 +1523,9 @@ def run(args) -> int:
             # ---- REQUEST 1 (state, unmarked frame) in parallel with extraction; then 1b (new papers only) -----
             # Day 1 decides on the country only; expiry/photo are asked from Day 2 (frees 2 of TOD's 16 questions)
             asked = ("issuing_country",) if day == "1" else man.INSPECT_KEYS
-            fut = _PROBE_POOL.submit(_timed, state_probe, tod, frame, args, day, asked, {"tick": tick}, False)
+            fam = screen_family(frame)
+            rec["screen_family"] = list(fam)
+            fut = _PROBE_POOL.submit(_timed, state_probe, tod, frame, args, day, asked, {"tick": tick}, False, fam)
             t0 = time.perf_counter()
             boxes, vis, sinfo = get_boxes(frame, args.extractor)
             rec["extract_ms"] = round((time.perf_counter() - t0) * 1e3, 1)
@@ -1428,9 +1538,10 @@ def run(args) -> int:
             df["tick"] = tick
             rec["desk_facts"], rec["inspect_asked"] = df, list(asked)
             try:
+                dfut = _DOC_POOL.submit(_timed, doc_probe, tod, frame, args, df) if fam[0] == "booth" else None
                 probe, rec["state_ms"] = fut.result()
                 state = parse_state(probe)
-                dres, rec["doc_ms"] = _timed(doc_probe, tod, frame, args, df)
+                dres, rec["doc_ms"] = dfut.result() if dfut is not None else (None, 0.0)
                 if dres is not None:
                     state.update(parse_state(dres))
                 rec["docs_cached"] = sum(1 for d in df.get("docs") or [] if d.get("cached"))
@@ -1562,6 +1673,7 @@ def run(args) -> int:
             res.answers["screen"] = probe["screen"]  # overlay shows it alongside the other answers
 
             D = decide(res, P)
+            fill_derived(res, D)
             action, src, tgt = D["action"], D["src"], D["tgt"]
             p_src = D["p_src"]
             if D["note"]:
@@ -1633,20 +1745,30 @@ def run(args) -> int:
             # ---- verify by frame diff ---------------------------------------------
             changed = None
             if not args.dry_run and executed.startswith(("click", "drag")):
-                time.sleep(args.post_wait)
                 park_cursor()
-                time.sleep(0.1)
-                after = grab.grab()
-                m = effect_map(frame, after, ambient)
-                g = changed_frac(m)
-                ls = changed_frac(m, sb) if sb.kind != "background" else 0.0
-                lt = changed_frac(m, tb) if (action == "drag" and tb is not None) else 0.0
-                if action == "drag":
-                    # a drag only counts when the source or the drop target changed (run 005956 t23-30: the
-                    # bulletin-storage drag moved nothing, src/tgt 0.000, but yard motion gave global 0.010)
-                    changed = ls > args.diff_local or lt > args.diff_local
-                else:
-                    changed = g > args.diff_global or ls > args.diff_local or lt > args.diff_local
+
+                def _effect():
+                    after_ = grab.grab()
+                    m = effect_map(frame, after_, ambient)
+                    g_ = changed_frac(m)
+                    ls_ = changed_frac(m, sb) if sb.kind != "background" else 0.0
+                    lt_ = changed_frac(m, tb) if (action == "drag" and tb is not None) else 0.0
+                    if action == "drag":
+                        # a drag only counts when the source or the drop target changed (run 005956 t23-30: the
+                        # bulletin-storage drag moved nothing, src/tgt 0.000, but yard motion gave global 0.010)
+                        ch_ = ls_ > args.diff_local or lt_ > args.diff_local
+                    else:
+                        ch_ = g_ > args.diff_global or ls_ > args.diff_local or lt_ > args.diff_local
+                    return after_, g_, ls_, lt_, ch_
+                # early check, then the full post-wait only when nothing has changed yet (a seen change is final)
+                time.sleep(min(args.post_wait, args.post_wait_early))
+                after, g, ls, lt, changed = _effect()
+                waited_post = min(args.post_wait, args.post_wait_early)
+                if not changed and args.post_wait > args.post_wait_early:
+                    time.sleep(args.post_wait - args.post_wait_early)
+                    after, g, ls, lt, changed = _effect()
+                    waited_post = args.post_wait
+                rec["post_wait_s"] = waited_post
                 rec.update(post_diff_global=round(g, 5), post_diff_src=round(ls, 4), post_diff_tgt=round(lt, 4),
                            post_hash=frame_hash(after))
                 print(f"           executed: {executed}; changed px global {g:.4f} src {ls:.3f}"
@@ -1730,7 +1852,7 @@ def run(args) -> int:
     finally:
         grab.close()
         write_summary(run_dir, rows, {
-            "ticks": len(rows), "TOD calls": tod.total_calls, "cost": f"${tod.total_cost:.4f}",
+            "ticks": len(rows), "gt at end (eval only)": _gt_snapshot(), "TOD calls": tod.total_calls, "cost": f"${tod.total_cost:.4f}",
             "dry_run": args.dry_run, "args": " ".join(sys.argv[1:]),
             "last state": state_line(last_state) if last_state else "-",
             "stop reason": stop_reason or "max ticks",
@@ -1757,13 +1879,15 @@ def main(argv=None, result: dict | None = None) -> int:
                     "detector-labelled objects are never dropped; drop-target regions come on top)")
     ap.add_argument("--send-format", choices=("png", "jpeg"), default="png", help="png: smaller than jpeg on pixel art (~80 vs ~170 KB)")
     ap.add_argument("--jpeg-quality", type=int, default=90)
-    ap.add_argument("--history", type=int, default=30, help="past actions listed in the request-2 text")
+    ap.add_argument("--history", type=int, default=10, help="past actions listed in the request-2 text")
     ap.add_argument("--frames", nargs="+", help="offline: run on saved frames (no game window, no input)")
     ap.add_argument("--out", default=None, help="offline: output directory")
     ap.add_argument("--day", choices=("1", "2", "3"), default=None, help="offline only: day the saved frames are from")
     ap.add_argument("--send-width", type=int, default=1140, help="downscale annotated frame to this width for TOD (0=full)")
     ap.add_argument("--settle", type=float, default=0.12, help="seconds between hover/down/up so Unity sees separate frames")
-    ap.add_argument("--post-wait", type=float, default=0.8, help="seconds after input before verify grab")
+    ap.add_argument("--post-wait", type=float, default=0.9, help="seconds after input before the final verify grab")
+    ap.add_argument("--post-wait-early", type=float, default=0.35, help="early verify grab; a change seen here ends "
+                    "the wait")
     ap.add_argument("--wait-s", type=float, default=1.0, help="sleep when TOD chooses wait")
     ap.add_argument("--drag-s", type=float, default=0.45, help="drag duration")
     ap.add_argument("--drag-steps", type=int, default=24, help="interpolated moves per drag")

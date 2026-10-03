@@ -51,7 +51,8 @@ MANUAL = """\
 PAPERS, PLEASE -- HOW TO WORK THE BORDER BOOTH WITH THE MOUSE
 
 You are the border inspector. Every input is either a CLICK on one numbered element or a DRAG of one
-numbered element onto another numbered element. You decide one input per turn.
+numbered element onto a numbered drop target. You decide one input per turn by choosing the element; whether
+it is clicked or dragged follows from the element (section 2). Choose "wait" when nothing should be done.
 
 1. WHAT IS WHERE ON THE BOOTH SCREEN
 - Top strip: the border yard seen from above (the queue of people on the left, guards, the road). Just
@@ -227,8 +228,9 @@ STATE_KEYS = ("person_at_window", "document_on_counter_shelf", "document_open_on
               "stamp_tray_open", "passport_shows_stamp_mark", "bulletin_or_rulebook_covering_desk", "inspect_mode_on")
 STRIP_KEYS = ("passport_under_denied", "passport_under_approved")
 COUNTRIES = ("ARSTOTZKA", "KOLECHIA", "IMPOR", "ANTEGRIA", "OBRISTAN", "REPUBLIA", "UNITED FEDERATION")
-DOC_KINDS = {"passport": "the entrant's passport (a small booklet or its open data page: photo, name, DOB, SEX, ISS., "
-                         "EXP., the issuing country name in large letters)",
+DOC_KINDS = {"passport": "the entrant's passport (a small booklet, or its open pages: the ENTRY VISA page with an "
+                         "empty stamp box on top, the data page with photo, name, DOB, SEX, ISS., EXP. and the "
+                         "issuing country name in large letters)",
              "rulebook": "the inspector's rulebook (blue-grey cover 'RULES & REGULATIONS', or open pages: CONTENTS, "
                          "Basic Rules, Regional Map, Booth Info)",
              "bulletin": "the Ministry of Admission bulletin (a sheet with today's rules / news)",
@@ -401,7 +403,8 @@ def doc_question(d: dict) -> dict:
     txt = "; ".join(repr(t) for t in d.get("text") or []) or "(no readable text)"
     return {"type": "choice",
             "instructions": f"Look at the paper lying {where}, at the {d['pos']} of the picture. OCR read inside "
-                            f"it: {txt}. What is this paper?",
+                            f"it: {txt}. What is this paper? Text such as ENTRY VISA, a name, DOB, SEX, ISS. or EXP. "
+                            f"means the open passport.",
             "criteria": dict(DOC_KINDS)}
 
 
@@ -449,7 +452,8 @@ def stamped(state: dict, facts: dict | None) -> list[str]:
     """The three 'passport is stamped' signs that are currently true (manual rule F)."""
     facts = facts or {}
     out = []
-    if yes(state, "passport_shows_stamp_mark"):
+    if yes(state, "passport_shows_stamp_mark") and (facts.get("stamp_clicks") or facts.get("missed_stamps")):
+        # a mark needs a stamp press for this entrant (run 054238 t62-137: mark p=0.77 on an unstamped passport)
         out.append("mark")
     if facts.get("stamp_clicks"):
         out.append("history")
@@ -594,6 +598,9 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     if scr:
         lines.append(f"- Screen: {scr['value']} (p={scr['p']:.2f})")
     for k in STATE_KEYS:
+        if k == "passport_shows_stamp_mark" and "mark" not in stamped(state, facts):
+            lines.append(f"- {_LABEL[k]}: no (no stamp has been pressed for this entrant yet)")
+            continue
         lines.append(f"- {_LABEL[k]}: {_yn(state, k)}")
     for d in facts.get("docs_named") or []:
         where = "counter shelf" if d["where"] == "counter" else "desk"
@@ -723,6 +730,40 @@ def entrant_line(facts: dict | None) -> str | None:
     return "THIS ENTRANT SO FAR: " + "; ".join(bits) if bits else None
 
 
+def _sections() -> dict:
+    import re
+    parts = re.split(r"\n(?=\d\. )", MANUAL)
+    out = {0: parts[0]}
+    for p in parts[1:]:
+        out[int(p.split(".", 1)[0])] = p
+    return out
+
+
+def _day_rule_section(sec5: str, day: str) -> str:
+    """Section 5 with only today's bullet (the other days' rules are not in force)."""
+    d = day if day in DAY_RULES else "1"
+    lines = sec5.rstrip("\n").split("\n")
+    head, keep, cur = [lines[0]], [], None
+    for ln in lines[1:]:
+        if ln.startswith("- Day "):
+            cur = ln[6]
+        elif not ln.startswith("  "):
+            cur = "tail1"
+        if cur == d or (cur == "tail1" and d == "1"):
+            keep.append(ln)
+    return "\n".join(head + keep) + "\n"
+
+
+def manual_text(booth: bool, day: str) -> str:
+    """The manual sections for this screen family (run 054238: 3.8k-word request 2 = 5.5 s per TOD call;
+    measured 2.3 s at 2k words, 1.3 s at 1k). Booth: sections 1-6 and 8 with today's rule only; other screens:
+    section 7. No step is pre-selected inside a section."""
+    S = _sections()
+    if not booth:
+        return S[0] + "\n" + S[7]
+    return "\n".join([S[0], S[1], S[2], S[3], S[4], _day_rule_section(S[5], day), S[6], S[8]])
+
+
 def build(state: dict, history, day: str, ban_lines: list[str] | None = None, facts: dict | None = None) -> str:
     """Request-2 text: the whole manual + what is true now + desk text + last actions."""
     hist = list(history)
@@ -735,7 +776,10 @@ def build(state: dict, history, day: str, ban_lines: list[str] | None = None, fa
     if nb >= 2:
         h = (f"You have gone back and forth between the main menu and day select {nb} times. BACK undoes "
              f"progress; pick a day tile.\n{h}")
-    parts = [MANUAL, state_block(state, day, facts), desk_text_block(facts),
+    booth = (facts or {}).get("booth", True)
+    parts = [manual_text(booth, day), state_block(state, day, facts) if booth else
+             f"- Screen: {state.get('screen', {}).get('value')} (p={state.get('screen', {}).get('p', 0):.2f})",
+             desk_text_block(facts) if booth else "",
              f"{head} (oldest first; tick | what was true | input | element | effect):\n{h}"]
     if ban_lines:
         parts.append("RULED OUT FOR NOW (tried without effect):\n" + "\n".join(f"- {s}" for s in ban_lines))
