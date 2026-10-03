@@ -362,7 +362,7 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
     for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable"):
         if len(q) + (min(2, len(docs)) if with_docs else 0) > TOD_MAX_Q:
             q.pop(k, None)
-    for k in ("photo_matches_person", "entry_ticket_dated_today", "inspect_mode_on"):
+    for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable", "exp_month"):
         if len(q) > TOD_MAX_Q:
             q.pop(k, None)
     room = max(0, TOD_MAX_Q - len(q)) if with_docs else 0
@@ -470,7 +470,7 @@ def state_line(state: dict) -> str:
             bits.append(f"{ab}={state[k]['p']:.2f}")
     if "issuing_country" in state:
         bits.append(f"iss={state['issuing_country']['value']}:{state['issuing_country']['p']:.2f}")
-    for k, ab in (("expiry_after_today", "exp"), ("photo_matches_person", "photo")):
+    for k, ab in (("exp_year", "expY"), ("exp_month", "expM")):
         if k in state:
             bits.append(f"{ab}={state[k]['value']}:{state[k]['p']:.2f}")
     if "issuing_city" in state:
@@ -1110,12 +1110,13 @@ class Entrant:
     missed_stamps: list = field(default_factory=list)  # [(tick, side)] stamp pressed, passport under the other head
     hb_drop: int | None = None   # tick of the last document drag onto the person that changed the screen
     city: dict | None = None                     # {"value", "p", "tick"} issuing city reading (Day 2+)
+    exp: dict | None = None                      # {"year", "month", "p", "tick"} EXP. reading (Day 2+)
     checks: dict = field(default_factory=dict)   # {check key: {"value", "p", "tick"}} confident yes/no readings
     log: list = field(default_factory=list)          # [(tick, why)] every reset (for the run report)
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
-        self.hb_drop, self.missed_stamps, self.checks, self.city = None, [], {}, None
+        self.hb_drop, self.missed_stamps, self.checks, self.city, self.exp = None, [], {}, None, None
         self.tray_seen = []   # run 005956 t18/t21: entrant 2's tray toggles blocked entrant 3's first tray opening
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
@@ -1147,6 +1148,10 @@ class Entrant:
         if (ci and ci["p"] >= (man.DENY_P if ci["value"] == "other" else CARRY_COUNTRY_P) and ci["value"] != "unreadable"
                 and (self.city is None or ci["p"] >= self.city["p"] or ci["value"] == self.city["value"])):
             self.city = {"value": ci["value"], "p": ci["p"], "tick": tick}
+        y, m = state.get("exp_year"), state.get("exp_month")
+        if y and y["value"] != "unreadable" and y["p"] >= CARRY_COUNTRY_P and (self.exp is None or y["p"] >= self.exp["p"]):
+            mm = m["value"] if m and m["value"] != "unreadable" and m["p"] >= 0.5 else None
+            self.exp = {"year": y["value"], "month": mm, "p": y["p"], "tick": tick}
         for k in man.CHECK_KEYS:   # Day 2/3 checks, carried like the country (the page is hidden once under a stamp)
             v = man.check_answer(state.get(k))
             if v is not None:
@@ -1189,7 +1194,7 @@ class Entrant:
     def facts(self, tick: int, df: dict) -> dict:
         return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
                 "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
-                "checks_carried": dict(self.checks), "city_carried": self.city}
+                "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp}
 
     def tray_flips(self) -> int:
         """Open<->closed changes of the stamp tray over the last 8 ticks with no stamp click in between.
@@ -1199,7 +1204,7 @@ class Entrant:
         return sum(1 for a, b in zip(seq, seq[1:]) if a != b)
 
 
-def gate_inspection(state: dict, asked: tuple) -> dict:
+def gate_inspection(state: dict, asked: tuple, df: dict | None = None) -> dict:
     """Drop inspection answers unless request 1 also says a passport lies open on the desk (document_open_on_desk)
     or its data page is readable (passport_open_readable), p >= INSPECT_OPEN_P. The country choice has its own
     'unreadable' option. (114927 t13/t14: the open Impor passport half under the tray got readable=0.10,
@@ -1208,6 +1213,12 @@ def gate_inspection(state: dict, asked: tuple) -> dict:
     dropped = {}
     gate_p = max(state.get("passport_open_readable", {}).get("p", 0.0),
                  state.get("document_open_on_desk", {}).get("p", 0.0))
+    for i, d in enumerate((df or {}).get("docs") or []):   # TOD named a desk paper the passport (loop7 dryrun10:
+        a = state.get(f"doc{i}")                           # open-on-desk said no, every inspection answer dropped)
+        if a is None and d.get("cached"):
+            a = {"value": d["cached"]["id"], "p": d["cached"]["p"]}
+        if a and d["where"] == "desk" and a["value"] == "passport":
+            gate_p = max(gate_p, a["p"])
     if asked and gate_p < INSPECT_OPEN_P:
         for k in man.INSPECT_KEYS:
             if k in state:
@@ -1238,7 +1249,7 @@ def offline(args) -> int:
         asked = ("issuing_country",) if oday == "1" else man.INSPECT_KEYS
         probe, t_probe = _timed(state_probe, tod, frame, args, oday, asked, df)
         state = parse_state(probe)
-        gate_inspection(state, asked)
+        gate_inspection(state, asked, df)
         ent = Entrant()
         ent.observe(0, state)
         facts = ent.facts(0, df)
@@ -1438,7 +1449,7 @@ def run(args) -> int:
                     break
                 time.sleep(2.0)
                 continue
-            dropped = gate_inspection(state, asked)
+            dropped = gate_inspection(state, asked, df)
             if dropped:
                 rec["inspect_dropped (open<0.6)"] = _clean_state(dropped)
             screen = state["screen"]["value"]
@@ -1455,7 +1466,7 @@ def run(args) -> int:
             rec["e_minus"] = facts.get("e_minus")
             rec["docs_named"] = [{k: d[k] for k in ("where", "id", "p", "text")} for d in facts["docs_named"]]
             rec["strip"] = facts["strip"]
-            rec["entrant"] = {"country": ent.country, "city": ent.city, "checks": dict(ent.checks), "stamp_clicks": list(ent.stamp_clicks),
+            rec["entrant"] = {"country": ent.country, "city": ent.city, "exp": ent.exp, "checks": dict(ent.checks), "stamp_clicks": list(ent.stamp_clicks),
                               "missed_stamps": list(ent.missed_stamps), "handed_back": ent.handed_back}
             step = man.situation(state, day if day in DAY_RULES else "1", facts)
             sline = state_line(state)

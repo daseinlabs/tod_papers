@@ -235,8 +235,11 @@ DOC_KINDS = {"passport": "the entrant's passport (a small booklet or its open da
              "entry_ticket": "an entry ticket (small slip with a date)",
              "transcript": "the interview transcript printout",
              "other": "something else, or not a paper"}
-INSPECT_KEYS = ("issuing_country", "expiry_after_today", "photo_matches_person", "issuing_city")
-CHECK_KEYS = ("expiry_after_today", "photo_matches_person", "entry_ticket_dated_today")
+# photo_matches_person is no longer asked (answers sat at p 0.4-0.68 all session; budget of 16 questions). The
+# expiry check is TOD's reading of the EXP. year and month, compared with today's date by the rule (section 5).
+INSPECT_KEYS = ("issuing_country", "exp_year", "exp_month", "issuing_city")
+CHECK_KEYS = ("entry_ticket_dated_today",)
+EXP_YEARS = ("1979", "1980", "1981", "1982", "1983", "1984", "1985", "1986", "1987")
 DENY_P = 0.75              # p a check answer needs before it can deny an entrant
 CARRY_CHECK_MARGIN = 0.15   # a yes/no check is carried for the entrant when |p - 0.5| >= this
 ISSUING_CITIES = {   # game rule (rulebook Regional Map): the passport's ISS. city must belong to its country
@@ -337,20 +340,20 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
                          "unreadable": "no open passport data page, or the ISS. line cannot be read"}},
         # 3-way choices: the old yes/no 'no' option also meant 'unreadable' and denied a valid Arstotzkan
         # (run 024712 t0: expiry 'no' p=0.96 with the page not readable)
-        "expiry_after_today": {
+        # run 033308 t49: a one-step "is EXP. after today?" answer said 'expired' (p=0.76) for a valid passport;
+        # TOD now only READS the year and month, the loop compares them with today
+        "exp_year": {
             "type": "choice",
-            "instructions": f"Today is {today}. On the open passport data page, read the date after 'EXP.'. Compare it "
-                            f"with today ({today}).",
-            "criteria": {"valid": f"the EXP. date is readable and later than {today}",
-                         "expired": f"the EXP. date is readable and on or before {today}",
+            "instructions": "On the open passport data page, find the date after 'EXP.' (format YYYY.MM.DD). "
+                            "Which YEAR (the first four digits) is printed there?",
+            "criteria": {**{y: f"EXP. {y}.xx.xx" for y in EXP_YEARS},
                          "unreadable": "no open passport data page, or the EXP. date cannot be read"}},
-        "photo_matches_person": {
+        "exp_month": {
             "type": "choice",
-            "instructions": "Compare the photo on the open passport data page with the person standing at the booth "
-                            "window (face shape, hair/hood, glasses).",
-            "criteria": {"match": "both are visible and show the same person",
-                         "different": "both are visible and clearly show different people",
-                         "cannot_compare": "the passport photo or the person is not visible"}},
+            "instructions": "On the open passport data page, find the date after 'EXP.' (format YYYY.MM.DD). "
+                            "Which MONTH (the two digits after the first dot) is printed there?",
+            "criteria": {**{f"{m:02d}": f"EXP. yyyy.{m:02d}.xx" for m in range(1, 13)},
+                         "unreadable": "no open passport data page, or the EXP. date cannot be read"}},
     }
     if today == DAY_DATES["3"]:   # Day 3: foreigners also need an entry ticket dated today
         q["entry_ticket_dated_today"] = _noul(
@@ -480,9 +483,41 @@ def check_answer(a: dict | None):
     return (a["p"] >= 0.5) if abs(a["p"] - 0.5) >= CARRY_CHECK_MARGIN else None
 
 
+def known_exp(state: dict, facts: dict | None):
+    """(year, month or None, p) of TOD's EXP. reading (this frame, else carried for the entrant), or None."""
+    y, m = state.get("exp_year"), state.get("exp_month")
+    if y and y["value"] != "unreadable" and y["p"] >= 0.6:
+        mm = m["value"] if m and m["value"] != "unreadable" and m["p"] >= 0.5 else None
+        return y["value"], mm, y["p"]
+    c = (facts or {}).get("exp_carried")
+    return (c["year"], c["month"], c["p"]) if c else None
+
+
+def expiry_valid(state: dict, day: str, facts: dict | None):
+    """True/False/None: the EXP. date TOD read, compared with today (section 5). A year before today's year
+    denies only at p >= DENY_P."""
+    e = known_exp(state, facts)
+    if not e:
+        return None
+    ty, tm, _ = (int(x) for x in DAY_DATES.get(day, DAY_DATES["2"]).split("."))
+    y = int(e[0])
+    if y > ty:
+        return True
+    if y < ty:
+        return False if e[2] >= DENY_P else None
+    if e[1] is None:
+        return None
+    m = int(e[1])
+    if m != tm:
+        return m > tm
+    return None   # same month as today: the day decides, not read -> undecided
+
+
 def check_value(state: dict, facts: dict | None, k: str):
     """True/False for a yes/no inspection check: this frame's answer, else the entrant's carried reading, else None.
     issuing_city_valid = the rule table (section 5) applied to TOD's city + country readings."""
+    if k == "expiry_after_today":
+        return expiry_valid(state, (facts or {}).get("day", "2"), facts)
     if k == "issuing_city_valid":
         kc, ci = known_country(state, facts), known_city(state, facts)
         if not kc or not ci:
@@ -503,13 +538,12 @@ def needed_stamp(state: dict, day: str, facts: dict | None) -> str | None:
         return None
     if day not in ("2", "3"):
         return "approved" if kc[0] == "ARSTOTZKA" else "denied"
-    keys = ["expiry_after_today", "photo_matches_person", "issuing_city_valid"]
+    keys = ["expiry_after_today", "issuing_city_valid"]
     if day == "3" and kc[0] != "ARSTOTZKA":
         keys.append("entry_ticket_dated_today")
-    vals = [check_value(state, facts, k) for k in keys]
+    vals = [check_value(state, {**(facts or {}), "day": day}, k) for k in keys]
     if vals[1] is None:
-        # photo answers sit at p 0.5-0.68 on real frames (runs 015649/022439); only a confident 'no' denies
-        vals[1] = True
+        vals[1] = True   # city not read confidently: only a confident mismatch denies (an unread city must not stall)
     if False in vals:
         return "denied"
     if None in vals:
@@ -615,9 +649,11 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     if cc and cc.get("tick") != facts.get("tick"):
         lines.append(f"- Passport read as {cc['value']} at tick {cc['tick']} (p={cc['p']:.2f})")
     if day in ("2", "3"):
-        for k in ("expiry_after_today", "photo_matches_person"):
-            if k in state:
-                lines.append(f"- {_CHECK_LABEL[k]} ({today}): {state[k]['value']} (p={state[k]['p']:.2f})")
+        e = known_exp(state, facts)
+        if e:
+            ok_e = expiry_valid(state, day, facts)
+            lines.append(f"- Passport EXP. read as {e[0]}.{e[1] or '??'} (p={e[2]:.2f}); today is {today}: "
+                         + ("not expired" if ok_e else "EXPIRED" if ok_e is False else "not decidable yet"))
     for k, c in ((facts.get("checks_carried") or {}).items() if day in ("2", "3") else ()):
         if k not in state:
             lines.append(f"- {_CHECK_LABEL[k]}: {'yes' if c['value'] else 'no'} (read at tick {c['tick']}, p={c['p']:.2f})")
