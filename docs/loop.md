@@ -199,3 +199,19 @@ tab right) to reveal it.
   (cloud L4, see remote_extraction.md).
 - Foreground guard: waits (2 s polls, no input, no tick spent) up to `--fg-patience` (default 60) before the
   safety abort.
+
+## Day 2/3 passport readings in request 1b (2026-10-03, loop8)
+
+- `exp_year` / `exp_month` / `issuing_city` left request 1. On Day 2/3 booth ticks, request 1b (`doc_probe`, after
+  extraction, parallel to request 1) asks `manual.inspection_doc_questions(desk_text)`:
+  `exp_date` = choice over the full dates the desk OCR read ("EXP. 1983.12.13" ...; + none),
+  `issuing_city_tok` = choice over the OCR's city-like words in the OCR's own spelling (+ none), and, only when the
+  first token differs from the nearest rulebook name, `issuing_city_spelling` (S1 = OCR spelling, S2 = rulebook
+  spelling, S3 = other; neutral labels). Options are strings read from the screen; the code compares the picked
+  date with today and looks the picked city up in the rulebook table (`read_inspection_answers`, `expiry_valid`,
+  `check_value`). A non-rulebook spelling denies only at p >= DENY_P. No gate on `passport_open_readable`: the
+  questions exist only when the OCR found a date/city, and `none` covers the rest.
+- With these questions in 1b, the "READABLE TEXT ON THE DESK" block is left out of the 1b text (listing the OCR's
+  misreading 'Paradizng' pulled the spelling answer to S1 on two valid passports).
+- Dry run on the 30 gt-labelled Day 2 frames (16 entrants): expiry 28 right / 0 wrong / 2 undecided (was 3/30),
+  city 29 / 0 / 1 (the undecided frame had no country reading; live carries it). Photo unchanged.

@@ -23,6 +23,9 @@ states, used by loop.py to enforce it on TOD's pick.
 """
 from __future__ import annotations
 
+import difflib
+import re
+
 # --------------------------------------------------------------------------
 # days (docs/game.md section 5)
 # --------------------------------------------------------------------------
@@ -239,9 +242,10 @@ DOC_KINDS = {"passport": "the entrant's passport (a small booklet, or its open p
              "other": "something else, or not a paper"}
 # photo_matches_person is no longer asked (answers sat at p 0.4-0.68 all session; budget of 16 questions). The
 # expiry check is TOD's reading of the EXP. year and month, compared with today's date by the rule (section 5).
-INSPECT_KEYS = ("issuing_country", "exp_year", "exp_month", "issuing_city", "photo_matches_person")
+# loop8: EXP. date and ISS. city are no longer request-1 questions; they are request-1b choices over the desk OCR
+# (inspection_doc_questions below; eval day2_readings notes: expiry 3/30 -> 28/30, city 26/30 -> 30/30).
+INSPECT_KEYS = ("issuing_country", "photo_matches_person")
 CHECK_KEYS = ("entry_ticket_dated_today", "photo_matches_person")
-EXP_YEARS = ("1979", "1980", "1981", "1982", "1983", "1984", "1985", "1986", "1987")
 DENY_P = 0.75              # p a check answer needs before it can deny an entrant
 CARRY_CHECK_MARGIN = 0.15   # a yes/no check is carried for the entrant when |p - 0.5| >= this
 ISSUING_CITIES = {   # game rule (rulebook Regional Map): the passport's ISS. city must belong to its country
@@ -333,13 +337,6 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
                             "'Arstotzkan' too -- only the PASSPORT counts.",
             "criteria": {**{c: f"the passport is issued by {c}" for c in COUNTRIES},
                          "unreadable": "no open passport, or its country name cannot be read"}},
-        "issuing_city": {
-            "type": "choice",
-            "instructions": "On the open passport data page: which city is printed after 'ISS.' (the issuing city)? "
-                            "Pick the exact name; a name that is spelled differently from every option is 'other'.",
-            "criteria": {**{c: f"ISS. {c}" for v in ISSUING_CITIES.values() for c in v},
-                         "other": "a city name that is not exactly one of the listed names",
-                         "unreadable": "no open passport data page, or the ISS. line cannot be read"}},
         # 3-way choices: the old yes/no 'no' option also meant 'unreadable' and denied a valid Arstotzkan
         # (run 024712 t0: expiry 'no' p=0.96 with the page not readable)
         # run 033308 t49: a one-step "is EXP. after today?" answer said 'expired' (p=0.76) for a valid passport;
@@ -353,18 +350,6 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
             "criteria": {"match": "both are visible and show the same person",
                          "different": "both are visible and clearly show two different people",
                          "cannot_compare": "the passport photo or the person is not visible"}},
-        "exp_year": {
-            "type": "choice",
-            "instructions": "On the open passport data page, find the date after 'EXP.' (format YYYY.MM.DD). "
-                            "Which YEAR (the first four digits) is printed there?",
-            "criteria": {**{y: f"EXP. {y}.xx.xx" for y in EXP_YEARS},
-                         "unreadable": "no open passport data page, or the EXP. date cannot be read"}},
-        "exp_month": {
-            "type": "choice",
-            "instructions": "On the open passport data page, find the date after 'EXP.' (format YYYY.MM.DD). "
-                            "Which MONTH (the two digits after the first dot) is printed there?",
-            "criteria": {**{f"{m:02d}": f"EXP. yyyy.{m:02d}.xx" for m in range(1, 13)},
-                         "unreadable": "no open passport data page, or the EXP. date cannot be read"}},
     }
     if today == DAY_DATES["3"]:   # Day 3: foreigners also need an entry ticket dated today
         q["entry_ticket_dated_today"] = _noul(
@@ -473,8 +458,9 @@ def known_country(state: dict, facts: dict | None):
 
 
 def known_city(state: dict, facts: dict | None):
+    """(city, p, where): a rulebook name, or the passport's own (non-rulebook) spelling read at p >= DENY_P."""
     c = state.get("issuing_city")
-    if c and c["value"] != "unreadable" and c["p"] >= (DENY_P if c["value"] == "other" else 0.6):
+    if c and c["value"] != "unreadable" and c["p"] >= (0.6 if c["value"] in _ALL_CITIES else DENY_P):
         return c["value"], c["p"], "this frame"
     cc = (facts or {}).get("city_carried")
     if cc:
@@ -497,33 +483,135 @@ def check_answer(a: dict | None):
 
 
 def known_exp(state: dict, facts: dict | None):
-    """(year, month or None, p) of TOD's EXP. reading (this frame, else carried for the entrant), or None."""
-    y, m = state.get("exp_year"), state.get("exp_month")
-    if y and y["value"] != "unreadable" and y["p"] >= 0.5:   # run 042019 t36: 1984 at 0.57 stalled the entrant
-        mm = m["value"] if m and m["value"] != "unreadable" and m["p"] >= 0.5 else None
-        return y["value"], mm, y["p"]
+    """(YYYY.MM.DD, p, where) of the EXP. date TOD picked among the OCR dates (this frame, else carried), or None."""
+    e = state.get("exp_read")
+    if e and e["p"] >= 0.5:
+        return e["value"], e["p"], "this frame"
     c = (facts or {}).get("exp_carried")
-    return (c["year"], c["month"], c["p"]) if c else None
+    return (c["value"], c["p"], f"tick {c['tick']}") if c else None
 
 
 def expiry_valid(state: dict, day: str, facts: dict | None):
-    """True/False/None: the EXP. date TOD read, compared with today (section 5). A year before today's year
-    denies only at p >= DENY_P."""
+    """True/False/None: the EXP. date TOD picked, compared with today (section 5). 'Expired' needs p >= DENY_P."""
     e = known_exp(state, facts)
     if not e:
         return None
-    ty, tm, _ = (int(x) for x in DAY_DATES.get(day, DAY_DATES["2"]).split("."))
-    y = int(e[0])
-    if y > ty:
-        return True
-    if y < ty:
-        return False if e[2] >= DENY_P else None
-    if e[1] is None:
-        return None
-    m = int(e[1])
-    if m != tm:
-        return m > tm
-    return None   # same month as today: the day decides, not read -> undecided
+    y, m, d = (int(x) for x in e[0].split("."))
+    ok = (y, m, d) > tuple(int(x) for x in DAY_DATES.get(day, DAY_DATES["2"]).split("."))
+    return ok if ok or e[1] >= DENY_P else None
+
+
+# ---- request 1b: Day 2/3 readings as choices over the strings the OCR read on the screen ----------------------
+# (private eval 2026-10-03, 30 gt-labelled Day 2 frames: expiry 3/30 -> 28/30 right, 0 wrong; city 26/30 -> 30/30)
+_DATE_RE = re.compile(r"(19\d\d)[.,](\d\d)[.,](\d\d)")
+_ISS_RE = re.compile(r"(?:^|[\s.;,])(?:[I1lUu]?[S5s$][S5s$]\.?)\s*([A-Za-z][A-Za-z.' ]*?)\s*"
+                     r"(?=\bE[XNR]?P\b|\bE[XNR]?P[.\d ]|\bP\.\d|\d|ARSTOT|$)")
+_ALL_CITIES = [c for v in ISSUING_CITIES.values() for c in v]
+
+
+def _flat(s: str) -> str:
+    return s.lower().replace(".", "").replace(" ", "")
+
+
+def ocr_dates(lines: list[str]) -> list[str]:
+    """Every plausible full date the desk OCR read (YYYY.MM.DD), reading order, de-duplicated."""
+    out = []
+    for t in lines:
+        for m in _DATE_RE.finditer(t):
+            d = ".".join(m.groups())
+            if 1 <= int(m.group(2)) <= 12 and 1 <= int(m.group(3)) <= 31 and d not in out:
+                out.append(d)
+    return out[:8]
+
+
+def ocr_city_tokens(lines: list[str], k: int = 6) -> list[str]:
+    """City-like OCR strings: text after an ISS.-like marker + 1-2 word windows resembling any rulebook city
+    (ratio >= 0.75). The strings keep the OCR's spelling; they are never replaced by the rulebook spelling."""
+    raw = []
+    for t in lines:
+        raw += [m.group(1) for m in _ISS_RE.finditer(t)]
+        w = re.findall(r"[A-Za-z][A-Za-z.']*", t)
+        for n in (1, 2):
+            for i in range(len(w) - n + 1):
+                s = " ".join(w[i:i + n]).strip(".")
+                if len(s) >= 4 and max(difflib.SequenceMatcher(None, s.lower(), c.lower()).ratio()
+                                       for c in _ALL_CITIES) >= 0.75:
+                    raw.append(s)
+    out = []
+    for s in raw:
+        s = re.sub(r"^(?:(?!St[. ])[A-Za-z]{1,2}\.?\s+|[I1lUu]?[S5s$][S5s$]\.\s*)", "", s.strip(" ."))
+        s = re.sub(r"\s+(?:E[XNR]?P|P)\.?$", "", s).strip(" .")
+        if len(s) >= 3 and _flat(s) not in [_flat(x) for x in out]:
+            out.append(s)
+    out = [c for c in out if not any(o != c and o.lower().endswith(c.lower()) for o in out)]
+    return out[:k]
+
+
+def nearest_rule_city(tok: str) -> str:
+    return max(_ALL_CITIES, key=lambda c: difflib.SequenceMatcher(None, _flat(tok), _flat(c)).ratio())
+
+
+def inspection_doc_questions(desk_text: list[str]) -> tuple[dict, dict]:
+    """Request-1b questions (Day 2/3) + the candidate lists needed to read the answers back. The options are the
+    strings the OCR read on the screen; the spelling contrast is asked only when the first city token differs from
+    the nearest rulebook name (neutral labels, OCR spelling first)."""
+    q, cand = {}, {"dates": ocr_dates(desk_text), "toks": ocr_city_tokens(desk_text)}
+    if cand["dates"]:
+        q["exp_date"] = {
+            "type": "choice",
+            "instructions": "OCR found these dates on the documents on the desk. On the open passport data page, "
+                            "which one is printed after 'EXP.' (the expiry date; the date after 'DOB.' is the birth "
+                            "date)?",
+            "criteria": {**{f"D{i + 1}": f"EXP. {d}" for i, d in enumerate(cand["dates"])},
+                         "none": "none of these is the passport's EXP. date, or no open passport data page is visible"}}
+    if cand["toks"]:
+        q["issuing_city_tok"] = {
+            "type": "choice",
+            "instructions": "OCR found these city-like words on the documents on the desk (pixel font; letters may be "
+                            "misread). On the open passport data page, which one is the issuing city printed after "
+                            "'ISS.'?",
+            "criteria": {**{f"C{i + 1}": f"ISS. '{t}' (as read by OCR)" for i, t in enumerate(cand["toks"])},
+                         "none": "none of these is the city printed after 'ISS.', or no open passport data page is "
+                                 "visible"}}
+        tok = cand["toks"][0]
+        rule = nearest_rule_city(tok)
+        if _flat(rule) != _flat(tok):
+            cand["spell"] = (tok, rule)
+            q["issuing_city_spelling"] = {
+                "type": "choice",
+                "instructions": "On the open passport data page, read the city printed after 'ISS.' letter by letter. "
+                                "Which spelling is printed there exactly?",
+                "criteria": {"S1": f"ISS. {tok}", "S2": f"ISS. {rule}",
+                             "S3": "another spelling, or no open passport data page is visible"}}
+    return q, cand
+
+
+def _pick(a: dict | None, n: int) -> int | None:
+    v = (a or {}).get("value") or ""
+    return int(v[1:]) - 1 if v[1:].isdigit() and 1 <= int(v[1:]) <= n else None
+
+
+def read_inspection_answers(state: dict, cand: dict) -> None:
+    """1b answers -> state['exp_read'] {value: YYYY.MM.DD, p} and state['issuing_city'] {value, p}; the city value is
+    a rulebook name, or the passport's own spelling when TOD reads the non-rulebook spelling (denies at DENY_P)."""
+    i = _pick(state.get("exp_date"), len(cand["dates"]))
+    if i is not None:
+        state["exp_read"] = {"value": cand["dates"][i], "p": state["exp_date"]["p"]}
+    a = state.get("issuing_city_tok")
+    i = _pick(a, len(cand["toks"]))
+    if i is None:
+        return
+    tok = cand["toks"][i]
+    rule = nearest_rule_city(tok)
+    if _flat(tok) == _flat(rule):
+        state["issuing_city"] = {"value": rule, "p": a["p"]}
+        return
+    sp = state.get("issuing_city_spelling")
+    if sp and cand.get("spell", (None,))[0] == tok:
+        if sp["value"] == "S1":
+            state["issuing_city"] = {"value": tok, "p": min(a["p"], sp["p"])}
+        elif sp["value"] == "S2":
+            state["issuing_city"] = {"value": rule, "p": min(a["p"], sp["p"])}
 
 
 def check_value(state: dict, facts: dict | None, k: str):
@@ -670,7 +758,7 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         e = known_exp(state, facts)
         if e:
             ok_e = expiry_valid(state, day, facts)
-            lines.append(f"- Passport EXP. read as {e[0]}.{e[1] or '??'} (p={e[2]:.2f}); today is {today}: "
+            lines.append(f"- Passport EXP. read as {e[0]} (p={e[1]:.2f}, {e[2]}); today is {today}: "
                          + ("not expired" if ok_e else "EXPIRED" if ok_e is False else "not decidable yet"))
     for k, c in ((facts.get("checks_carried") or {}).items() if day in ("2", "3") else ()):
         if k not in state:

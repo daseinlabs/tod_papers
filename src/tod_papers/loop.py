@@ -402,11 +402,16 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
     return tod.ask(q, text=text, image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
 
 
-def doc_probe(tod: TodClient, frame: np.ndarray, args, facts: dict):
-    """REQUEST 1b (after extraction, only when a paper is not in DOC_CACHE): one identity question per new paper
-    box, unmarked frame + the OCR text inside each. Returns the TOD result or None when every paper is cached."""
+def doc_probe(tod: TodClient, frame: np.ndarray, args, facts: dict, day: str = "1", docs: bool = True):
+    """REQUEST 1b (after extraction): one identity question per paper box not in DOC_CACHE (unmarked frame + the
+    OCR text inside each) and, on Day 2/3, the passport readings as choices over the OCR'd strings on the desk
+    (EXP. date among the OCR dates, ISS. city among the OCR city words, spelling contrast; manual.
+    inspection_doc_questions; the candidates go to facts['insp_cand']). Returns the TOD result or None."""
     q = {}
-    for i, d in enumerate(facts.get("docs") or []):
+    if day in ("2", "3"):
+        iq, facts["insp_cand"] = man.inspection_doc_questions(facts.get("desk_text") or [])
+        q.update(iq)
+    for i, d in enumerate((facts.get("docs") or []) if docs else []):
         c = DOC_CACHE.get(_doc_key(d))
         if c and facts.get("tick", 0) - c["tick"] <= DOC_CACHE_TICKS:
             d["cached"] = c
@@ -415,7 +420,12 @@ def doc_probe(tod: TodClient, frame: np.ndarray, args, facts: dict):
     if not q:
         return None
     small = _small_for_send(frame, args)
-    return tod.ask(q, text=man.STATE_TEXT + "\n\n" + man.desk_text_block(facts),
+    # with the Day 2/3 readings in the request the OCR block stays out of the text: listed there, the OCR's misread
+    # spelling ('Paradizng') pulled the spelling contrast to S1 on 2 valid passports (dry run loop8_d2dry); the
+    # identity questions carry the OCR text of their own paper anyway
+    text = (man.STATE_TEXT if any(k in q for k in ("exp_date", "issuing_city_tok"))
+            else man.STATE_TEXT + "\n\n" + man.desk_text_block(facts))
+    return tod.ask(q, text=text,
                    image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
 
 
@@ -493,7 +503,7 @@ def state_line(state: dict) -> str:
             bits.append(f"{ab}={state[k]['p']:.2f}")
     if "issuing_country" in state:
         bits.append(f"iss={state['issuing_country']['value']}:{state['issuing_country']['p']:.2f}")
-    for k, ab in (("exp_year", "expY"), ("exp_month", "expM")):
+    for k, ab in (("exp_read", "exp"), ("issuing_city_spelling", "spell")):
         if k in state:
             bits.append(f"{ab}={state[k]['value']}:{state[k]['p']:.2f}")
     if "issuing_city" in state:
@@ -1234,13 +1244,12 @@ class Entrant:
                 and (self.country is None or c["p"] >= self.country["p"] or c["value"] == self.country["value"])):
             self.country = {"value": c["value"], "p": c["p"], "tick": tick}
         ci = state.get("issuing_city")
-        if (ci and ci["p"] >= (man.DENY_P if ci["value"] == "other" else CARRY_COUNTRY_P) and ci["value"] != "unreadable"
+        if (ci and ci["p"] >= (CARRY_COUNTRY_P if ci["value"] in man._ALL_CITIES else man.DENY_P)
                 and (self.city is None or ci["p"] >= self.city["p"] or ci["value"] == self.city["value"])):
             self.city = {"value": ci["value"], "p": ci["p"], "tick": tick}
-        y, m = state.get("exp_year"), state.get("exp_month")
-        if y and y["value"] != "unreadable" and y["p"] >= 0.5 and (self.exp is None or y["p"] >= self.exp["p"]):
-            mm = m["value"] if m and m["value"] != "unreadable" and m["p"] >= 0.5 else None
-            self.exp = {"year": y["value"], "month": mm, "p": y["p"], "tick": tick}
+        e = state.get("exp_read")   # TOD's pick among the OCR dates (request 1b)
+        if e and e["p"] >= 0.5 and (self.exp is None or e["p"] >= self.exp["p"]):
+            self.exp = {"value": e["value"], "p": e["p"], "tick": tick}
         for k in man.CHECK_KEYS:   # Day 2/3 checks, carried like the country (the page is hidden once under a stamp)
             v = man.check_answer(state.get(k))
             if v is not None:
@@ -1338,6 +1347,11 @@ def offline(args) -> int:
         asked = ("issuing_country",) if oday == "1" else man.INSPECT_KEYS
         probe, t_probe = _timed(state_probe, tod, frame, args, oday, asked, df)
         state = parse_state(probe)
+        if oday in ("2", "3"):   # live: these ride in request 1b
+            dres, _ = _timed(doc_probe, tod, frame, args, df, oday, False)
+            if dres is not None:
+                state.update(parse_state(dres))
+            man.read_inspection_answers(state, df["insp_cand"])
         gate_inspection(state, asked, df)
         ent = Entrant()
         ent.observe(0, state)
@@ -1538,12 +1552,15 @@ def run(args) -> int:
             df["tick"] = tick
             rec["desk_facts"], rec["inspect_asked"] = df, list(asked)
             try:
-                dfut = _DOC_POOL.submit(_timed, doc_probe, tod, frame, args, df) if fam[0] == "booth" else None
+                dfut = (_DOC_POOL.submit(_timed, doc_probe, tod, frame, args, df, day)
+                        if fam[0] == "booth" else None)
                 probe, rec["state_ms"] = fut.result()
                 state = parse_state(probe)
                 dres, rec["doc_ms"] = dfut.result() if dfut is not None else (None, 0.0)
                 if dres is not None:
                     state.update(parse_state(dres))
+                if df.get("insp_cand"):
+                    man.read_inspection_answers(state, df["insp_cand"])
                 rec["docs_cached"] = sum(1 for d in df.get("docs") or [] if d.get("cached"))
             except TodCreditExhausted as e:  # 402: every later call fails too -> stop once, do not skip ticks
                 stop_reason = "TOD credit exhausted (402)"
