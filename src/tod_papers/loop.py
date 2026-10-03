@@ -586,9 +586,14 @@ def passport_sides(strip: dict) -> list[str]:
     paper under that stamp is a passport."""
     # also when TOD's identity of the paper over that strip says passport (14/26 strip drags landed while
     # passport_under read 0.30-0.52: 005956 t8-9, 022439 t5-6/t67-76)
+    # a paper TOD names as something else (entry ticket, rulebook ...) at doc_p >= 0.6 is not the passport unless the
+    # strip question is confident (run 075504 t112-114: the ENTRY TICKET (0.93) lay under APPROVED with
+    # passport_under 0.50; APPROVED stamped the ticket, the unstamped passport went back, 25-tick stall)
     return [s for s, v in strip.items()
-            if v["paper"] is not False and ((v["passport_p"] or 0.0) >= 0.5
-                                            or (v["paper"] and v["doc"] == "passport" and (v["doc_p"] or 0) >= 0.5))]
+            if v["paper"] is not False
+            and not (v["doc"] not in (None, "passport") and (v["doc_p"] or 0) >= 0.6 and (v["passport_p"] or 0) < 0.75)
+            and ((v["passport_p"] or 0.0) >= 0.5
+                 or (v["paper"] and v["doc"] == "passport" and (v["doc_p"] or 0) >= 0.5))]
 
 
 INSPECT_OPEN_P = 0.6
@@ -1009,6 +1014,13 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         # run 021438 t3: TOD clicked the red inspect button; inspect mode froze every drag for 8 ticks. Days 1-3 need
         # no inspect mode, so the button is offered only while TOD says inspect mode is on (to leave it)
         boxes = [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"]
+    if booth:
+        # a press there toggles inspect mode whatever the element is called: run 081222/082950 dragged an entry
+        # ticket by its proposed page corner / 'document under the tray' box at (2256,1256)/(2218,1232) -> inspect
+        # mode on every drag (H/B ping-pong 20 ticks). Only the inspect button itself may sit on the button.
+        ix1, iy1, ix2, iy2 = layout.scale_box(layout.BY_NAME["inspect_toggle"].box, W, H)
+        boxes = [b for b in boxes if getattr(b, "name", "") == "inspect_toggle"
+                 or not (ix1 <= b.center[0] <= ix2 and iy1 <= b.center[1] <= iy2)]
     handle = derive_tray_handle(boxes, frame, state) if booth else None
     if handle is not None:
         boxes = list(boxes) + [handle]
@@ -1237,8 +1249,8 @@ class Entrant:
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
 
-    def observe(self, tick: int, state: dict) -> None:
-        """Start-of-tick update from request 1."""
+    def observe(self, tick: int, state: dict, papers: bool = False) -> None:
+        """Start-of-tick update from request 1 (`papers`: the layout found a paper on the desk or counter)."""
         person = man.yes(state, "person_at_window")
         if self.hb_drop is not None and tick - self.hb_drop <= 3 and not person:
             # a document was dropped on the person and the person is gone now: they took it and left,
@@ -1248,7 +1260,7 @@ class Entrant:
             self.hb_drop = None   # the person stayed: the drop was not a hand-back
         elif (self.handed_back is not None and person and tick - self.handed_back > HANDBACK_STAY
               and tick - self.handed_back <= HANDBACK_DOCS_STAY
-              and (man.yes(state, "document_open_on_desk") or man.yes(state, "document_on_counter_shelf"))):
+              and (papers or man.yes(state, "document_open_on_desk") or man.yes(state, "document_on_counter_shelf"))):
             # run 070911 t79-111: the passport went back, the entrant waited for the entry ticket still on the desk;
             # the reset below made the ticket 'a new passport' for 30 ticks. Keep the hand-back, ask for the rest.
             self.waiting_docs = True
@@ -1674,7 +1686,7 @@ def run(args) -> int:
             if dv.get("value") in DAY_RULES and dv.get("p", 0) >= 0.5 and (
                     day not in DAY_ORDER or DAY_ORDER[dv["value"]] >= DAY_ORDER[day]):
                 day = dv["value"]   # days only move forward (run 015649 t46-52: Day 2 booth frames read '1' at 0.45)
-            ent.observe(tick, state)
+            ent.observe(tick, state, papers=bool(df.get("docs")))   # run 081222 t5: only the ticket was left
             if len(ent.log) != n_resets:   # new entrant: stall / pick / refusal counters are entrant-scoped
                 n_resets = len(ent.log)
                 refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0

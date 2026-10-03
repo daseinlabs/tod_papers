@@ -120,7 +120,7 @@ C. An open passport lies on the desk and the stamp tray is closed: read the pass
 D. The stamp tray is open but the passport is NOT lying under a stamp head (it is off to the side, or it
    has slid up behind the tray so only an edge shows): stamps only mark a document lying directly beneath
    the stamp heads, in the dark strip under the tray. First decide APPROVED or DENIED (section 5), then
-   drag the passport to the stamp landing strip under THAT stamp. Both strips are valid landing places:
+   drag the PASSPORT (not the entry ticket) to the stamp landing strip under THAT stamp. Both strips are valid landing places:
    the APPROVED strip and the DENIED strip each work; put the passport under the stamp you intend to use.
    Do not drag the stamps; they are clicked. Do not drop the passport onto the tray bar itself: it slides
    behind the tray where no stamp reaches it.
@@ -305,7 +305,7 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
         "passport_under_denied": _noul(
             "Look at the dark band directly BELOW the red DENIED stamp (under the grey bar with the words ALIGN "
             "VISA BENEATH STAMP). Is the paper lying in that band, under the DENIED stamp, the entrant's PASSPORT? "
-            "The rulebook (pages with CONTENTS / Basic Rules / Regional Map), the bulletin or any other paper is NOT "
+            "The rulebook (pages with CONTENTS / Basic Rules / Regional Map), the bulletin, an entry ticket (small slip, VALID ON ...) or any other paper is NOT "
             "a passport.",
             "yes - the entrant's passport lies under the DENIED stamp",
             "no - nothing, or a paper that is not the passport (rulebook, bulletin ...), lies under the DENIED stamp, "
@@ -313,7 +313,7 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
         "passport_under_approved": _noul(
             "Look at the dark band directly BELOW the green APPROVED stamp (under the grey bar with the words ALIGN "
             "VISA BENEATH STAMP). Is the paper lying in that band, under the APPROVED stamp, the entrant's PASSPORT? "
-            "The rulebook (pages with CONTENTS / Basic Rules / Regional Map), the bulletin or any other paper is NOT "
+            "The rulebook (pages with CONTENTS / Basic Rules / Regional Map), the bulletin, an entry ticket (small slip, VALID ON ...) or any other paper is NOT "
             "a passport.",
             "yes - the entrant's passport lies under the APPROVED stamp",
             "no - nothing, or a paper that is not the passport (rulebook, bulletin ...), lies under the APPROVED "
