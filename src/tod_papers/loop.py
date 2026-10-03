@@ -112,6 +112,22 @@ def try_foreground(hwnd: int) -> bool:
             return True
         time.sleep(0.05)
         io_win.focus(hwnd)
+    if win32gui.GetForegroundWindow() != hwnd:
+        # a Windows notification toast (ShellExperienceHost 'New notification', run 101823) keeps the foreground
+        # against SetForegroundWindow; a click on the game's TITLE BAR (non-client area, not game input) takes it back
+        L, T, _, _ = win32gui.GetWindowRect(hwnd)
+        _, cy, _, _ = io_win.client_rect_physical(hwnd)
+        if cy - T >= 20:
+            x, y = L + 200, T + (cy - T) // 2
+            ax, ay = io_win._abs_from_screen(x, y)
+            io_win._move_abs_screen(x, y)
+            time.sleep(0.05)
+            io_win._send_mouse(io_win.MOUSEEVENTF_MOVE | io_win.MOUSEEVENTF_ABSOLUTE | io_win.MOUSEEVENTF_VIRTUALDESK
+                               | io_win.MOUSEEVENTF_LEFTDOWN, ax, ay)
+            time.sleep(0.05)
+            io_win._send_mouse(io_win.MOUSEEVENTF_LEFTUP)
+            time.sleep(0.3)
+            print(f"[focus] title-bar click to take the foreground back -> {win32gui.GetForegroundWindow() == hwnd}")
     return win32gui.GetForegroundWindow() == hwnd
 
 
@@ -409,7 +425,7 @@ def doc_probe(tod: TodClient, frame: np.ndarray, args, facts: dict, day: str = "
     inspection_doc_questions; the candidates go to facts['insp_cand']). Returns the TOD result or None."""
     q = {}
     if day in ("2", "3"):
-        iq, facts["insp_cand"] = man.inspection_doc_questions(facts.get("desk_text") or [])
+        iq, facts["insp_cand"] = man.inspection_doc_questions(facts.get("desk_text") or [], day)
         q.update(iq)
     for i, d in enumerate((facts.get("docs") or []) if docs else []):
         c = DOC_CACHE.get(_doc_key(d))
@@ -975,6 +991,7 @@ def encode_image(img: np.ndarray, fmt: str = "png", quality: int = 90) -> str:
     return f"data:{mime};base64," + base64.b64encode(buf.tobytes()).decode()
 
 
+LAST_DAY_FILE = os.path.join(ROOT, "runs", "LAST_DAY.json")   # the day TOD last read, for a restart within the hour
 PAUSE_MIN_FRAC = 0.05     # changed fraction (vs the grabbed frame) that counts as "pause menu on screen"
 STAMP_REOFFER_TICKS = 6   # ticks after a recorded stamp press during which the stamps are not offered again
 
@@ -995,7 +1012,15 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         regions, region_src = static_regions(frame, bool(sinfo.get("tray_open", man.yes(state, "stamp_tray_open"))))
     else:
         regions, region_src = derive_regions(boxes, frame, state) if booth else ([], {})
-    if booth and facts is not None and not man.stamped(state, facts) and not facts.get("waiting_docs"):
+    if booth and facts is not None and facts.get("waiting_docs"):
+        # G2: the remaining papers go to the entrant; the stow shelf (also 'counter shelf ...') took the ticket twice
+        # in run 092521 t217-218 while the entrant waited for it
+        # only the entrant (and the tray stow edge, to uncover papers under the tray) are drop targets in G2
+        regions = [r for r in regions if r.caption in (REGION_CAPS["hand_back"], REGION_CAPS["tray_stow"])]
+    only_tickets = bool((facts or {}).get("waiting_docs"))
+    # only entry tickets left (passport already gone back, e.g. after a loop restart lost the hand-back memory):
+    # the entrant target stays offered (run 092521 t226)
+    if booth and facts is not None and not man.stamped(state, facts) and not facts.get("waiting_docs")             and not only_tickets:
         # an unstamped passport is not handed back (run 054238 t62-137: 20+ unstamped hand-backs on a false mark
         # reading); the entrant target is offered once a stamp press is on record for this entrant
         regions = [r for r in regions if r.caption != REGION_CAPS["hand_back"]]
@@ -1512,6 +1537,15 @@ def run(args) -> int:
     stuck = StuckTracker(limit=args.stuck_limit, ban_ticks=args.ban_ticks)
     rows: list[dict] = []
     day = "unknown"
+    try:   # TOD's own last day reading, carried across a loop restart within the hour (run 101823-102817: after a
+        # restart on Day 3 the booth readout 82.11.25 was read as '2' at 0.51-0.59 and Day 3 rules never applied)
+        with open(LAST_DAY_FILE, encoding="utf-8") as fh:
+            ld = json.load(fh)
+        if time.time() - ld["time"] < 3600 and ld["day"] in DAY_RULES and not args.dry_run:
+            day = ld["day"]
+            print(f"[loop] day {day} carried from {LAST_DAY_FILE} (read at tick {ld.get('tick')} of {ld.get('run')})")
+    except (OSError, ValueError, KeyError):
+        pass
     last_state: dict = {}
     fg_misses = 0
     overlay = None
@@ -1592,6 +1626,11 @@ def run(args) -> int:
             rows.append(row)
             stuck.decay(tick)
             resume_game(None)   # a tick that ended early (skip / stop paths) left the menu open
+            if args.stop_file and os.path.exists(args.stop_file):   # clean external stop (the game is not left paused)
+                os.remove(args.stop_file)
+                stop_reason = f"stop file {args.stop_file}"
+                print(f"[loop] STOP: {stop_reason}")
+                break
             # capture needs the game unoccluded (Desktop Duplication grabs the screen region)
             # if another window holds the foreground, wait (no input, no tick spent) instead of aborting
             fg_misses = 0
@@ -1690,6 +1729,9 @@ def run(args) -> int:
             dv = state.get("day", {})
             if dv.get("value") in DAY_RULES and dv.get("p", 0) >= 0.5 and (
                     day not in DAY_ORDER or DAY_ORDER[dv["value"]] >= DAY_ORDER[day]):
+                if day != dv["value"] and not args.dry_run:
+                    with open(LAST_DAY_FILE, "w", encoding="utf-8") as fh:
+                        json.dump({"day": dv["value"], "time": time.time(), "tick": tick, "run": run_dir}, fh)
                 day = dv["value"]   # days only move forward (run 015649 t46-52: Day 2 booth frames read '1' at 0.45)
             ent.observe(tick, state, papers=bool(df.get("docs")), day=day)   # run 081222 t5: only the ticket was left
             if len(ent.log) != n_resets:   # new entrant: stall / pick / refusal counters are entrant-scoped
@@ -1697,6 +1739,18 @@ def run(args) -> int:
                 refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0
             facts = ent.facts(tick, df)
             add_tod_facts(facts, state, df, sinfo)
+            dn = facts.get("docs_named") or []
+            if (day == "3" and not facts.get("waiting_docs") and man.yes(state, "person_at_window")
+                    and not man.yes(state, "document_open_on_desk")
+                    and not any(d["id"] == "passport" and d["p"] >= 0.3 for d in dn)
+                    and any(d["id"] == "entry_ticket" and d["where"] == "desk" and d["p"] >= 0.3 for d in dn)):
+                # Day 3, no passport anywhere, a ticket(-like) paper left, the person still waiting: the passport went
+                # back already (run 092521 after a loop restart: hand-back memory lost, 40 ticks of shuffling)
+                facts["waiting_docs"] = True
+                rec["waiting_docs_from_screen"] = True
+                ent.waiting_docs = True             # sticky for this entrant (reset when the window is empty)
+                if ent.handed_back is None:
+                    ent.handed_back = tick
             rec["e_minus"] = facts.get("e_minus")
             rec["docs_named"] = [{k: d[k] for k in ("where", "id", "p", "text")} for d in facts["docs_named"]]
             rec["strip"] = facts["strip"]
@@ -2026,6 +2080,8 @@ def main(argv=None, result: dict | None = None) -> int:
     ap.add_argument("--unreachable-stop", type=int, default=3, help="stop after N consecutive ticks whose TOD "
                     "request failed with retries exhausted on a network error (0 = off)")
     ap.add_argument("--refuse-stop", type=int, default=5, help="stop after N refused stamp presses (0 = off)")
+    ap.add_argument("--stop-file", default=os.path.join("runs", "STOP_LOOP"), help="stop cleanly at the next tick "
+                    "when this file exists (it is deleted); use instead of killing the process under --pause-think")
     ap.add_argument("--pause-think", action="store_true", help="harness timing: open the game's pause menu (Esc) "
                     "after the frame grab, close it before the input; TOD only sees the pre-pause frame (off by default)")
     args = ap.parse_args(argv)

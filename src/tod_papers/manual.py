@@ -190,6 +190,8 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
 - The bulletin (Ministry of Admission sheet) and the rulebook can lie open on the desk. If one covers the
   passport or the place you need to work, drag it aside to the left part of the desk ("desk" target). They
   are not needed to process day-1 entrants.
+- An M.O.A. CITATION slip (printed after a mistake) is the inspector's, not the entrant's: never hand it to the
+  entrant; drag it to the "counter shelf left of the desk" target if it is in the way.
 - A loose flyer or note an entrant leaves (e.g. the pink "The Pink Vice" card) is not needed: if it lies on the
   passport or under a stamp, DRAG it (clicking it does nothing) onto the "counter shelf left of the desk" target.
 - Multi-page papers (the bulletin shows "3/4" at its bottom) turn pages when you click their bottom-right
@@ -245,6 +247,7 @@ DOC_KINDS = {"passport": "the entrant's passport (a small booklet, or its open p
              "entry_ticket": "an entry ticket (small slip with a date)",
              "transcript": "the interview transcript printout",
              "flyer": "a loose flyer / advertisement or note an entrant left (e.g. a pink 'The Pink Vice' card)",
+             "citation": "an M.O.A. CITATION slip (a printed warning about a mistake; not the entrant's)",
              "other": "something else, or not a paper"}
 # photo_matches_person is no longer asked (answers sat at p 0.4-0.68 all session; budget of 16 questions). The
 # expiry check is TOD's reading of the EXP. year and month, compared with today's date by the rule (section 5).
@@ -367,7 +370,9 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
                             f"after 'VALID ON'?",
             "criteria": {"dated_today": f"an entry ticket is visible and its date reads VALID ON {today}",
                          "other_date": f"an entry ticket is visible and its date is clearly NOT {today}",
-                         "not_readable": "no entry ticket is visible, or its date cannot be read in this picture"}}
+                         "no_ticket": "the entrant's papers are on the desk/counter and there is NO entry ticket "
+                                      "among them",
+                         "not_readable": "an entry ticket may be there but its date cannot be read in this picture"}}
     return {k: v for k, v in q.items() if k not in INSPECT_KEYS or k in inspect}
 
 
@@ -481,7 +486,7 @@ def known_city(state: dict, facts: dict | None):
 
 
 CHECK_YES = {"valid": True, "match": True, "expired": False, "different": False,
-             "dated_today": True, "other_date": False}
+             "dated_today": True, "other_date": False, "no_ticket": False}   # run 092642: Mahovski had no ticket
 
 
 def check_answer(a: dict | None):
@@ -564,7 +569,7 @@ def nearest_rule_city(tok: str) -> str:
     return max(_ALL_CITIES, key=lambda c: difflib.SequenceMatcher(None, _flat(tok), _flat(c)).ratio())
 
 
-def inspection_doc_questions(desk_text: list[str]) -> tuple[dict, dict]:
+def inspection_doc_questions(desk_text: list[str], day: str = "2") -> tuple[dict, dict]:
     """Request-1b questions (Day 2/3) + the candidate lists needed to read the answers back. The options are the
     strings the OCR read on the screen; the spelling contrast is asked only when the first city token differs from
     the nearest rulebook name (neutral labels, OCR spelling first)."""
@@ -577,6 +582,14 @@ def inspection_doc_questions(desk_text: list[str]) -> tuple[dict, dict]:
                             "date)?",
             "criteria": {**{f"D{i + 1}": f"EXP. {d}" for i, d in enumerate(cand["dates"])},
                          "none": "none of these is the passport's EXP. date, or no open passport data page is visible"}}
+    if day == "3" and cand["dates"]:
+        # run 092642 Troyer: ticket VALID ON 1982.12.09 read 'dated_today' by the yes/no-style question
+        q["ticket_date"] = {
+            "type": "choice",
+            "instructions": "OCR found these dates on the documents on the desk. On the ENTRY TICKET (small slip with "
+                            "'ENTRY TICKET' and 'VALID ON'), which one is printed after 'VALID ON'?",
+            "criteria": {**{f"D{i + 1}": f"VALID ON {d}" for i, d in enumerate(cand["dates"])},
+                         "none": "none of these is the entry ticket's date, or no entry ticket is visible"}}
     if cand["toks"]:
         q["issuing_city_tok"] = {
             "type": "choice",
@@ -610,6 +623,11 @@ def read_inspection_answers(state: dict, cand: dict) -> None:
     i = _pick(state.get("exp_date"), len(cand["dates"]))
     if i is not None:
         state["exp_read"] = {"value": cand["dates"][i], "p": state["exp_date"]["p"]}
+    i = _pick(state.get("ticket_date"), len(cand["dates"]))
+    if i is not None:   # the ticket's date as picked among the OCR dates overrides the direct ticket answer
+        same = cand["dates"][i] == DAY_DATES["3"]
+        state["entry_ticket_dated_today"] = {"value": "dated_today" if same else "other_date",
+                                             "p": state["ticket_date"]["p"], "from": f"VALID ON {cand['dates'][i]}"}
     a = state.get("issuing_city_tok")
     i = _pick(a, len(cand["toks"]))
     if i is None:
@@ -765,8 +783,9 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         elif not pu:
             lines.append("- The passport lies under neither stamp: the stamps are not offered (a press would mark "
                          "nothing); drag the passport to the landing strip under the stamp you want first")
-    if facts.get("handed_back") is not None and facts.get("waiting_docs"):
-        lines.append(f"- The passport was handed back at tick {facts['handed_back']}, but the entrant is STILL at the "
+    if facts.get("waiting_docs"):
+        hb = f" at tick {facts['handed_back']}" if facts.get("handed_back") is not None else " (no passport is visible)"
+        lines.append(f"- The passport was handed back{hb}, but the entrant is STILL at the "
                      "window: they wait for the rest of their documents (e.g. the entry ticket). Drag every paper "
                      "of theirs still lying on the desk or the counter shelf onto the entrant (step G2)")
     elif facts.get("handed_back") is not None:
@@ -914,9 +933,9 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         return "7", f"non-booth screen ({scr}): click to continue"
     if yes(state, "inspect_mode_on"):
         return "H", "click the inspect-mode button (leave inspect mode)"
+    if (facts or {}).get("waiting_docs") and yes(state, "person_at_window"):
+        return "G2", "drag the remaining document (entry ticket) -> entrant"
     if (facts or {}).get("handed_back") is not None:
-        if (facts or {}).get("waiting_docs") and yes(state, "person_at_window"):
-            return "G2", "drag the remaining document (entry ticket) -> entrant"
         return ("G", "wait for the entrant to leave") if yes(state, "person_at_window") else ("A", "click loudspeaker")
     kc = known_country(state, facts)
     if kc and kc[0] == "unreadable":
