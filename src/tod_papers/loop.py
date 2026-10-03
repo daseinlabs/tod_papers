@@ -267,6 +267,7 @@ class _Fail:
     count: int = 0
     banned_until: int = -1   # tick index (exclusive) until which the box is excluded
     last_tick: int = 0
+    why: str = ""            # set for cycle bans: the line shown under RULED OUT instead of 'did nothing'
 
 
 @dataclass
@@ -303,14 +304,16 @@ class StuckTracker:
             f.banned_until = tick + 1 + self.ban_ticks
         return f
 
-    def ban(self, tick: int, action: str, b: Box, desc: str, count: int) -> "_Fail":
-        """Exclude an element now (repeat-drag rule: it 'changed' pixels but not the state)."""
+    def ban(self, tick: int, action: str, b: Box, desc: str, count: int, ticks: int | None = None,
+            why: str = "") -> "_Fail":
+        """Exclude an element now (repeat-drag / cycle rule: it 'changed' pixels but not the state)."""
         f = self._find(action, b)
         if f is None:
             f = _Fail(action, b, desc)
             self.fails.append(f)
         f.box, f.desc, f.last_tick, f.count = b, desc, tick, max(f.count, count)
-        f.banned_until = tick + 1 + self.ban_ticks
+        f.banned_until = tick + 1 + (self.ban_ticks if ticks is None else ticks)
+        f.why = why
         return f
 
     def decay(self, tick: int) -> None:
@@ -333,6 +336,73 @@ class StuckTracker:
 
     def active_bans(self, tick: int) -> list:
         return [f for f in self.fails if f.banned_until > tick]
+
+
+CYCLE_WINDOW = 8        # ticks looked at for a period-2/3 cycle
+CYCLE_BAN_TICKS = 6     # the cycle's sources stay excluded this long
+CYCLE_STATE_KEYS = ("person_at_window", "document_on_counter_shelf", "document_open_on_desk", "stamp_tray_open",
+                    "passport_shows_stamp_mark", "inspect_mode_on", "bulletin_or_rulebook_covering_desk")
+
+
+def _desc_key(d: str) -> str:
+    """An element description without its '(TOD 0.83)' score and '(middle-left)' position tail (stable per tick)."""
+    d = re.sub(r"\s*\(TOD [0-9.]+\)", "", d or "")
+    return re.sub(r"\s*\((?:top|middle|bottom|centre)[a-z-]*\)\s*$", "", d).strip()[:80]
+
+
+@dataclass
+class CycleDetector:
+    """Generic A,B,A,B / A,B,C,A,B,C detector (run 115900 t118-142: tray open -> close -> open ... 25 ticks; every
+    drag changed pixels, so no per-case stop fired). Per tick it keeps a compact state signature (screen, request-1
+    yes/no facts, manual step, executed input + source + target) and a progress signature from the loop's own
+    entrant bookkeeping (never gt). Two full periods of the same 2- or 3-signature sequence inside the last
+    CYCLE_WINDOW ticks with no progress change = a cycle. A guard like the others: it offers nothing new."""
+    window: int = CYCLE_WINDOW
+    seq: list = field(default_factory=list)   # [(tick, sig, progress, action, src_box, src_desc, tgt_desc)]
+    hits: int = 0                             # detections for the current entrant
+
+    def reset(self) -> None:
+        self.seq, self.hits = [], 0
+
+    def push(self, tick: int, sig: tuple, progress: tuple, action: str, sb, src_desc: str, tgt_desc: str):
+        """Record one executed tick; return {'period', 'n', 'actions': [(action, box, src, tgt)]} on a cycle."""
+        if self.seq and self.seq[-1][0] != tick - 1:
+            self.seq = []   # only consecutive ticks form a cycle
+        self.seq = (self.seq + [(tick, sig, progress, action, sb, src_desc, tgt_desc)])[-self.window:]
+        for per in (2, 3):
+            n = 2 * per
+            if len(self.seq) < n:
+                continue
+            last = self.seq[-n:]
+            sigs = [x[1] for x in last]
+            if len(set(sigs[:per])) < 2 or any(sigs[k] != sigs[k + per] for k in range(per)):
+                continue
+            if len({x[2] for x in last}) != 1 or all(x[3] in ("wait", "veto") for x in last[:per]):
+                continue
+            self.hits += 1
+            acts = [(x[3], x[4], x[5], x[6]) for x in last[:per]]
+            self.seq = []   # a second detection needs a fresh pair of periods
+            return {"period": per, "n": n, "actions": acts, "hits": self.hits}
+        return None
+
+
+def cycle_signature(screen: str, state: dict, step: str, action: str, src_desc: str, tgt_desc: str) -> tuple:
+    facts = tuple(int(man.yes(state, k)) for k in CYCLE_STATE_KEYS)
+    return (screen, facts, step, action, _desc_key(src_desc), _desc_key(tgt_desc) if action == "drag" else "")
+
+
+def cycle_progress(ent: "Entrant") -> tuple:
+    """Progress = the loop's own entrant bookkeeping: resets so far (processed count), passport placed under a
+    stamp, stamp presses, hand-back, waiting for the rest of the papers."""
+    return (len(ent.log), bool(ent.last_under), len(ent.stamp_clicks), ent.handed_back, ent.waiting_docs)
+
+
+def cycle_callout(hit: dict) -> str:
+    parts = [f"{a} '{short(_desc_key(s), 50)}'" + (f" -> '{short(_desc_key(t), 40)}'" if a == "drag" and t else "")
+             for a, _, s, t in hit["actions"]]
+    alt = " and ".join(parts) if len(parts) == 2 else ", ".join(parts[:-1]) + " and " + parts[-1]
+    return (f"The last {hit['n']} actions alternated {alt} with no progress (no passport placed, stamped or handed "
+            f"back); neither is the answer. Look at what is on screen again.")
 
 
 # --------------------------------------------------------------------------
@@ -1018,10 +1088,15 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         # in run 092521 t217-218 while the entrant waited for it
         # only the entrant (and the tray stow edge, to uncover papers under the tray) are drop targets in G2
         regions = [r for r in regions if r.caption in (REGION_CAPS["hand_back"], REGION_CAPS["tray_stow"])]
+    # step N (no passport presented): the entrant stays a drop target (hand back what they gave), the transcript
+    # printer stays offered, the tray tab and the stamps are not (run 115900 t118-142: tray open/close 25 ticks)
+    nopp = bool(booth and facts is not None and man.no_passport(state, facts))
+    if facts is not None:
+        facts["no_passport"] = nopp
     only_tickets = bool((facts or {}).get("waiting_docs"))
     # only entry tickets left (passport already gone back, e.g. after a loop restart lost the hand-back memory):
     # the entrant target stays offered (run 092521 t226)
-    if booth and facts is not None and not man.stamped(state, facts) and not facts.get("waiting_docs")             and not only_tickets:
+    if booth and facts is not None and not man.stamped(state, facts) and not facts.get("waiting_docs") and not nopp:
         # an unstamped passport is not handed back (run 054238 t62-137: 20+ unstamped hand-backs on a false mark
         # reading); the entrant target is offered once a stamp press is on record for this entrant
         regions = [r for r in regions if r.caption != REGION_CAPS["hand_back"]]
@@ -1031,12 +1106,12 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         # the paper stores below the counter (bulletin, rulebook slot, transcript printer) are not needed on Days 1-3
         # and only add papers to the desk (run 044332 t48-52: a fresh bulletin dragged onto the stamp strips;
         # run 005956 t18-31: 14 bulletin-storage drags)
-        nb = [b for b in boxes if getattr(b, "name", "") not in ("horn", "bulletin", "rulebook", "transcript")
-              and b.caption != "speaker/horn"]
+        hide_n = ("horn", "bulletin") + (() if nopp else ("rulebook", "transcript"))   # step N needs the rulebook
+        nb = [b for b in boxes if getattr(b, "name", "") not in hide_n and b.caption != "speaker/horn"]
         if len(nb) < len(boxes) and facts is not None:
             facts["horn_hidden"] = True
         boxes = nb
-    if booth and not man.yes(state, "inspect_mode_on"):
+    if booth and not man.yes(state, "inspect_mode_on") and not nopp:   # step N: inspect mode to interrogate
         # run 021438 t3: TOD clicked the red inspect button; inspect mode froze every drag for 8 ticks. Days 1-3 need
         # no inspect mode, so the button is offered only while TOD says inspect mode is on (to leave it)
         boxes = [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"]
@@ -1047,18 +1122,28 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         ix1, iy1, ix2, iy2 = layout.scale_box(layout.BY_NAME["inspect_toggle"].box, W, H)
         boxes = [b for b in boxes if getattr(b, "name", "") == "inspect_toggle"
                  or not (ix1 <= b.center[0] <= ix2 and iy1 <= b.center[1] <= iy2)]
+    if nopp:
+        # step N: in inspect mode the EMPTY counter shelf is clicked after the passport rule (docs/game.md,
+        # missing-document interrogation); the counter_shelf region itself is a drop target only
+        cx1, cy1, cx2, cy2 = layout.scale_box(layout.BY_NAME["counter_shelf"].box, W, H)
+        boxes = list(boxes) + [layout.LBox(cx1, cy1, cx2, cy2, "", "object", 1.0, caption=(
+            "the EMPTY counter shelf under the window (no passport presented) -- in inspect mode click it after the "
+            "passport rule to point out the missing passport"), name="empty_counter", affordance="click")]
     if booth:
         # M.O.A. citation slips pile up on the desk after mistakes and are never needed on Days 1-3 (run 104848
         # t329-342: 14 ticks of citation shuffling with the next passport waiting on the counter): not offered
         cits = [d["box"] for d in (facts or {}).get("docs_named") or [] if d["id"] == "citation" and d["p"] >= 0.5]
-        if cits:   # only the slip itself (its panel and its own text lines), never a paper lying under/over it
+        others = [d["box"] for d in (facts or {}).get("docs_named") or [] if d["id"] not in ("citation", "other")]
+        if cits:   # the slip and everything on it, unless it also lies on a paper TOD named as something else
+            def _inside(b, bxs) -> bool:
+                return any(x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 for x1, y1, x2, y2 in bxs)
+
             def _cit(b) -> bool:
                 if getattr(b, "name", "") in layout.BY_NAME:
                     return False
                 if b.text and CITATION_RE.search(b.text):
                     return True
-                return b.kind == "panel" and any(_iou(b, Box(x1, y1, x2, y2, "", "", 0.0, None)) >= 0.6
-                                                 for x1, y1, x2, y2 in cits)
+                return _inside(b, cits) and not _inside(b, others)
             boxes = [b for b in boxes if not _cit(b)]
     handle = derive_tray_handle(boxes, frame, state) if booth else None
     if handle is not None:
@@ -1081,11 +1166,14 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if undecided:
         # E?: the page has to be read, not the tray closed (run 044332 t44: closing it started a C/E? loop)
         boxes = [b for b in boxes if not (getattr(b, "name", "") == "tray_tab_open" or b.caption == TRAY_HANDLE_CAP)]
+    if nopp:
+        boxes = [b for b in boxes if not (_is_tray_tab(b) or b.caption == TRAY_HANDLE_CAP
+                                          or (b.caption or "").startswith("tab at screen edge"))]
     sc = (facts or {}).get("stamp_clicks") or []
     # already stamped for this entrant (a press on record): a second press is useless (run 070005 t25-31: 7 more
     # DENIED presses on a stamped passport); re-offered after STAMP_REOFFER_TICKS in case the press did not mark
     restamp_block = bool(sc) and tick is not None and tick - sc[-1][0] < STAMP_REOFFER_TICKS
-    if wrong or undecided or restamp_block or (facts or {}).get("waiting_docs"):
+    if wrong or undecided or restamp_block or nopp or (facts or {}).get("waiting_docs"):
         hide_stamp = lambda b: _stamp_side(b, frame) is not None
     elif booth and facts is not None and "strip" in facts:
         # a stamp is offered only when request 1 puts the passport under it -- the same test as the refusal veto
@@ -1109,7 +1197,9 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
             if x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 and getattr(b, "name", "") not in layout.BY_NAME:
                 rest = desc[str(i)].split(" — ", 1)[-1]   # drop the detector kind; TOD's identity names it
                 desc[str(i)] = f"{d['id']} (TOD {d['p']:.2f}) — {rest}"
-                if d["id"] != "other" or b.kind == "text":   # a texted 'other' paper is still a paper (run
+                if nopp and d["id"] == "rulebook":
+                    pass   # step N: rulebook pages and rule lines are clicked (page corner, inspect-mode rule)
+                elif d["id"] != "other" or b.kind == "text":   # a texted 'other' paper is still a paper (run
                     doc_ids.add(i)                          # 090830 t22-43: the Pink Vice flyer clicked 8x)   # run 114927 t30-86: the counter passport was labelled 'rubber stamp' (click-only)
                     if b.kind != "page_corner":
                         doc_of[i] = j
@@ -1122,6 +1212,10 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
                 banned_ids[str(i)] = f
         for f in stuck.active_bans(tick):
             verb = "Clicking" if f.action == "click" else "Dragging"
+            if f.why:
+                ban_lines.append(f"{verb} '{short(f.desc, 60)}' {f.why}; excluded for {f.banned_until - tick} more "
+                                 "tick(s)")
+                continue
             ban_lines.append(f"{verb} '{short(f.desc, 60)}' did nothing (tried {f.count}x); excluded for "
                              f"{f.banned_until - tick} more tick(s)")
     # one drag source per paper (61% of booth ticks offered the same passport 2+ times): the largest box on it
@@ -1279,6 +1373,7 @@ class Entrant:
     checks: dict = field(default_factory=dict)   # {check key: {"value", "p", "tick"}} confident yes/no readings
     log: list = field(default_factory=list)          # [(tick, why)] every reset (for the run report)
     waiting_docs: bool = False   # passport handed back, person still there, papers still visible (Day 3 ticket)
+    person_run: int = 0          # consecutive ticks with a person at the window (p >= 0.7; < 0.5 ends the run)
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
@@ -1291,6 +1386,10 @@ class Entrant:
     def observe(self, tick: int, state: dict, papers: bool = False, day: str = "1") -> None:
         """Start-of-tick update from request 1 (`papers`: the layout found a paper on the desk or counter)."""
         person = man.yes(state, "person_at_window")
+        if man.yes(state, "person_at_window", man.NO_PASSPORT_PERSON_P):
+            self.person_run += 1
+        elif not person:
+            self.person_run = 0
         if self.hb_drop is not None and tick - self.hb_drop <= 3 and not person:
             # a document was dropped on the person and the person is gone now: they took it and left,
             # whether or not a stamp was detected (run 101448: the stamp was missed, memory carried over)
@@ -1312,6 +1411,10 @@ class Entrant:
                 man.yes(state, "document_open_on_desk") or man.yes(state, "document_on_counter_shelf"))):
             if self.country or self.stamp_clicks or self.handed_back is not None:
                 self.reset(tick, "window empty")
+        if self.waiting_docs and man.yes(state, "document_open_on_desk", 0.6):
+            # an open passport on the desk again = the next entrant's (run 113459 t82-92: G2 carried over to a new
+            # entrant who arrived at 18:00)
+            self.reset(tick, "open passport on the desk while waiting for papers: a new entrant")
         self.tray_seen = (self.tray_seen + [(tick, man.yes(state, "stamp_tray_open"))])[-9:]
         c = state.get("issuing_country")
         if (c and c["p"] >= CARRY_COUNTRY_P and c["value"] != "unreadable"
@@ -1372,7 +1475,7 @@ class Entrant:
         return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
                 "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
                 "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp,
-                "waiting_docs": self.waiting_docs}
+                "waiting_docs": self.waiting_docs, "person_run": self.person_run}
 
     def tray_flips(self) -> int:
         """Open<->closed changes of the stamp tray over the last 8 ticks with no stamp click in between.
@@ -1413,7 +1516,15 @@ def offline(args) -> int:
     tod = TodClient(timeout=90)
     ex.warmup()
     results = []
-    for path in args.frames:
+    seq = getattr(args, "sequential", False)
+    # --sequential: consecutive frames of one run -> one entrant memory, history, exclusions and cycle guard carried
+    # across them; each decision counts as executed and 'changed' (the next recorded frame is what followed)
+    s_ent, s_hist, s_cyc = Entrant(), deque(maxlen=args.history), CycleDetector()
+    s_stuck = StuckTracker(ban_ticks=args.ban_ticks)
+    s_note, s_resets = ("", -1), 0
+    for fi, path in enumerate(args.frames):
+        m_t = re.search(r"(\d+)\.(?:png|jpg)$", path)
+        otick = int(m_t.group(1)) if (seq and m_t) else fi
         frame = cv2.imread(path)
         if frame is None:
             print(f"[offline] cannot read {path}")
@@ -1422,7 +1533,9 @@ def offline(args) -> int:
         boxes, vis, sinfo = get_boxes(frame, args.extractor)
         t_ex = (time.perf_counter() - t0) * 1e3
         df = desk_facts(boxes, frame.shape[1], frame.shape[0], sinfo)
-        DOC_CACHE.clear()   # offline frames are unrelated pictures
+        if not seq:
+            DOC_CACHE.clear()   # offline frames are unrelated pictures
+        s_stuck.decay(otick)
         oday = args.day or "unknown"   # offline only: the day the frames come from (live runs read it via request 1)
         asked = ("issuing_country",) if oday == "1" else man.INSPECT_KEYS
         probe, t_probe = _timed(state_probe, tod, frame, args, oday, asked, df)
@@ -1433,19 +1546,59 @@ def offline(args) -> int:
                 state.update(parse_state(dres))
             man.read_inspection_answers(state, df["insp_cand"])
         gate_inspection(state, asked, df)
-        ent = Entrant()
-        ent.observe(0, state)
-        facts = ent.facts(0, df)
+        ent = s_ent if seq else Entrant()
+        ent.observe(otick, state, papers=bool(df.get("docs")), day=oday)
+        if seq and len(ent.log) != s_resets:
+            s_resets = len(ent.log)
+            s_cyc.reset()
+        facts = ent.facts(otick, df)
         add_tod_facts(facts, state, df, sinfo)
-        P = prepare(frame, boxes, state, deque(), oday, args, facts=facts)
+        if seq and otick < s_note[1]:
+            facts["cycle_note"] = s_note[0]
+        if seq:
+            P = prepare(frame, boxes, state, s_hist, oday, args, stuck=s_stuck, tick=otick, facts=facts)
+        else:
+            P = prepare(frame, boxes, state, deque(), oday, args, facts=facts)
         t1 = time.perf_counter()
         res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
         t_tod = (time.perf_counter() - t1) * 1e3
         D = decide(res, P)
         fill_derived(res, D)
         step = man.situation(state, oday if oday in DAY_RULES else "1", facts)
+        cyc_rec = None
+        if seq:
+            scr = state.get("screen", {}).get("value", "")
+            sd = P["desc"].get(D["src"], "-")
+            td = P["desc"].get(D["tgt"], "") if D["action"] == "drag" else ""
+            sb = P["idmap"].get(int(D["src"])) if D["src"].isdigit() else None
+            tb = P["idmap"].get(int(D["tgt"])) if D["tgt"].isdigit() else None
+            ssum = man.state_summary(state, facts)
+            if D["action"] == "drag":
+                s_hist.append(f"t{otick} | {ssum} | drag | '{short(sd, 60)}' -> '{short(td, 50)}' | changed")
+            elif D["action"] == "click":
+                s_hist.append(f"t{otick} | {ssum} | click | '{short(sd, 60)}' | changed")
+            else:
+                s_hist.append(f"t{otick} | {ssum} | wait | - | -")
+            ent.last_under = facts.get("passport_under") or []
+            ent.after_action(otick, state, D["action"], sb, tb, frame, True, src_desc=sd)
+            if len(ent.log) != s_resets:
+                s_resets = len(ent.log)
+                s_cyc.reset()
+            hit = s_cyc.push(otick, cycle_signature(scr, state, step[0], D["action"], sd, td), cycle_progress(ent),
+                             D["action"], sb, sd, td)
+            if hit:
+                note_c = cycle_callout(hit)
+                for a, b_, sd_, _ in hit["actions"]:
+                    if a in ("click", "drag") and b_ is not None and b_.kind != "background":
+                        s_stuck.ban(otick, a, b_, sd_, 1, ticks=CYCLE_BAN_TICKS,
+                                    why="was part of a repeating cycle with no progress")
+                s_note = (note_c, otick + 1 + CYCLE_BAN_TICKS)
+                cyc_rec = {"period": hit["period"], "n": hit["n"], "hits": hit["hits"], "callout": note_c,
+                           "stop": "cycle" if hit["hits"] >= 2 else None}
+                print(f"[offline] t{otick} cycle_break: {note_c}" + ("  -> stop reason: cycle" if hit["hits"] >= 2 else ""))
         r = {
-            "frame": path, "extractor": args.extractor, "passport_under": facts.get("passport_under"),
+            "frame": path, "tick": otick, "cycle_break": cyc_rec, "excluded": sorted(P["banned_ids"], key=int),
+            "extractor": args.extractor, "passport_under": facts.get("passport_under"),
             "n_boxes_raw": len(boxes), "n_sources": len(P["src_ids"]), "n_targets": len(P["tgt_ids"]),
             "extract_ms": round(t_ex), "state_ms": round(t_probe), "tod_ms": round(t_tod),
             "image_kb": P["image_kb"], "state": _clean_state(state), "state_line": state_line(state),
@@ -1579,6 +1732,8 @@ def run(args) -> int:
     ent = Entrant()
     pick_key, pick_n, refused_n = None, 0, 0   # --pick-stop / --refuse-stop counters (per entrant)
     drag_key, drag_n = None, 0                  # repeat-drag rule (REPEAT_DRAG_N)
+    cyc = CycleDetector()                       # generic period-2/3 cycle guard (per entrant)
+    cycle_note: tuple = ("", -1)                # (callout for the history block, shown until tick)
     n_resets = 0                                # len(ent.log) last seen -> entrant-scoped counters reset
     unreach_n = 0                               # --unreachable-stop counter (consecutive)
     bad4xx_n = 0                                # consecutive TOD 4xx (bad request) ticks -> stop at 2
@@ -1751,6 +1906,7 @@ def run(args) -> int:
             if len(ent.log) != n_resets:   # new entrant: stall / pick / refusal counters are entrant-scoped
                 n_resets = len(ent.log)
                 refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0
+                cyc.reset()
             facts = ent.facts(tick, df)
             add_tod_facts(facts, state, df, sinfo)
             dn = facts.get("docs_named") or []
@@ -1765,6 +1921,8 @@ def run(args) -> int:
                 ent.waiting_docs = True             # sticky for this entrant (reset when the window is empty)
                 if ent.handed_back is None:
                     ent.handed_back = tick
+            if tick < cycle_note[1]:
+                facts["cycle_note"] = cycle_note[0]
             rec["e_minus"] = facts.get("e_minus")
             rec["docs_named"] = [{k: d[k] for k in ("where", "id", "p", "text")} for d in facts["docs_named"]]
             rec["strip"] = facts["strip"]
@@ -2011,6 +2169,28 @@ def run(args) -> int:
             if len(ent.log) != n_resets:
                 n_resets = len(ent.log)
                 refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0
+                cyc.reset()
+            # ---- generic cycle guard (A,B,A,B / A,B,C,A,B,C with no entrant progress) --------------------------
+            ex_act = "veto" if veto else (action if executed.startswith(("click", "drag")) else "wait")
+            tgt_d = desc.get(tgt, "") if action == "drag" else ""
+            hit = cyc.push(tick, cycle_signature(screen, state, step[0], ex_act, src_desc, tgt_d),
+                           cycle_progress(ent), ex_act, sb, src_desc, tgt_d)
+            if hit:
+                note_c = cycle_callout(hit)
+                banned_c = []
+                for a, b_, sd, _ in hit["actions"]:
+                    if a in ("click", "drag") and b_ is not None and b_.kind != "background":
+                        stuck.ban(tick, a, b_, sd, 1, ticks=CYCLE_BAN_TICKS, why="was part of a repeating cycle "
+                                  "with no progress")
+                        banned_c.append(sd)
+                cycle_note = (note_c, tick + 1 + CYCLE_BAN_TICKS)
+                rec["cycle_break"] = {"period": hit["period"], "n": hit["n"], "hits": hit["hits"],
+                                      "actions": [[a, sd, td] for a, _, sd, td in hit["actions"]],
+                                      "excluded": banned_c, "callout": note_c}
+                print(f"           cycle: {note_c} -> {len(banned_c)} source(s) excluded for {CYCLE_BAN_TICKS} ticks")
+                if hit["hits"] >= 2 and not stop_reason:
+                    stop_reason = (f"cycle: second period-{hit['period']} cycle for this entrant "
+                                   f"({'; '.join(short(_desc_key(sd), 40) for _, _, sd, _ in hit['actions'])})")
 
             # ---- log -----------------------------------------------------------------
             stem = os.path.join(run_dir, f"tick_{tick:04d}")
@@ -2062,6 +2242,9 @@ def main(argv=None, result: dict | None = None) -> int:
     ap.add_argument("--jpeg-quality", type=int, default=90)
     ap.add_argument("--history", type=int, default=10, help="past actions listed in the request-2 text")
     ap.add_argument("--frames", nargs="+", help="offline: run on saved frames (no game window, no input)")
+    ap.add_argument("--sequential", action="store_true",
+                    help="offline: the frames are consecutive ticks of one run -- carry entrant memory, history, "
+                         "exclusions and the cycle guard across them (each decision counts as executed)")
     ap.add_argument("--out", default=None, help="offline: output directory")
     ap.add_argument("--day", choices=("1", "2", "3"), default=None, help="offline only: day the saved frames are from")
     ap.add_argument("--send-width", type=int, default=1140, help="downscale annotated frame to this width for TOD (0=full)")

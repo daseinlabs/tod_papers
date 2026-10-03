@@ -151,7 +151,8 @@ E-. The state block says "the passport is under the wrong stamp": the stamps are
 H. INSPECT MODE (the state block says "Inspect mode is ON": desk darkened, red dotted frame, red text
    HIGHLIGHT DISCREPANCIES): documents cannot be moved and stamps cannot be used while it is on. Click the red
    inspect-mode button at the lower right of the desk once to leave it, then continue with the matching step.
-   Inspect mode is not needed on Days 1-3; the button is only offered while inspect mode is on.
+   Inspect mode is not needed on Days 1-3 except in step N (no passport presented): the button is only offered
+   while inspect mode is on or in step N, and in step N you stay in inspect mode until the interrogation is done.
 F. The passport IS STAMPED. Any ONE of these lines in the state block is enough:
    (1) "A passport shows a stamp mark: yes";
    (2) "A stamp was clicked at tick N and the screen changed: the passport is stamped".
@@ -164,6 +165,14 @@ F2. WRONG STAMP: the state block says which stamp was clicked. If the passport w
    back. If it was stamped DENIED but should have been APPROVED, it cannot be fixed (DENIED always wins and
    an APPROVED stamp on top does not count): hand it back as it is. The first two mistakes of each day are
    only warnings.
+N. NO PASSPORT: the state block says "the person has presented no passport" (someone is at the window, nothing
+   lies on the counter shelf and no paper on the desk is a passport). There is nothing to stamp: this entrant
+   is sent away WITHOUT a stamp; the stamp tray and the stamps are not offered. Waiting does not help (the
+   day does not go on until you ask for the passport). Ask for it with inspect mode, one input per tick:
+   (1) drag the rulebook from its slot below the counter onto the desk and click its page corner until the
+   BASIC RULES page shows; (2) click the red inspect-mode button; (3) click the rule line "Entrant must have a
+   passport", then click the EMPTY counter shelf; (4) click the interrogate prompt that appears. The entrant
+   answers and leaves on their own (or hands over a passport -- then continue with B). Then go back to A.
 G2. The state block says the entrant is STILL at the window waiting for the rest of their documents: drag
    each paper of theirs still on the desk or the counter shelf (entry ticket ...) onto the entrant.
 G. After the documents were handed back (the state block says so) the person leaves by themselves; wait
@@ -728,6 +737,11 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
                 lines.append(f"- {_LABEL[k]}: no (no stamp has been pressed for this entrant yet)")
             continue
         lines.append(f"- {_LABEL[k]}: {_yn(state, k)}")
+    if no_passport(state, facts):
+        lines.append("- The person has presented no passport: someone is at the window, the counter shelf is empty "
+                     "and no paper on the desk is a passport. There is nothing to stamp; they are sent away without a "
+                     "stamp. Ask for the passport with inspect mode (step N: rulebook BASIC RULES page, inspect "
+                     "button, the passport rule, the empty counter shelf, then the interrogate prompt)")
     for d in facts.get("docs_named") or []:
         where = "counter shelf" if d["where"] == "counter" else "desk"
         tail = (" -- not needed on Days 1-3; to clear the desk drop it on the 'counter shelf left of the desk' target"
@@ -906,6 +920,8 @@ def build(state: dict, history, day: str, ban_lines: list[str] | None = None, fa
     if el:
         h = f"{el}\n{h}"
     head = f"LAST {len(hist)} ACTIONS" if hist else "LAST ACTIONS"
+    if (facts or {}).get("cycle_note"):   # the loop's cycle guard (loop.CycleDetector)
+        h = f"CYCLE: {facts['cycle_note']}\n{h}"
     nb = (facts or {}).get("menu_bounces") or 0
     if nb >= 2:
         h = (f"You have gone back and forth between the main menu and day select {nb} times. BACK undoes "
@@ -925,12 +941,39 @@ def build(state: dict, history, day: str, ban_lines: list[str] | None = None, fa
 # --------------------------------------------------------------------------
 
 
+NO_PASSPORT_PERSON_P = 0.7
+NO_PASSPORT_MIN_TICKS = 3   # a normal entrant's passport is on the counter one tick after they arrive (run 092642
+#                             t8/18/28/35/49); step N only after the person has stood there this long
+
+
+def no_passport(state: dict, facts: dict | None) -> bool:
+    """Step N: request 1 says a person is at the window (p >= 0.7), the counter shelf is empty (TOD's answer and no
+    layout paper there), the stamp tray is closed, no desk paper TOD named the passport, nothing open on the desk,
+    and the loop has no stamp / hand-back / G2 on record for this entrant (run 115900 t118-142: Jorji Costava, no
+    passport)."""
+    f = facts or {}
+    if f.get("person_run", NO_PASSPORT_MIN_TICKS) < NO_PASSPORT_MIN_TICKS:
+        return False
+    if (not yes(state, "person_at_window", NO_PASSPORT_PERSON_P) or yes(state, "document_on_counter_shelf")
+            or yes(state, "document_open_on_desk") or yes(state, "passport_shows_stamp_mark")):
+        return False
+    if yes(state, "stamp_tray_open") or f.get("tray_open_px"):
+        return False   # a paper can hide under the open tray (step D2 closes it first)
+    if f.get("waiting_docs") or f.get("handed_back") is not None or f.get("stamp_clicks") or f.get("passport_under"):
+        return False
+    if any(d.get("where") == "counter" for d in (f.get("docs") or [])):
+        return False
+    return not any(d["id"] == "passport" and d["p"] >= 0.3 for d in f.get("docs_named") or [])
+
+
 def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[str, str]:
     """(step letter, intended input) per manual section 4 -- for logs and the
     dry-run pass/fail check only."""
     scr = state.get("screen", {}).get("value", "")
     if scr and scr not in ("booth_idle", "documents_on_desk", "stamp_tray_open", "inspect_mode"):
         return "7", f"non-booth screen ({scr}): click to continue"
+    if no_passport(state, facts):
+        return "N", "no passport presented: rulebook BASIC RULES -> inspect -> passport rule + empty counter -> interrogate"
     if yes(state, "inspect_mode_on"):
         return "H", "click the inspect-mode button (leave inspect mode)"
     if (facts or {}).get("waiting_docs") and yes(state, "person_at_window"):
@@ -948,6 +991,8 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         if sides and sides[-1] == "approved" and kc and not ok:
             return "F2", "click DENIED (overrules APPROVED)"
         return "F", "drag stamped passport -> entrant (hand back)"
+    if no_passport(state, facts):
+        return "N", "no passport presented: rulebook BASIC RULES -> inspect -> passport rule + empty counter -> interrogate"
     if yes(state, "bulletin_or_rulebook_covering_desk") and yes(state, "document_open_on_desk"):
         return "6", "drag bulletin/rulebook -> desk (aside)"
     f = facts or {}

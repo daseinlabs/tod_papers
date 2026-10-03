@@ -141,6 +141,26 @@ New loop flags: `--stop-on-screen a,b` + `--stop-consecutive N` (stop without ac
 of those screens N ticks running) and `--stall-stop N` (stop when the screen + state summary stay identical
 for N ticks). The stop reason goes into the tick json (`stop_reason`) and `summary.md`.
 
+Generic cycle guard (`loop.CycleDetector`, always on; run 115900 t118-142 toggled the tray 25 ticks, every
+drag "changed" pixels so no per-case rule fired). Per executed tick it keeps a signature (screen, request-1
+yes/no facts `CYCLE_STATE_KEYS`, manual step letter, executed input + source description + target, with the
+TOD score and position tail stripped) and a progress signature from the loop's own entrant bookkeeping
+(`cycle_progress`: entrant resets, passport under a stamp, stamp presses, hand-back, G2 -- never gt). Two full
+periods of a 2- or 3-signature sequence (A,B,A,B / A,B,C,A,B,C) inside the last 8 consecutive ticks with no
+progress change = a cycle: the callout "the last N actions alternated X and Y with no progress; neither is the
+answer" goes into the history block (`CYCLE:` line, 6 ticks), the cycle's sources are excluded for 6 ticks
+(RULED OUT, "was part of a repeating cycle"), and the tick json gets `cycle_break`. A second cycle for the same
+entrant stops the run (`stop reason: cycle: ...`). It offers nothing new.
+
+Step N (no passport presented, `manual.no_passport`): person p >= 0.7 for 3+ ticks, counter shelf empty (TOD
+and the layout), tray closed, no desk paper named passport, no stamp / hand-back / G2 on record. The state
+block says "The person has presented no passport"; the manual's step N follows docs/game.md's
+missing-document interrogation (rulebook BASIC RULES page, inspect button, passport rule + empty counter,
+interrogate prompt). While it holds: tray tab and stamps are not offered; the rulebook slot, transcript
+printer, inspect button and a click-only `empty_counter` element are; rulebook elements are not drag-only.
+Offline `--sequential` carries entrant memory, history, exclusions and the cycle guard across consecutive
+frames of one run (each decision counts as executed and changed).
+
 New derived elements (geometry from detected boxes, logged like the other regions):
 - drop target `right edge of the desk (drag the tray tab here to put the stamp tray away)` (`tray_stow`):
   right of the detected APPROVED stamp, at the stamp height; fallback `anchors.json` `tray_stow`. Offered
