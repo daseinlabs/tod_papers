@@ -443,7 +443,8 @@ def screen_family(frame: np.ndarray) -> tuple[str, bool]:
 
 
 def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", inspect: tuple = man.INSPECT_KEYS,
-                facts: dict | None = None, with_docs: bool = True, family: tuple | None = None):
+                facts: dict | None = None, with_docs: bool = True, family: tuple | None = None,
+                prev: dict | None = None):
     """REQUEST 1: plain (unmarked) frame + short text + screen, day, the manual's state questions
     (manual.state_questions, incl. the passport-under-each-stamp and passport-readable questions) and one
     identity question per paper the layout found on the desk/counter (its position + the OCR text inside it).
@@ -457,7 +458,7 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
         return tod.ask(q, text=man.STATE_TEXT, image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
     if day in DAY_RULES:
         del q["day"]   # the day only changes on the day-end / bulletin screens, where it is asked
-    q.update(man.state_questions(today, inspect))
+    q.update(man.state_questions(today, inspect, prev))
     q.pop("passport_open_readable", None)   # the inspection gate also opens on open-on-desk / the paper identity
     if not tray_px:
         for k in man.STRIP_KEYS:
@@ -471,7 +472,7 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
     for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable"):
         if len(q) + (min(2, len(docs)) if with_docs else 0) > TOD_MAX_Q:
             q.pop(k, None)
-    for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable", "exp_month"):
+    for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable", "exp_month", "photo_matches_person"):
         if len(q) > TOD_MAX_Q:
             q.pop(k, None)
     room = max(0, TOD_MAX_Q - len(q)) if with_docs else 0
@@ -576,7 +577,8 @@ def parse_state(res) -> dict:
 _STATE_ABBR = {"person_at_window": "person", "document_on_counter_shelf": "counter",
                "document_open_on_desk": "open", "stamp_tray_open": "tray", "passport_open_readable": "readable", "passport_under_denied": "pD", "passport_under_approved": "pA",
                "passport_shows_stamp_mark": "mark", "bulletin_or_rulebook_covering_desk": "cover", "inspect_mode_on": "insp",
-               "entry_ticket_dated_today": "ticket"}
+               "entry_ticket_dated_today": "ticket", "no_documents_presented": "nodocs",
+               "interrogate_prompt_visible": "interr"}
 
 
 def state_line(state: dict) -> str:
@@ -587,6 +589,8 @@ def state_line(state: dict) -> str:
     for k, ab in _STATE_ABBR.items():
         if k in state:
             bits.append(f"{ab}={state[k]['p']:.2f}")
+    if "rulebook_page" in state:
+        bits.append(f"rb={state['rulebook_page']['value']}:{state['rulebook_page']['p']:.2f}")
     if "issuing_country" in state:
         bits.append(f"iss={state['issuing_country']['value']}:{state['issuing_country']['p']:.2f}")
     for k, ab in (("exp_read", "exp"), ("issuing_city_spelling", "spell")):
@@ -1373,7 +1377,6 @@ class Entrant:
     checks: dict = field(default_factory=dict)   # {check key: {"value", "p", "tick"}} confident yes/no readings
     log: list = field(default_factory=list)          # [(tick, why)] every reset (for the run report)
     waiting_docs: bool = False   # passport handed back, person still there, papers still visible (Day 3 ticket)
-    person_run: int = 0          # consecutive ticks with a person at the window (p >= 0.7; < 0.5 ends the run)
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
@@ -1386,10 +1389,6 @@ class Entrant:
     def observe(self, tick: int, state: dict, papers: bool = False, day: str = "1") -> None:
         """Start-of-tick update from request 1 (`papers`: the layout found a paper on the desk or counter)."""
         person = man.yes(state, "person_at_window")
-        if man.yes(state, "person_at_window", man.NO_PASSPORT_PERSON_P):
-            self.person_run += 1
-        elif not person:
-            self.person_run = 0
         if self.hb_drop is not None and tick - self.hb_drop <= 3 and not person:
             # a document was dropped on the person and the person is gone now: they took it and left,
             # whether or not a stamp was detected (run 101448: the stamp was missed, memory carried over)
@@ -1475,7 +1474,7 @@ class Entrant:
         return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
                 "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
                 "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp,
-                "waiting_docs": self.waiting_docs, "person_run": self.person_run}
+                "waiting_docs": self.waiting_docs}
 
     def tray_flips(self) -> int:
         """Open<->closed changes of the stamp tray over the last 8 ticks with no stamp click in between.
@@ -1521,7 +1520,7 @@ def offline(args) -> int:
     # across them; each decision counts as executed and 'changed' (the next recorded frame is what followed)
     s_ent, s_hist, s_cyc = Entrant(), deque(maxlen=args.history), CycleDetector()
     s_stuck = StuckTracker(ban_ticks=args.ban_ticks)
-    s_note, s_resets = ("", -1), 0
+    s_note, s_resets, s_prev = ("", -1), 0, {}
     for fi, path in enumerate(args.frames):
         m_t = re.search(r"(\d+)\.(?:png|jpg)$", path)
         otick = int(m_t.group(1)) if (seq and m_t) else fi
@@ -1538,7 +1537,8 @@ def offline(args) -> int:
         s_stuck.decay(otick)
         oday = args.day or "unknown"   # offline only: the day the frames come from (live runs read it via request 1)
         asked = ("issuing_country",) if oday == "1" else man.INSPECT_KEYS
-        probe, t_probe = _timed(state_probe, tod, frame, args, oday, asked, df)
+        probe, t_probe = _timed(state_probe, tod, frame, args, oday, asked, df, True, None,
+                                (s_prev or None) if seq else None)
         state = parse_state(probe)
         if oday in ("2", "3"):   # live: these ride in request 1b
             dres, _ = _timed(doc_probe, tod, frame, args, df, oday, False)
@@ -1546,6 +1546,7 @@ def offline(args) -> int:
                 state.update(parse_state(dres))
             man.read_inspection_answers(state, df["insp_cand"])
         gate_inspection(state, asked, df)
+        s_prev = state
         ent = s_ent if seq else Entrant()
         ent.observe(otick, state, papers=bool(df.get("docs")), day=oday)
         if seq and len(ent.log) != s_resets:
@@ -1837,7 +1838,8 @@ def run(args) -> int:
             asked = ("issuing_country",) if day == "1" else man.INSPECT_KEYS
             fam = screen_family(frame)
             rec["screen_family"] = list(fam)
-            fut = _PROBE_POOL.submit(_timed, state_probe, tod, frame, args, day, asked, {"tick": tick}, False, fam)
+            fut = _PROBE_POOL.submit(_timed, state_probe, tod, frame, args, day, asked, {"tick": tick}, False, fam,
+                                     last_state or None)
             t0 = time.perf_counter()
             boxes, vis, sinfo = get_boxes(frame, args.extractor)
             rec["extract_ms"] = round((time.perf_counter() - t0) * 1e3, 1)

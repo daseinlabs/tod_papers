@@ -165,14 +165,18 @@ F2. WRONG STAMP: the state block says which stamp was clicked. If the passport w
    back. If it was stamped DENIED but should have been APPROVED, it cannot be fixed (DENIED always wins and
    an APPROVED stamp on top does not count): hand it back as it is. The first two mistakes of each day are
    only warnings.
-N. NO PASSPORT: the state block says "the person has presented no passport" (someone is at the window, nothing
-   lies on the counter shelf and no paper on the desk is a passport). There is nothing to stamp: this entrant
-   is sent away WITHOUT a stamp; the stamp tray and the stamps are not offered. Waiting does not help (the
-   day does not go on until you ask for the passport). Ask for it with inspect mode, one input per tick:
-   (1) drag the rulebook from its slot below the counter onto the desk and click its page corner until the
-   BASIC RULES page shows; (2) click the red inspect-mode button; (3) click the rule line "Entrant must have a
-   passport", then click the EMPTY counter shelf; (4) click the interrogate prompt that appears. The entrant
-   answers and leaves on their own (or hands over a passport -- then continue with B). Then go back to A.
+N. NO DOCUMENTS: the state block says "The person at the window has handed over no documents: yes". There is
+   nothing to stamp: this entrant is sent away WITHOUT a stamp; the stamp tray and the stamps are not offered.
+   Waiting does not help (the day does not go on until you ask for the passport). Ask for it with inspect
+   mode, one input per tick, reading the state block like in C/D/E:
+   N1. "Rulebook page open on the desk: NOT_OPEN": drag the rulebook from its slot below the counter onto the
+       desk.
+   N2. Rulebook open on another page: click its page corner until the page is BASIC_RULES.
+   N3. Rulebook on BASIC_RULES, inspect mode off: click the red inspect-mode button.
+   N4. Inspect mode ON, no interrogate prompt: click the rule line "Entrant must have a passport", then click
+       the EMPTY counter shelf.
+   N5. "An INTERROGATE prompt is visible: yes": click it. The entrant answers and leaves on their own (or
+       hands over a passport -- then continue with B). Then go back to A.
 G2. The state block says the entrant is STILL at the window waiting for the rest of their documents: drag
    each paper of theirs still on the desk or the counter shelf (entry ticket ...) onto the entrant.
 G. After the documents were handed back (the state block says so) the person leaves by themselves; wait
@@ -285,10 +289,39 @@ def _noul(instr: str, yes: str, no: str) -> dict:
     return {"type": "noul", "instructions": instr, "criteria": {"true": yes, "false": no}}
 
 
-def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) -> dict:
+NO_DOCS_KEYS = ("rulebook_page", "interrogate_prompt_visible")   # step N sub-states, asked only around step N
+NO_DOCS_P = 0.6   # p(no_documents_presented) for step N; also drops the passport-inspection questions
+RULEBOOK_PAGES = {"not_open": "the rulebook is not lying open on the desk (closed in its slot, or not visible)",
+                  "contents": "it is open on the CONTENTS page (list of sections)",
+                  "basic_rules": "it is open on the BASIC RULES page (rule lines such as 'Entrant must have a "
+                                 "passport')",
+                  "regional_map": "it is open on the REGIONAL MAP page",
+                  "booth_info": "it is open on the BOOTH INFO / document examples pages",
+                  "other": "it is open on some other page, or the page cannot be told"}
+
+
+def no_docs_questions() -> dict:
+    """Request 1, step N (no documents presented): the sub-states of the missing-document interrogation."""
+    return {
+        "rulebook_page": {"type": "choice",
+                          "instructions": "Is the inspector's rulebook (RULES & REGULATIONS) lying open on the desk, "
+                                          "and if so which page is shown?",
+                          "criteria": dict(RULEBOOK_PAGES)},
+        "interrogate_prompt_visible": _noul(
+            "Is an INTERROGATE prompt / button visible (it appears below the counter after a rule line and the "
+            "empty counter were selected in inspect mode)?",
+            "yes - an interrogate prompt or button is visible",
+            "no - no interrogate prompt is visible"),
+    }
+
+
+def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS, prev: dict | None = None) -> dict:
     """The facts the manual is keyed on, asked as one TOD request over the plain
     frame. All noul except issuing_country (choice). `inspect` selects which
-    inspection questions are asked (loop.py gates them on the desk OCR)."""
+    inspection questions are asked (loop.py gates them on the desk OCR). `prev` = last tick's TOD answers
+    (request 1 runs before this tick's answers exist): they gate WHICH questions are asked, never an answer --
+    no_documents_presented while a person was at the window (or nothing is known yet), the step-N sub-state
+    questions instead of the passport inspection while TOD said no documents were presented."""
     q = {
         "person_at_window": _noul(
             "Look at the left third of the picture, behind the window with the height marks 1.1 to 1.9. "
@@ -382,6 +415,18 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
                          "no_ticket": "the entrant's papers are on the desk/counter and there is NO entry ticket "
                                       "among them",
                          "not_readable": "an entry ticket may be there but its date cannot be read in this picture"}}
+    if prev is None or yes(prev, "person_at_window") or yes(prev, "no_documents_presented"):
+        q["no_documents_presented"] = _noul(
+            "Look at the person at the booth window and the counter shelf in front of them. Has the person handed "
+            "over no documents at all: the counter in front of them is empty and nothing of theirs lies on the "
+            "desk? (Only the inspector's own things -- rulebook, bulletin, citation slips -- may be on the desk.)",
+            "yes - the person at the window has handed over no documents: the counter in front of them is empty "
+            "and nothing of theirs is on the desk",
+            "no - the person has handed over a passport or other papers (on the counter or on the desk), or no "
+            "person is at the window")
+    if prev is not None and yes(prev, "no_documents_presented", NO_DOCS_P):
+        q.update(no_docs_questions())
+        inspect = ()   # no passport to inspect: those answers would be meaningless
     return {k: v for k, v in q.items() if k not in INSPECT_KEYS or k in inspect}
 
 
@@ -398,6 +443,9 @@ _LABEL = {
     "passport_shows_stamp_mark": "A passport shows a stamp mark",
     "bulletin_or_rulebook_covering_desk": "A bulletin/rulebook covers the passport",
     "inspect_mode_on": "Inspect mode is ON (desk darkened, red dotted frame, HIGHLIGHT DISCREPANCIES)",
+    "no_documents_presented": "The person at the window has handed over no documents (counter empty, nothing of "
+                              "theirs on the desk)",
+    "interrogate_prompt_visible": "An INTERROGATE prompt is visible",
 }
 
 
@@ -446,6 +494,9 @@ def _yn(state: dict, k: str) -> str:
     return f"yes (p={p:.2f})" if p >= 0.5 else f"no (p={1 - p:.2f})"
 
 
+NO_DOCS_HINT_RE = re.compile(r"NO DOCUMENTS|INSPECT mode|to interrogate", re.I)
+
+
 def desk_text_block(facts: dict | None) -> str:
     """'READABLE TEXT ON THE DESK' -- the OCR'd text of every document on the desk
     (extraction output, sent to both requests)."""
@@ -456,6 +507,9 @@ def desk_text_block(facts: dict | None) -> str:
     out = ["READABLE TEXT ON THE DESK (OCR of the documents on the desk, top to bottom; pixel font, may "
            "contain misreads):"]
     out += [f"- {t}" for t in lines]
+    hint = [t for t in lines if NO_DOCS_HINT_RE.search(t)]
+    if hint:   # the game's own slip: 'THIS ENTRANT HAS NO DOCUMENTS / To proceed, use INSPECT mode to interrogate'
+        out.append("GAME HINT ON SCREEN (OCR): " + " / ".join(hint))
     return "\n".join(out)
 
 
@@ -737,11 +791,15 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
                 lines.append(f"- {_LABEL[k]}: no (no stamp has been pressed for this entrant yet)")
             continue
         lines.append(f"- {_LABEL[k]}: {_yn(state, k)}")
+    for k in ("no_documents_presented", "interrogate_prompt_visible"):
+        if k in state:
+            lines.append(f"- {_LABEL[k]}: {_yn(state, k)}")
+    rp = state.get("rulebook_page")
+    if rp:
+        lines.append(f"- Rulebook page open on the desk: {rp['value'].upper()} (p={rp['p']:.2f})")
     if no_passport(state, facts):
-        lines.append("- The person has presented no passport: someone is at the window, the counter shelf is empty "
-                     "and no paper on the desk is a passport. There is nothing to stamp; they are sent away without a "
-                     "stamp. Ask for the passport with inspect mode (step N: rulebook BASIC RULES page, inspect "
-                     "button, the passport rule, the empty counter shelf, then the interrogate prompt)")
+        lines.append("- The person has presented no documents: there is nothing to stamp; they are sent away "
+                     "without a stamp. Ask for the passport with inspect mode (step N)")
     for d in facts.get("docs_named") or []:
         where = "counter shelf" if d["where"] == "counter" else "desk"
         tail = (" -- not needed on Days 1-3; to clear the desk drop it on the 'counter shelf left of the desk' target"
@@ -941,29 +999,13 @@ def build(state: dict, history, day: str, ban_lines: list[str] | None = None, fa
 # --------------------------------------------------------------------------
 
 
-NO_PASSPORT_PERSON_P = 0.7
-NO_PASSPORT_MIN_TICKS = 3   # a normal entrant's passport is on the counter one tick after they arrive (run 092642
-#                             t8/18/28/35/49); step N only after the person has stood there this long
-
-
-def no_passport(state: dict, facts: dict | None) -> bool:
-    """Step N: request 1 says a person is at the window (p >= 0.7), the counter shelf is empty (TOD's answer and no
-    layout paper there), the stamp tray is closed, no desk paper TOD named the passport, nothing open on the desk,
-    and the loop has no stamp / hand-back / G2 on record for this entrant (run 115900 t118-142: Jorji Costava, no
-    passport)."""
-    f = facts or {}
-    if f.get("person_run", NO_PASSPORT_MIN_TICKS) < NO_PASSPORT_MIN_TICKS:
+def no_passport(state: dict, facts: dict | None = None) -> bool:
+    """Step N: TOD (request 1) says the person at the window has handed over no documents (p >= NO_DOCS_P), and
+    TOD's other answers agree: nothing on the counter shelf, no paper TOD named the passport (run 092642 t9:
+    no_documents 0.66 with counter 0.64 and the passport on the counter -> step B, not N)."""
+    if not yes(state, "no_documents_presented", NO_DOCS_P) or yes(state, "document_on_counter_shelf"):
         return False
-    if (not yes(state, "person_at_window", NO_PASSPORT_PERSON_P) or yes(state, "document_on_counter_shelf")
-            or yes(state, "document_open_on_desk") or yes(state, "passport_shows_stamp_mark")):
-        return False
-    if yes(state, "stamp_tray_open") or f.get("tray_open_px"):
-        return False   # a paper can hide under the open tray (step D2 closes it first)
-    if f.get("waiting_docs") or f.get("handed_back") is not None or f.get("stamp_clicks") or f.get("passport_under"):
-        return False
-    if any(d.get("where") == "counter" for d in (f.get("docs") or [])):
-        return False
-    return not any(d["id"] == "passport" and d["p"] >= 0.3 for d in f.get("docs_named") or [])
+    return not any(d["id"] == "passport" and d["p"] >= 0.5 for d in (facts or {}).get("docs_named") or [])
 
 
 def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[str, str]:
@@ -973,7 +1015,16 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     if scr and scr not in ("booth_idle", "documents_on_desk", "stamp_tray_open", "inspect_mode"):
         return "7", f"non-booth screen ({scr}): click to continue"
     if no_passport(state, facts):
-        return "N", "no passport presented: rulebook BASIC RULES -> inspect -> passport rule + empty counter -> interrogate"
+        rp = (state.get("rulebook_page") or {}).get("value", "not_open")
+        if yes(state, "interrogate_prompt_visible"):
+            return "N5", "click the interrogate prompt"
+        if yes(state, "inspect_mode_on"):
+            return "N4", "inspect mode: click the passport rule line, then the empty counter shelf"
+        if rp == "basic_rules":
+            return "N3", "click the inspect-mode button"
+        if rp == "not_open":
+            return "N1", "drag the rulebook from its slot onto the desk"
+        return "N2", "click the rulebook page corner until BASIC RULES shows"
     if yes(state, "inspect_mode_on"):
         return "H", "click the inspect-mode button (leave inspect mode)"
     if (facts or {}).get("waiting_docs") and yes(state, "person_at_window"):
@@ -991,8 +1042,6 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         if sides and sides[-1] == "approved" and kc and not ok:
             return "F2", "click DENIED (overrules APPROVED)"
         return "F", "drag stamped passport -> entrant (hand back)"
-    if no_passport(state, facts):
-        return "N", "no passport presented: rulebook BASIC RULES -> inspect -> passport rule + empty counter -> interrogate"
     if yes(state, "bulletin_or_rulebook_covering_desk") and yes(state, "document_open_on_desk"):
         return "6", "drag bulletin/rulebook -> desk (aside)"
     f = facts or {}
