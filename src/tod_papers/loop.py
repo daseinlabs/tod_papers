@@ -392,7 +392,7 @@ def parse_state(res) -> dict:
 _STATE_ABBR = {"person_at_window": "person", "document_on_counter_shelf": "counter",
                "document_open_on_desk": "open", "stamp_tray_open": "tray", "passport_open_readable": "readable", "passport_under_denied": "pD", "passport_under_approved": "pA",
                "passport_shows_stamp_mark": "mark", "bulletin_or_rulebook_covering_desk": "cover",
-               "expiry_after_today": "exp_ok", "photo_matches_person": "photo"}
+               "expiry_after_today": "exp_ok", "photo_matches_person": "photo", "entry_ticket_dated_today": "ticket"}
 
 
 def state_line(state: dict) -> str:

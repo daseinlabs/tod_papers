@@ -301,6 +301,12 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
             "yes - the photo matches the person at the window",
             "no - the photo shows someone else, or there is no photo/person to compare"),
     }
+    if today == DAY_DATES["3"]:   # Day 3: foreigners also need an entry ticket dated today
+        q["entry_ticket_dated_today"] = _noul(
+            f"Today is {today}. Is an ENTRY TICKET (a small slip of paper with a date, 'ENTRY TICKET') visible "
+            f"anywhere on the desk or the counter, and is the date printed on it {today}?",
+            f"yes - an entry ticket dated {today} is visible",
+            "no - no entry ticket visible, or its date is a different day")
     return {k: v for k, v in q.items() if k not in INSPECT_KEYS or k in inspect}
 
 
@@ -396,9 +402,16 @@ def needed_stamp(state: dict, day: str, facts: dict | None) -> str | None:
     """'approved'/'denied' per section 5 from TOD's request-1 answers (country read now or carried), or None when
     it is not decidable yet (country unknown, or Day 3 where the entry ticket also matters)."""
     kc = known_country(state, facts)
-    if not kc or kc[0] == "unreadable" or day == "3":
+    if not kc or kc[0] == "unreadable":
         return None
-    if day == "2":
+    if day == "3" and kc[0] != "ARSTOTZKA":
+        if "entry_ticket_dated_today" not in state:
+            return None
+        if not yes(state, "entry_ticket_dated_today"):
+            return "denied"
+    if day in ("2", "3"):
+        if "expiry_after_today" not in state or "photo_matches_person" not in state:
+            return None   # dropped by the inspection gate this frame: not decidable (never a default DENIED)
         return "approved" if yes(state, "expiry_after_today") and yes(state, "photo_matches_person") else "denied"
     return "approved" if kc[0] == "ARSTOTZKA" else "denied"
 
@@ -488,6 +501,8 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
             lines.append(f"- Passport expiry date is after today ({today}): {_yn(state, 'expiry_after_today')}")
         if "photo_matches_person" in state:
             lines.append(f"- Passport photo matches the person at the window: {_yn(state, 'photo_matches_person')}")
+    if day == "3" and "entry_ticket_dated_today" in state:
+        lines.append(f"- An entry ticket dated today ({today}) is visible: {_yn(state, 'entry_ticket_dated_today')}")
     elif open_ok:  # Day 1 (or not yet known): expiry/photo are asked and logged but are not Day 1 rules
         lines.append("- (Day 1: expiry and photo are not checked; only the issuing country decides)")
     d = DAY_RULES.get(day)
