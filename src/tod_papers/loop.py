@@ -327,10 +327,14 @@ class StuckTracker:
 BOOTH_SCREENS = {"booth_idle", "documents_on_desk", "stamp_tray_open", "inspect_mode"}
 
 DAY_Q = choice(
-    "Which in-game day is it (from bulletin, date or clock text if visible; otherwise unknown)?",
-    {"1": "Day 1 / Nov 23", "2": "Day 2 / Nov 24", "3": "Day 3 / Nov 25", "later": "Day 4 or later",
-     "unknown": "not determinable yet"},
+    "Which in-game day is it? In the booth, read the small date readout in the drawer row below the counter shelf "
+    "(left side, short digits like 82.11.24); on other screens read the date on the bulletin, newspaper or "
+    "day-end screen. 82.11.23 / 1982.11.23 = Day 1, 82.11.24 = Day 2, 82.11.25 = Day 3.",
+    {"1": "Day 1: the date reads 82.11.23 (Nov 23)", "2": "Day 2: the date reads 82.11.24 (Nov 24)",
+     "3": "Day 3: the date reads 82.11.25 (Nov 25)", "later": "a later date (Nov 26 or after)",
+     "unknown": "no date readable in this picture"},
 )
+DAY_ORDER = {"1": 1, "2": 2, "3": 3, "later": 4}
 
 
 def _small_for_send(frame: np.ndarray, args) -> np.ndarray:
@@ -350,7 +354,11 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
     q = {"screen": choice("Which kind of screen is currently shown?", dict(SCREENS)), "day": DAY_Q}
     q.update(man.state_questions(today, inspect))
     # TOD takes at most 16 questions per request (run 015649 t41-58: HTTP 422 with 5 doc questions + 14 state)
-    for i, d in enumerate(((facts or {}).get("docs") or [])[:max(0, TOD_MAX_Q - len(q))]):
+    docs = (facts or {}).get("docs") or []
+    for k in ("bulletin_or_rulebook_covering_desk",):   # lowest-value state question gives way to 2 paper identities
+        if docs and len(q) + min(2, len(docs)) > TOD_MAX_Q and k in q:
+            del q[k]
+    for i, d in enumerate(docs[:max(0, TOD_MAX_Q - len(q))]):
         q[f"doc{i}"] = man.doc_question(d)
     small = _small_for_send(frame, args)
     text = man.STATE_TEXT + "\n\n" + man.desk_text_block(facts)
@@ -391,7 +399,7 @@ def parse_state(res) -> dict:
 
 _STATE_ABBR = {"person_at_window": "person", "document_on_counter_shelf": "counter",
                "document_open_on_desk": "open", "stamp_tray_open": "tray", "passport_open_readable": "readable", "passport_under_denied": "pD", "passport_under_approved": "pA",
-               "passport_shows_stamp_mark": "mark", "bulletin_or_rulebook_covering_desk": "cover",
+               "passport_shows_stamp_mark": "mark", "bulletin_or_rulebook_covering_desk": "cover", "inspect_mode_on": "insp",
                "expiry_after_today": "exp_ok", "photo_matches_person": "photo", "entry_ticket_dated_today": "ticket"}
 
 
@@ -859,6 +867,10 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         if len(nb) < len(boxes) and facts is not None:
             facts["horn_hidden"] = True
         boxes = nb
+    if booth and not man.yes(state, "inspect_mode_on"):
+        # run 021438 t3: TOD clicked the red inspect button; inspect mode froze every drag for 8 ticks. Days 1-3 need
+        # no inspect mode, so the button is offered only while TOD says inspect mode is on (to leave it)
+        boxes = [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"]
     handle = derive_tray_handle(boxes, frame, state) if booth else None
     if handle is not None:
         boxes = list(boxes) + [handle]
@@ -1263,7 +1275,8 @@ def run(args) -> int:
                 rec["static_layout"] = {k: v for k, v in sinfo.items() if k in (
                     "screen", "tray_open", "passport_under", "ms")}
             df = desk_facts(boxes, frame.shape[1], frame.shape[0], sinfo)
-            asked = man.INSPECT_KEYS
+            # Day 1 decides on the country only; expiry/photo are asked from Day 2 (frees 2 of TOD's 16 questions)
+            asked = ("issuing_country",) if day == "1" else man.INSPECT_KEYS
             rec["desk_facts"], rec["inspect_asked"] = df, list(asked)
             try:
                 probe, rec["state_ms"] = _timed(state_probe, tod, frame, args, day, asked, df)
@@ -1298,8 +1311,9 @@ def run(args) -> int:
                 rec["inspect_dropped (open<0.6)"] = _clean_state(dropped)
             screen = state["screen"]["value"]
             dv = state.get("day", {})
-            if dv.get("value") in DAY_RULES and dv.get("p", 0) >= 0.5:
-                day = dv["value"]
+            if dv.get("value") in DAY_RULES and dv.get("p", 0) >= 0.5 and (
+                    day not in DAY_ORDER or DAY_ORDER[dv["value"]] >= DAY_ORDER[day]):
+                day = dv["value"]   # days only move forward (run 015649 t46-52: Day 2 booth frames read '1' at 0.45)
             ent.observe(tick, state)
             if len(ent.log) != n_resets:   # new entrant: stall / pick / refusal counters are entrant-scoped
                 n_resets = len(ent.log)

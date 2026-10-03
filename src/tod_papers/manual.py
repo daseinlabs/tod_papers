@@ -137,6 +137,10 @@ E. The stamp tray is open, the passport lies under a stamp head (the state block
    the whole page can be read, then put it under the stamp you need.
 E-. The state block says "the passport is under the wrong stamp": the stamps are not offered this turn (a
    press would mark nothing). Drag the passport onto the landing strip the state block names.
+H. INSPECT MODE (the state block says "Inspect mode is ON": desk darkened, red dotted frame, red text
+   HIGHLIGHT DISCREPANCIES): documents cannot be moved and stamps cannot be used while it is on. Click the red
+   inspect-mode button at the lower right of the desk once to leave it, then continue with the matching step.
+   Inspect mode is not needed on Days 1-3; the button is only offered while inspect mode is on.
 F. The passport IS STAMPED. Any ONE of these lines in the state block is enough:
    (1) "A passport shows a stamp mark: yes";
    (2) "A stamp was clicked at tick N and the screen changed: the passport is stamped".
@@ -206,7 +210,7 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
 # --------------------------------------------------------------------------
 
 STATE_KEYS = ("person_at_window", "document_on_counter_shelf", "document_open_on_desk", "passport_open_readable",
-              "stamp_tray_open", "passport_shows_stamp_mark", "bulletin_or_rulebook_covering_desk")
+              "stamp_tray_open", "passport_shows_stamp_mark", "bulletin_or_rulebook_covering_desk", "inspect_mode_on")
 STRIP_KEYS = ("passport_under_denied", "passport_under_approved")
 COUNTRIES = ("ARSTOTZKA", "KOLECHIA", "IMPOR", "ANTEGRIA", "OBRISTAN", "REPUBLIA", "UNITED FEDERATION")
 DOC_KINDS = {"passport": "the entrant's passport (a small booklet or its open data page: photo, name, DOB, SEX, ISS., "
@@ -284,6 +288,11 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
             "hiding part of it? A bulletin lying next to the passport without covering it does not count.",
             "yes - a bulletin/rulebook covers part of the passport",
             "no - nothing covers the passport (or there is no passport)"),
+        "inspect_mode_on": _noul(
+            "Is the game in INSPECT MODE: the desk and booth are darkened, a red dotted frame surrounds them and "
+            "red text HIGHLIGHT DISCREPANCIES shows at the lower right?",
+            "yes - darkened desk with a red dotted frame and the words HIGHLIGHT DISCREPANCIES",
+            "no - normal bright desk, no red dotted frame"),
         "issuing_country": {
             "type": "choice",
             "instructions": "Issuing country of the open passport: the country name printed in large letters on "
@@ -322,6 +331,7 @@ _LABEL = {
     "passport_open_readable": "An open passport data page is readable on the desk",
     "passport_shows_stamp_mark": "A passport shows a stamp mark",
     "bulletin_or_rulebook_covering_desk": "A bulletin/rulebook covers the passport",
+    "inspect_mode_on": "Inspect mode is ON (desk darkened, red dotted frame, HIGHLIGHT DISCREPANCIES)",
 }
 
 
@@ -580,6 +590,8 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     scr = state.get("screen", {}).get("value", "")
     if scr and scr not in ("booth_idle", "documents_on_desk", "stamp_tray_open", "inspect_mode"):
         return "7", f"non-booth screen ({scr}): click to continue"
+    if yes(state, "inspect_mode_on"):
+        return "H", "click the inspect-mode button (leave inspect mode)"
     if (facts or {}).get("handed_back") is not None:
         return ("G", "wait for the entrant to leave") if yes(state, "person_at_window") else ("A", "click loudspeaker")
     kc = known_country(state, facts)
