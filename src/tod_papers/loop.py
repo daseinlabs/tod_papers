@@ -1294,7 +1294,19 @@ def offline(args) -> int:
     return 0
 
 
+def _raise_priority() -> None:
+    """Above-normal priority for this process only. Run 033308: with the game in the foreground the background loop
+    process got OCR times of 10-25 s per tick (offline 1.5-2 s); AboveNormal brought them to 2.5-6.6 s."""
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.SetPriorityClass(k.GetCurrentProcess(), 0x8000)   # ABOVE_NORMAL_PRIORITY_CLASS
+    except Exception as e:
+        print(f"[loop] priority not raised: {e}")
+
+
 def run(args) -> int:
+    _raise_priority()
     hwnd = find_game_window()
     x, y, w, h = io_win.client_rect_physical(hwnd)
     print(f"[loop] game hwnd={hwnd} client=({x},{y}) {w}x{h} dry_run={args.dry_run}")
