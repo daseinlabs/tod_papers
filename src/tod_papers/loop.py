@@ -537,7 +537,7 @@ def _desk_boxes(df: dict) -> list:
 
 
 def _same_boxes(a: list, b: list) -> bool:
-    return len(a) == len(b) and all(any(_iou(x, y) > DOC_CACHE_IOU for y in b) for x in a)
+    return len(a) == len(b) and all(any(_iou_t(x, y) > DOC_CACHE_IOU for y in b) for x in a)
 
 
 def doc_probe(tod: TodClient, frame: np.ndarray, args, facts: dict, day: str = "1", docs: bool = True):
@@ -614,7 +614,7 @@ DOC_CACHE_MIN_P = 0.5   # an identity below this p is reused for DOC_CACHE_UNSUR
 DOC_CACHE_UNSURE_TICKS = 3
 
 
-def _iou(a, b) -> float:
+def _iou_t(a, b) -> float:
     ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
     iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
     inter = ix * iy
@@ -632,7 +632,7 @@ def doc_cache_get(d: dict, tick: int) -> dict | None:
     for c in DOC_CACHE:
         if (c["where"] == d["where"] and c["cap"] == cap and tick - 1 <= c["seen"] <= tick
                 and tick - c["tick"] <= (DOC_CACHE_TICKS if c["p"] >= DOC_CACHE_MIN_P else DOC_CACHE_UNSURE_TICKS)
-                and _iou(c["box"], d["native"]) > DOC_CACHE_IOU):
+                and _iou_t(c["box"], d["native"]) > DOC_CACHE_IOU):
             c["seen"], c["box"] = tick, list(d["native"])
             return {"id": c["id"], "p": c["p"], "tick": c["tick"]}
     return None
@@ -640,7 +640,7 @@ def doc_cache_get(d: dict, tick: int) -> dict | None:
 
 def doc_cache_put(d: dict, a: dict, tick: int) -> None:
     DOC_CACHE[:] = [c for c in DOC_CACHE if tick - c["seen"] <= 1
-                    and not (c["where"] == d["where"] and _iou(c["box"], d["native"]) > DOC_CACHE_IOU)]
+                    and not (c["where"] == d["where"] and _iou_t(c["box"], d["native"]) > DOC_CACHE_IOU)]
     DOC_CACHE.append({"where": d["where"], "cap": _doc_cap(d), "box": list(d["native"]), "id": a["value"],
                       "p": a["p"], "tick": tick, "seen": tick})
 
@@ -1257,7 +1257,7 @@ def paper_groups(named: list) -> list[int]:
                 continue
             a, b = e["box"], d["box"]
             inside = lambda p, q: q[0] <= (p[0] + p[2]) / 2 <= q[2] and q[1] <= (p[1] + p[3]) / 2 <= q[3]
-            if _iou(a, b) >= 0.3 or inside(a, b) or inside(b, a):
+            if _iou_t(a, b) >= 0.3 or inside(a, b) or inside(b, a):
                 grp[j] = i
                 break
     return grp

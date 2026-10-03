@@ -60,7 +60,7 @@ tunnel)
   KEY="$HOME/.ssh/google_compute_engine"
   if command -v ssh >/dev/null && [ -f "$KEY" ] && [ -n "$IP" ]; then
     # plain OpenSSH, no host-key cache: a new IP/host key (recreate, preemption) cannot stall it
-    ssh -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=10         -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -N -L 8765:localhost:8765 "${SSH_USER:-$USER}@$IP"
+    ssh -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=10         -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -N -L 8765:localhost:8765 "${SSH_USER:-${USER:-${USERNAME:-$(whoami)}}}@$IP"
   else
     $G compute ssh "$NAME" --zone="$ZONE" --strict-host-key-checking=no -- -N -L 8765:localhost:8765
   fi ;;
