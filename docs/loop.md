@@ -152,12 +152,19 @@ answer" goes into the history block (`CYCLE:` line, 6 ticks), the cycle's source
 (RULED OUT, "was part of a repeating cycle"), and the tick json gets `cycle_break`. A second cycle for the same
 entrant stops the run (`stop reason: cycle: ...`). It offers nothing new.
 
-Step N (no passport presented, `manual.no_passport`): person p >= 0.7 for 3+ ticks, counter shelf empty (TOD
-and the layout), tray closed, no desk paper named passport, no stamp / hand-back / G2 on record. The state
-block says "The person has presented no passport"; the manual's step N follows docs/game.md's
-missing-document interrogation (rulebook BASIC RULES page, inspect button, passport rule + empty counter,
-interrogate prompt). While it holds: tray tab and stamps are not offered; the rulebook slot, transcript
-printer, inspect button and a click-only `empty_counter` element are; rulebook elements are not drag-only.
+Step N (no passport presented, `manual.no_passport`): decided from TOD's request-1 answers, not inferred by
+the loop. Request 1 asks the noul `no_documents_presented` while a person is (or was last tick) at the window;
+step N holds when it is >= NO_DOCS_P (0.6), TOD does not say a document lies on the counter shelf, and no paper
+TOD named the passport (run 092642 t9). Its sub-steps come from two more TOD questions, asked only on the tick
+after no_documents_presented was yes (`NO_DOCS_KEYS`): `rulebook_page` (choice: not_open / basic_rules / other
+page) and `interrogate_prompt_visible`, plus `inspect_mode_on`: N1 rulebook not open -> drag it onto the DESK;
+N2 another page -> click the page corner; N3 BASIC RULES -> click the inspect button; N4 inspect mode on -> click
+the passport rule line, then the empty counter; N5 prompt visible -> click it (docs/game.md, missing-document
+interrogation). The state block says "The person has presented no documents" (and, at N1, names the desk as
+the rulebook's destination). While it holds: tray tab, stamps and the stow shelf ('counter shelf left of the
+desk', it puts the rulebook away) are not offered; the rulebook slot, transcript printer, inspect button, the
+desk and layout.py's click-only `counter_empty` element (pixel test: nothing on the shelf; Day 2+) are;
+rulebook elements are not drag-only, and the rulebook gets no "put it away" hint.
 Offline `--sequential` carries entrant memory, history, exclusions and the cycle guard across consecutive
 frames of one run (each decision counts as executed and changed).
 

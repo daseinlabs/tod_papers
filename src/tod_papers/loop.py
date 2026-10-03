@@ -1097,6 +1097,10 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     nopp = bool(booth and facts is not None and man.no_passport(state, facts))
     if facts is not None:
         facts["no_passport"] = nopp
+    if nopp:
+        # step N reads the rulebook on the DESK; the stow shelf puts it away (Jorji dry-run: TOD dropped the rulebook
+        # on 'counter shelf left of the desk' instead of the desk). The desk stays a drop target.
+        regions = [r for r in regions if r.caption != REGION_CAPS["stow_papers"]]
     only_tickets = bool((facts or {}).get("waiting_docs"))
     # only entry tickets left (passport already gone back, e.g. after a loop restart lost the hand-back memory):
     # the entrant target stays offered (run 092521 t226)
@@ -1126,13 +1130,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         ix1, iy1, ix2, iy2 = layout.scale_box(layout.BY_NAME["inspect_toggle"].box, W, H)
         boxes = [b for b in boxes if getattr(b, "name", "") == "inspect_toggle"
                  or not (ix1 <= b.center[0] <= ix2 and iy1 <= b.center[1] <= iy2)]
-    if nopp:
-        # step N: in inspect mode the EMPTY counter shelf is clicked after the passport rule (docs/game.md,
-        # missing-document interrogation); the counter_shelf region itself is a drop target only
-        cx1, cy1, cx2, cy2 = layout.scale_box(layout.BY_NAME["counter_shelf"].box, W, H)
-        boxes = list(boxes) + [layout.LBox(cx1, cy1, cx2, cy2, "", "object", 1.0, caption=(
-            "the EMPTY counter shelf under the window (no passport presented) -- in inspect mode click it after the "
-            "passport rule to point out the missing passport"), name="empty_counter", affordance="click")]
+    # step N's empty-counter click target is layout.py's `counter_empty` element (pixel test: nothing on the shelf)
     if booth:
         # M.O.A. citation slips pile up on the desk after mistakes and are never needed on Days 1-3 (run 104848
         # t329-342: 14 ticks of citation shuffling with the next passport waiting on the counter): not offered
@@ -1268,6 +1266,7 @@ def _clean_state(state: dict) -> dict:
 
 
 TRAY_FLIP_LIMIT = man.TRAY_FLIP_LIMIT
+NONBOOTH_STOP = 60   # step-7 ticks in a row (cutscenes, day_end, menus) before the run stops
 REPEAT_DRAG_N = 4   # same drag source + same target, state summary unchanged, N ticks running -> exclude the source
 HORN_HIDE_P = 0.7
 HANDBACK_STAY = 4   # ticks a person may stay at the window after a hand-back before it is discounted
@@ -1727,6 +1726,7 @@ def run(args) -> int:
     stop_run = 0
     stop_reason = None
     stall_key, stall_n = None, 0
+    nonbooth_n = 0   # consecutive step-7 (non-booth screen) ticks
     screen_seq: list[str] = []
     recent_inputs: deque = deque(maxlen=REPEAT_WINDOW)
     menu_bounces = 0
@@ -1904,6 +1904,9 @@ def run(args) -> int:
                     with open(LAST_DAY_FILE, "w", encoding="utf-8") as fh:
                         json.dump({"day": dv["value"], "time": time.time(), "tick": tick, "run": run_dir}, fh)
                 day = dv["value"]   # days only move forward (run 015649 t46-52: Day 2 booth frames read '1' at 0.45)
+            if screen == "day_end" and (ent.country or ent.stamp_clicks or ent.handed_back is not None):
+                # the day is over (Day 2 ends at the bombing mid-entrant): nothing of this entrant carries into the next day
+                ent.reset(tick, "day_end screen")
             ent.observe(tick, state, papers=bool(df.get("docs")), day=day)   # run 081222 t5: only the ticket was left
             if len(ent.log) != n_resets:   # new entrant: stall / pick / refusal counters are entrant-scoped
                 n_resets = len(ent.log)
@@ -1941,7 +1944,13 @@ def run(args) -> int:
                 if stop_run >= args.stop_consecutive:
                     stop_reason = f"screen in {sorted(stop_screens)} for {stop_run} consecutive ticks"
             key = (screen, man.state_summary(state, facts))
-            stall_key, stall_n = key, (stall_n + 1 if key == stall_key else 1)
+            # step 7 (cutscene / day_end / menu screens: the Day 2 bombing ends the day mid-entrant) repeats the same
+            # click on purpose; the stall / pick / repeat / cycle stops skip it (bounded by NONBOOTH_STOP instead)
+            nonbooth = step[0] == "7"
+            nonbooth_n = nonbooth_n + 1 if nonbooth else 0
+            if nonbooth_n >= NONBOOTH_STOP:
+                stop_reason = f"non-booth screen {screen} for {nonbooth_n} ticks running"
+            stall_key, stall_n = key, (stall_n + 1 if key == stall_key and not nonbooth else 1)
             if args.stall_stop and stall_n >= args.stall_stop:
                 stop_reason = f"stalled: same state {key} for {stall_n} ticks"
             if stop_reason:
@@ -2152,11 +2161,11 @@ def run(args) -> int:
             if len(recent_inputs) >= REPEAT_WINDOW:
                 top_in = max(set(recent_inputs), key=list(recent_inputs).count)
                 n_top = list(recent_inputs).count(top_in)
-                if n_top >= REPEAT_STOP and top_in not in ("wait",):
+                if n_top >= REPEAT_STOP and top_in not in ("wait",) and not nonbooth:
                     stop_reason = f"stalled: '{top_in}' {n_top} times in the last {REPEAT_WINDOW} ticks"
             # hard stall stops: same manual step + same TOD pick N ticks running; stamp press refused M times
             pk = (step[0], D["tod_pick"][0], short(desc.get(D["tod_pick"][1], D["tod_pick"][1]), 60))
-            pick_key, pick_n = pk, (pick_n + 1 if pk == pick_key else 1)
+            pick_key, pick_n = pk, (pick_n + 1 if pk == pick_key and not nonbooth else 1)
             if args.pick_stop and pick_n >= args.pick_stop:
                 stop_reason = f"stalled: manual step {pk[0]} + TOD pick {pk[1]} '{pk[2]}' {pick_n} ticks running"
             if veto and veto.startswith("refused") and D["tod_pick"][1] == src:
@@ -2176,7 +2185,7 @@ def run(args) -> int:
             ex_act = "veto" if veto else (action if executed.startswith(("click", "drag")) else "wait")
             tgt_d = desc.get(tgt, "") if action == "drag" else ""
             hit = cyc.push(tick, cycle_signature(screen, state, step[0], ex_act, src_desc, tgt_d),
-                           cycle_progress(ent), ex_act, sb, src_desc, tgt_d)
+                           cycle_progress(ent), ex_act, sb, src_desc, tgt_d) if not nonbooth else None
             if hit:
                 note_c = cycle_callout(hit)
                 banned_c = []
@@ -2190,7 +2199,7 @@ def run(args) -> int:
                                       "actions": [[a, sd, td] for a, _, sd, td in hit["actions"]],
                                       "excluded": banned_c, "callout": note_c}
                 print(f"           cycle: {note_c} -> {len(banned_c)} source(s) excluded for {CYCLE_BAN_TICKS} ticks")
-                if hit["hits"] >= 2 and not stop_reason:
+                if hit["hits"] >= 2 and not stop_reason and not nonbooth:
                     stop_reason = (f"cycle: second period-{hit['period']} cycle for this entrant "
                                    f"({'; '.join(short(_desc_key(sd), 40) for _, _, sd, _ in hit['actions'])})")
 

@@ -170,7 +170,8 @@ N. NO DOCUMENTS: the state block says "The person at the window has handed over 
    Waiting does not help (the day does not go on until you ask for the passport). Ask for it with inspect
    mode, one input per tick, reading the state block like in C/D/E:
    N1. "Rulebook page open on the desk: NOT_OPEN": drag the rulebook from its slot below the counter onto the
-       desk.
+       DESK (target "desk (drop documents here to read them)"). Not onto the counter shelf left of the desk: that
+       puts the rulebook away again.
    N2. Rulebook open on another page: click its page corner until the page is BASIC_RULES.
    N3. Rulebook on BASIC_RULES, inspect mode off: click the red inspect-mode button.
    N4. Inspect mode ON, no interrogate prompt: click the rule line "Entrant must have a passport", then click
@@ -800,10 +801,14 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     if no_passport(state, facts):
         lines.append("- The person has presented no documents: there is nothing to stamp; they are sent away "
                      "without a stamp. Ask for the passport with inspect mode (step N)")
+        if (state.get("rulebook_page") or {}).get("value", "not_open") == "not_open":
+            lines.append("- Step N1: the rulebook goes from its slot below the counter onto the DESK (target 'desk "
+                         "(drop documents here to read them)'), not onto the counter shelf left of the desk")
     for d in facts.get("docs_named") or []:
         where = "counter shelf" if d["where"] == "counter" else "desk"
         tail = (" -- not needed on Days 1-3; to clear the desk drop it on the 'counter shelf left of the desk' target"
-                if d["id"] in ("rulebook", "bulletin") and d["where"] == "desk" and d["p"] >= 0.6 else "")
+                if d["id"] in ("rulebook", "bulletin") and d["where"] == "desk" and d["p"] >= 0.6
+                and not (d["id"] == "rulebook" and no_passport(state, facts)) else "")   # step N reads it on the desk
         lines.append(f"- Paper on the {where} ({d['pos']}): {d['id'].upper()} (p={d['p']:.2f}){tail}")
     if yes(state, "passport_open_readable") and not yes(state, "stamp_tray_open"):
         lines.append("- The passport is already open on the desk and the stamp tray is closed: dragging the passport "
@@ -1077,7 +1082,8 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
 
 CLICK_CAPS = {"speaker/horn", "rubber stamp", "red rubber stamp", "green rubber stamp", "button"}
 DRAG_CAPS = {"closed passport", "open passport", "rulebook / ring binder", "document on counter",
-             "passport booklet", "paper document", "ticket", "bulletin board", "tab at screen edge",
+             "passport booklet", "paper document", "ticket", "entry ticket", "flyer (The Pink Vice)",
+             "bulletin board", "tab at screen edge",
              "stamp tray tab (left end of the open stamp bar)",
              "lever handle"}
 
