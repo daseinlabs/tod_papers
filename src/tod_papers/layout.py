@@ -440,8 +440,156 @@ def find_documents(n: np.ndarray, is_tray_open: bool | None = None) -> list[dict
     return docs
 
 
+# --------------------------------------------------------------------------
+# where to put the open passport on the desk (drop-target derivation, native px)
+# --------------------------------------------------------------------------
+
+# open passport = visa page (top) over data page (bottom: name, DOB, ISS., EXP., country, number). Fully visible
+# open passports in runs 015649-150111 measure 130 x 162 (91 boxes, e.g. [204,115,334,277]); the OCR lists
+# 'ENTRY VISA' first and the data lines below it.
+OPEN_PASSPORT = (130, 162)
+PASSPORT_DATA_FRAC = 0.5     # lower half of the open passport = the data page
+DESK_MARGIN = 4              # keep the passport this far inside the desk / frame edge
+EDGE_TOL = 2                 # a visible box this close to a desk/frame edge is clipped there
+# counter -> desk: the closed passport opens CENTRED on the drop point (117 drops in 2026-10-03 runs: grab at the
+# closed passport's centre, drop (268,267) -> open box x1 = drop-65, y1 = drop-81). Desk -> desk: the paper keeps
+# its offset to the cursor (box moves by drop - grab; 95 re-drags, residual 0-1 px).
+
+
+def desk_obstacles(docs: list[dict], is_tray_open: bool, inspect_button: bool = False,
+                   exclude: list | None = None) -> list[tuple[str, list[int], float]]:
+    """(name, native box, weight) of everything the open passport must not lie under or on: the open stamp bar,
+    the stamp knobs and the open-tray tab (the tray draws OVER papers); with the tray closed the bar's area at a
+    low weight (opening the tray would cover it) and the closed tray tab; the inspect button; every other paper
+    box on the desk (excluding `exclude`, the passport itself)."""
+    out: list[tuple[str, list[int], float]] = []
+    bx1, by1, bx2, by2 = TRAY_BAR
+    if is_tray_open:
+        out.append(("tray_bar", list(TRAY_BAR), 1.0))
+        out += [("stamp_knob", [kx1, DESK[1], kx2, by1], 1.0) for kx1, kx2 in KNOB_X]
+        out.append(("tray_tab_open", list(BY_NAME["tray_tab_open"].box), 1.0))
+    else:
+        out.append(("tray_bar_area", list(TRAY_BAR), 0.25))
+        out.append(("tray_tab", list(BY_NAME["tray_tab"].box), 1.0))
+    if inspect_button:
+        out.append(("inspect_toggle", list(BY_NAME["inspect_toggle"].box), 1.0))
+    ex_ = [list(e) for e in (exclude or [])]
+    for d in docs:
+        if d.get("where") != "desk":
+            continue
+        b = list(d.get("native") or d["box"])
+        if any(_iou4(b, e) > 0.5 or (e[0] <= b[0] and e[1] <= b[1] and b[2] <= e[2] and b[3] <= e[3]) for e in ex_):
+            continue
+        out.append(("paper", b, 1.0))
+    return out
+
+
+def _ov(a, b) -> int:
+    return max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
+def passport_obstruction(box, obstacles: list) -> dict:
+    """Geometric check of one (full, native) open-passport box: overlap px per obstacle name, the part off the
+    desk / frame, and the hidden fraction of the data page (lower half). Used by the derivation and the replay."""
+    x1, y1, x2, y2 = box
+    data = [x1, int(y1 + (1 - PASSPORT_DATA_FRAC) * (y2 - y1)), x2, y2]
+    inside = _ov(box, DESK)
+    res = {"off_desk": (x2 - x1) * (y2 - y1) - inside, "data_hidden": 0, "by": {}}
+    for name, b, w in obstacles:
+        if w < 0.5:
+            continue   # the closed tray's bar area hides nothing yet
+        o = _ov(box, b)
+        if o:
+            res["by"][name] = res["by"].get(name, 0) + o
+            res["data_hidden"] += _ov(data, b)
+    dpx = (data[2] - data[0]) * (data[3] - data[1])
+    res["data_hidden"] = min(dpx, res["data_hidden"] + dpx - _ov(data, DESK))   # covered + off the desk/frame
+    res["data_hidden_frac"] = round(res["data_hidden"] / dpx, 3) if dpx else 1.0
+    res["clear"] = res["off_desk"] == 0 and not res["by"]
+    return res
+
+
+def open_passport_size(vis_box=None) -> tuple[int, int]:
+    """Open-passport size from the frame: the width of a visible open passport that is not clipped left/right
+    (its height is clipped by the frame bottom / the tray far more often), height by the fixture's aspect."""
+    w0, h0 = OPEN_PASSPORT
+    if vis_box is not None:
+        x1, _, x2, _ = vis_box
+        w = x2 - x1
+        if x1 > DESK[0] + EDGE_TOL and x2 < NATIVE_W - EDGE_TOL and 0.8 * w0 <= w <= 1.2 * w0:
+            return w, int(round(w * h0 / w0))
+    return w0, h0
+
+
+def full_passport_box(vis, size, is_tray_open: bool) -> list[int]:
+    """The whole open passport behind a visible (possibly clipped) box: clipped at the frame bottom -> the top
+    edge is real; clipped at the desk top / cut by the open stamp bar from above -> the bottom edge is real."""
+    x1, y1, x2, y2 = vis
+    w, h = size
+    if x1 <= DESK[0] + EDGE_TOL and x2 - x1 < w:
+        x1 = x2 - w
+    x2 = x1 + w
+    cut_top = y1 <= DESK[1] + EDGE_TOL or (is_tray_open and abs(y1 - TRAY_BAR[3]) <= 3 and x2 > TRAY_BAR[0])
+    if y2 - y1 >= h - EDGE_TOL or not cut_top:
+        return [x1, y1, x2, y1 + h]
+    return [x1, y2 - h, x2, y2]
+
+
+def clear_desk_spot(docs: list[dict], is_tray_open: bool, size=OPEN_PASSPORT, inspect_button: bool = False,
+                    exclude: list | None = None) -> dict:
+    """Where the open passport (size w x h, native) lies fully on the desk with the least covered: every
+    position inside DESK (DESK_MARGIN in) is scored by the obstacle area under it (desk_obstacles weights; the
+    data page -- lower half -- counts 3x), ties go to the position whose centre is farthest from any obstacle
+    (the largest clear region). Returns {'box', 'center', 'cost', 'check' (passport_obstruction)}."""
+    w, h = int(size[0]), int(size[1])
+    obst = desk_obstacles(docs, is_tray_open, inspect_button, exclude)
+    cost = np.zeros((NATIVE_H, NATIVE_W), np.float32)
+    for _, (ox1, oy1, ox2, oy2), wt in obst:
+        sl = cost[max(0, oy1):max(0, oy2), max(0, ox1):max(0, ox2)]
+        np.maximum(sl, wt, out=sl)
+    ii = cv2.integral(cost)   # (H+1, W+1)
+    m = DESK_MARGIN
+    xs = np.arange(DESK[0] + m, max(DESK[0] + m, DESK[2] - m - w) + 1)
+    ys = np.arange(DESK[1] + m, max(DESK[1] + m, NATIVE_H - m - h) + 1)
+    X, Y = np.meshgrid(xs, ys)
+    X2, Y2 = np.minimum(X + w, NATIVE_W), np.minimum(Y + h, NATIVE_H)
+    Ym = Y + int((1 - PASSPORT_DATA_FRAC) * h)
+
+    def S(a, b, c, d):
+        return ii[d, c] - ii[b, c] - ii[d, a] + ii[b, a]
+    total = S(X, Y, X2, Y2) + 2.0 * S(X, Ym, X2, Y2)
+    free = (cost < 0.5).astype(np.uint8)
+    free[:DESK[1], :] = 0
+    free[:, :DESK[0]] = 0
+    dist = cv2.distanceTransform(free, cv2.DIST_L2, 3)
+    cx, cy = np.minimum(X + w // 2, NATIVE_W - 1), np.minimum(Y + h // 2, NATIVE_H - 1)
+    best = total.min()
+    score = np.where(total <= best + 1e-3, dist[cy, cx], -1.0)
+    i, j = np.unravel_index(int(np.argmax(score)), score.shape)
+    x1, y1 = int(X[i, j]), int(Y[i, j])
+    box = [x1, y1, x1 + w, y1 + h]
+    return {"box": box, "center": (x1 + w // 2, y1 + h // 2), "cost": round(float(best), 1),
+            "check": passport_obstruction(box, obst)}
+
+
+def passport_drop_point(spot: dict, src: dict | None, size, is_tray_open: bool) -> tuple[int, int]:
+    """Cursor end point (native) that puts the passport onto `spot`. src = the passport's paper dict
+    ({'where', 'box'/'native'}) or None. From the counter (closed passport) it opens centred on the cursor;
+    a paper dragged on the desk keeps its offset to the grab point (= the centre of its visible box)."""
+    cx, cy = spot["center"]
+    if src is not None and src.get("where") == "desk":
+        vis = list(src.get("native") or src["box"])
+        full = full_passport_box(vis, size, is_tray_open)
+        gx, gy = (vis[0] + vis[2]) / 2, (vis[1] + vis[3]) / 2
+        cx += gx - (full[0] + full[2]) / 2
+        cy += gy - (full[1] + full[3]) / 2
+    # the cursor must end on the desk (papers released over the counter close and fall back onto it)
+    m = 3 * DESK_MARGIN
+    return (int(round(min(max(cx, DESK[0] + m), DESK[2] - m))), int(round(min(max(cy, DESK[1] + m), NATIVE_H - m))))
+
+
 _DOC_DESC = {
-    "desk": "document on the desk -- drag it (onto a stamp landing strip to stamp it, onto the person at the "
+    "desk":"document on the desk -- drag it (onto a stamp landing strip to stamp it, onto the person at the "
             "window to hand it back)",
     "desk_under_tray": "document under the open stamp tray (only its top edge shows) -- drag it out onto the "
                        "desk, or it is already beneath the stamps",

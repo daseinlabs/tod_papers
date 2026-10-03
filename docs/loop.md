@@ -58,6 +58,26 @@ rapidocr/opencv come from there) plus `pywin32 dxcam mss comtypes`. Recipe in `r
    - `counter shelf (hand documents back here)` -- top = bottom of the person box at the window (or a
      document lying on the counter), right = the shutter lever / window frame, bottom = drawer row.
    - `desk (drop documents here to read them)` -- free desk right of the shelf, below the tray.
+     With static-layout papers (static/hybrid extractor) it is derived per frame instead (`loop.desk_target`,
+     `target_source` = `derived_frame`): `layout.clear_desk_spot` scores every position of the OPEN passport
+     (size from its visible box, else the 130x162 native fixture `layout.OPEN_PASSPORT`) inside `layout.DESK`
+     against `layout.desk_obstacles` (open stamp bar, stamp knobs, open-tray tab, closed tray tab, inspect
+     button, every other paper box; the closed tray's bar area at 1/4 weight), the data page (lower half)
+     counting 3x, ties to the centre farthest from any obstacle. `layout.passport_drop_point` turns it into
+     the cursor end point: from the counter the passport opens centred on the cursor (117 drops: box =
+     drop - (65,81)); dragged on the desk it keeps its grab offset (box moves by drop - grab; the clipped
+     visible box is extended to the full passport by `layout.full_passport_box`). The region is a small box
+     (+-12 native px) on that point; `regions.desk.plan` in the tick json holds the drop point, the planned
+     passport box and its `passport_obstruction` check. Before (runs 092642/115900/150111): every drop went
+     to the fixed (268,267) -> open passport y 186..348, its bottom 28 px (EXP., country, number) off the
+     frame and, tray open, its top-right under the bar; 9/23 next reads were readable (country p >= 0.6 or
+     EXP. read). The derived spot with no other papers is (182,154)-(312,316): tray open, only the visa
+     page's top-right corner (24x58) lies under the bar; the data page is fully visible.
+   - `clear desk space (move the passport so its page is fully visible)` (`desk_clear`) -- the same point,
+     offered INSTEAD of `desk` when an open passport lies on the desk (not under a stamp head, not already
+     on the spot, IoU < 0.8) and request 1b could not read it (country unreadable / p < 0.6 and none
+     carried, or Day 2/3 no EXP. date read and none carried) -- `loop.passport_needs_clear_space`. The tray
+     tab's "drag left onto the desk" redirect accepts either target.
    Each falls back to `anchors.json` (native 570x320 coords scaled to the client) if it cannot be derived;
    the tick json has `regions` and `target_source` = {name: derived|fallback}. Regions are drop targets
    only (never a source). The old generic "empty space" target is gone; the screen-centre option exists

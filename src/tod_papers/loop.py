@@ -430,16 +430,53 @@ def _small_for_send(frame: np.ndarray, args) -> np.ndarray:
     return frame
 
 
-def screen_family(frame: np.ndarray) -> tuple[str, bool]:
-    """('booth'|other, tray open on the pixels) from the static layout (~8 ms, no model). Only chooses WHICH
-    questions request 1 asks; every answer still comes from TOD. Agreed with TOD's booth/non-booth answer in
-    284/286 ticks of runs 033604/053852/054238."""
+def screen_family(frame: np.ndarray) -> tuple:
+    """('booth'|other, tray open on the pixels, stamp strips with a paper in them on the pixels or None) from the
+    static layout (~8 ms, no model). Only chooses WHICH questions request 1 asks; every answer still comes from
+    TOD. Agreed with TOD's booth/non-booth answer in 284/286 ticks of runs 033604/053852/054238."""
     try:
         n = layout.to_native(frame)
         fam, _ = layout.screen_of(n)
-        return fam, (bool(layout.tray_open(n)) if fam == "booth" else False)
+        tray = bool(layout.tray_open(n)) if fam == "booth" else False
+        return fam, tray, (list(layout.passport_under(n)) if tray else [])
     except Exception:
-        return "booth", True
+        return "booth", True, None
+
+
+REQ1_MAX_Q = 14   # request-1 budget (TOD's hard limit is TOD_MAX_Q; ~80 ms per question)
+NONPASSPORT_IDS = ("rulebook", "bulletin", "citation", "flyer", "transcript")
+
+
+def probe_context(prev_facts: dict | None, prev_state: dict | None) -> dict:
+    """What the previous tick established (TOD's answers + the entrant memory), used only to choose WHICH request-1
+    questions can matter this tick -- never as an answer. Request 1 is sent before this tick's extraction."""
+    pf, ps = prev_facts or {}, prev_state or {}
+    dn = pf.get("docs_named") or []
+    papers = (man.yes(ps, "document_on_counter_shelf") or man.yes(ps, "document_open_on_desk", 0.3)
+              or any(not (d["id"] in NONPASSPORT_IDS and d["p"] >= 0.6) for d in dn))
+    pp_desk = man.yes(ps, "document_open_on_desk") or any(
+        d["where"] == "desk" and d["id"] == "passport" and d["p"] >= 0.5 for d in dn)
+    cover = any(d["where"] == "desk" and d["id"] in ("rulebook", "bulletin") and d["p"] >= 0.3 for d in dn)
+    return {"stamped": bool(pf.get("stamp_clicks") or pf.get("missed_stamps")),
+            "papers": bool(papers), "covering_possible": bool(pp_desk and cover)}
+
+
+def select_state_questions(q: dict, ctx: dict | None, strip_px: list | None) -> list[str]:
+    """Booth request 1: drop the questions whose answer nothing would consume this tick (audit section 4).
+    Returns the dropped keys (logged). ctx None (first tick, offline frames) keeps everything."""
+    drop = []
+    if strip_px is not None:   # pixel check: no paper in that strip -> strip_facts/passport_sides ignore the answer
+        drop += [f"passport_under_{s}" for s in ("denied", "approved") if s not in strip_px]
+    if ctx is not None:
+        if not ctx["stamped"]:
+            drop.append("passport_shows_stamp_mark")   # manual.stamped() reads the mark only after a stamp press
+        if not ctx["covering_possible"]:
+            drop.append("bulletin_or_rulebook_covering_desk")   # needs a passport AND a rulebook/bulletin on the desk
+        if not ctx["papers"]:
+            # nothing on the counter or desk last tick: the passport readings are dropped by gate_inspection anyway
+            drop += [k for k in (*man.INSPECT_KEYS, "entry_ticket_dated_today")]
+    out = [k for k in drop if q.pop(k, None) is not None]
+    return out
 
 
 def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", inspect: tuple = man.INSPECT_KEYS,
@@ -732,6 +769,66 @@ def static_regions(frame: np.ndarray, tray_is_open: bool):
     return out, {n: "static" for n in names}
 
 
+DESK_TARGET_HALF = 12    # native px: the desk target is a small box centred on the computed drop point
+CLEAR_SPOT_IOU = 0.8     # the open passport already lies on the clear spot -> 'clear desk space' is not offered
+
+
+def _passport_doc(facts: dict | None) -> dict | None:
+    """The paper TOD named the passport (p >= 0.5): the largest one on the desk, else one on the counter."""
+    pp = [d for d in (facts or {}).get("docs_named") or [] if d.get("id") == "passport" and d.get("p", 0) >= 0.5
+          and d.get("native")]
+    area = lambda d: (d["native"][2] - d["native"][0]) * (d["native"][3] - d["native"][1])
+    desk = sorted((d for d in pp if d["where"] == "desk"), key=lambda d: -area(d))
+    return desk[0] if desk else next((d for d in pp if d["where"] == "counter"), None)
+
+
+def desk_target(frame: np.ndarray, facts: dict | None, state: dict):
+    """Desk drop target derived from this frame (runs 092642/115900/150111: the fixed desk box sent every
+    counter->desk passport to (268,267) -> open box y 186..348, the bottom 28 px with EXP./country off the frame,
+    and with the tray open its top-right under the stamp bar; 14/23 next reads failed). layout.clear_desk_spot
+    places the OPEN passport (size from its visible box, else the fixture) fully on the desk, off the stamp bar /
+    knobs / tray tab / inspect button / every other paper, data page first; layout.passport_drop_point turns that
+    into the cursor end point (counter: opens centred on the cursor; desk: keeps the grab offset).
+    Returns (Box in frame px, info dict) or None without static-layout docs (vision extractor)."""
+    sinfo = (facts or {}).get("static") or {}
+    if "docs" not in sinfo:
+        return None
+    H, W = frame.shape[:2]
+    tray = bool(sinfo.get("tray_open", man.yes(state, "stamp_tray_open")))
+    src = _passport_doc(facts)
+    open_src = src if (src and src["where"] == "desk"
+                       and src["native"][2] - src["native"][0] >= 0.75 * layout.OPEN_PASSPORT[0]) else None
+    size = layout.open_passport_size(open_src["native"] if open_src else None)
+    exclude = [open_src["native"]] if open_src else []
+    spot = layout.clear_desk_spot(sinfo.get("docs") or [], tray, size, bool(sinfo.get("inspect_button")), exclude)
+    nx, ny = layout.passport_drop_point(spot, open_src, size, tray)
+    sx, sy = W / layout.NATIVE_W, H / layout.NATIVE_H
+    hw = DESK_TARGET_HALF
+    box = Box(int((nx - hw) * sx), int((ny - hw) * sy), int((nx + hw) * sx), int((ny + hw) * sy), "", "region", 0.0,
+              caption=REGION_CAPS["desk"])
+    cur = layout.full_passport_box(open_src["native"], size, tray) if open_src else None
+    info = {"drop_native": [nx, ny], "passport_box_planned": spot["box"], "check": spot["check"],
+            "passport_from": (src or {}).get("where"), "passport_box_now": cur,
+            "at_spot": bool(cur is not None and layout._iou4(cur, spot["box"]) >= CLEAR_SPOT_IOU)}
+    return box, info
+
+
+def passport_needs_clear_space(state: dict, facts: dict | None, day: str, info: dict) -> bool:
+    """'clear desk space' target: an open passport lies on the desk (not under a stamp head, not already on the
+    clear spot) and request 1b could not read it -- country 'unreadable' / p < 0.6 (none carried), or on Day 2/3
+    no EXP. date read (none carried). Only when 1b asked (issuing_country in the state)."""
+    if "issuing_country" not in state or info.get("passport_box_now") is None or info.get("at_spot"):
+        return False
+    if (facts or {}).get("passport_under"):
+        return False
+    c = state.get("issuing_country") or {}
+    country_ok = bool((c.get("value") not in (None, "unreadable") and c.get("p", 0) >= CARRY_COUNTRY_P)
+                      or (facts or {}).get("country_carried"))
+    exp_ok = (day not in ("2", "3") or bool((state.get("exp_read") or {}).get("value"))
+              or bool((facts or {}).get("exp_carried")))
+    return not (country_ok and exp_ok)
+
+
 # --------------------------------------------------------------------------
 # drop-target regions (stamp landing strip, counter shelf, desk)
 # --------------------------------------------------------------------------
@@ -745,6 +842,7 @@ REGION_CAPS = {
     "counter_shelf": "counter shelf under the window",
     "hand_back": "the entrant at the booth window -- drop documents ON THE PERSON to hand them back",
     "desk": "desk (drop documents here to read them)",
+    "desk_clear": "clear desk space (move the passport so its page is fully visible)",
     "tray_stow": "right edge of the desk (drag the tray tab here to put the stamp tray away)",
     "stow_papers": "counter shelf left of the desk -- drop the rulebook, bulletin or a flyer here to put it away (it closes "
                    "and leaves the desk)",
@@ -948,7 +1046,8 @@ def build_questions(src_ids: dict, tgt_ids: dict, booth: bool = True) -> dict:
         q["target"] = choice(
             "If the chosen element is dragged: onto which numbered drop target should it be released? (stamp "
             "landing strip = under a stamp so it can be stamped; the entrant = hand documents back; desk = read a "
-            "document; tray stow edge / desk = close / open the stamp tray.) Ignored for a click.", tgt_ids)
+            "document; clear desk space = move a half-hidden open passport so its page shows; tray stow edge / desk "
+            "= close / open the stamp tray.) Ignored for a click.", tgt_ids)
     return q
 
 
@@ -1087,6 +1186,21 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         regions, region_src = static_regions(frame, bool(sinfo.get("tray_open", man.yes(state, "stamp_tray_open"))))
     else:
         regions, region_src = derive_regions(boxes, frame, state) if booth else ([], {})
+    desk_info = None
+    dt = desk_target(frame, facts, state) if booth else None
+    if dt is not None:
+        # the desk target from this frame's papers + layout fixtures (desk_target), replacing the fixed/derived box
+        dbox, desk_info = dt
+        name = "desk"
+        if passport_needs_clear_space(state, facts, day, desk_info):
+            name = "desk_clear"   # same point; offered instead of the plain desk while 1b cannot read the passport
+            dbox.caption = REGION_CAPS["desk_clear"]
+        regions = [r for r in regions if r.caption != REGION_CAPS["desk"]] + [dbox]
+        region_src.pop("desk", None)
+        region_src[name] = "derived_frame"
+        desk_info["target"] = name
+        if facts is not None:
+            facts["desk_target"] = desk_info
     if booth and facts is not None and facts.get("waiting_docs"):
         # G2: the remaining papers go to the entrant; the stow shelf (also 'counter shelf ...') took the ticket twice
         # in run 092521 t217-218 while the entrant waited for it
@@ -1237,6 +1351,9 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         name = next(n for n, c in REGION_CAPS.items() if c == cap)
         b = idmap[int(k)]
         region_info[name] = {"id": k, "box": [b.x1, b.y1, b.x2, b.y2], "target_source": region_src.get(name, "?")}
+        if name in ("desk", "desk_clear") and desk_info is not None:
+            region_info[name]["plan"] = {k_: desk_info[k_] for k_ in ("drop_native", "passport_box_planned",
+                                                                       "passport_from", "passport_box_now", "check")}
     questions = build_questions(src_ids, tgt_ids, booth)
     if facts is not None:
         facts["booth"] = booth
@@ -1330,8 +1447,8 @@ def decide(res, P: dict) -> dict:
         # onto the desk. Compare dry-run 2026-10-02 (003519_0033, loop5 live): TOD picked the open tab but dropped
         # it on a stamp landing strip, where it does nothing.
         is_open = "left end of the open" in (sb.caption or "") or getattr(sb, "name", "") == "tray_tab_open"
-        want = REGION_CAPS["tray_stow"] if is_open else REGION_CAPS["desk"]
-        ok = [k for k, b in P["idmap"].items() if b.kind == "region" and b.caption == want]
+        want = (REGION_CAPS["tray_stow"],) if is_open else (REGION_CAPS["desk"], REGION_CAPS["desk_clear"])
+        ok = [k for k, b in P["idmap"].items() if b.kind == "region" and b.caption in want]
         if ok and tgt != str(ok[0]):
             note = (note + "; " if note else "") + (f"tray tab dragged onto #{tgt} -> #{ok[0]} "
                                                     f"({'stow edge' if is_open else 'desk'})")
