@@ -124,6 +124,21 @@ CLIP_MIN_P = 0.25
 DOC_CAPS = {"closed passport", "open passport", "rulebook / ring binder", COUNTER_CAP}
 CLIP_DOC_P = 0.4
 CLIP_OPEN_TEXT_P = 0.65
+# Inspect mode: the game prints "HIGHLIGHT DISCREPANCIES" in the bottom bar while
+# it is on. Then every printed line (a rulebook rule, a ticket's VALID ON date)
+# is a click target of its own, so lines are kept as separate text boxes even
+# when a paper panel also takes their text (docs/extraction.md "Inspect mode").
+INSPECT_TEXT_RE = re.compile(r"HIGHL[I1l]GHT|D[I1l]SCREPAN", re.I)
+# a paper's own printed words name it better than GDINO/CLIP do on pixel art
+# (the entry ticket read "passport booklet", the Pink Vice flyer "booth"):
+# OCR text -> caption, first match wins
+TICKET_RE = re.compile(r"ENTRY\s*T[I1l]CKET|VAL[I1l]D\s*ON", re.I)
+TEXT_CAPS = (
+    (TICKET_RE, "entry ticket"),
+    (re.compile(r"P[I1l]NK\s*V[I1l]CE|FANTAS|FAHTAS", re.I), "flyer (The Pink Vice)"),
+    (re.compile(r"HAS\s*NO\s*DOCUMENTS|use.?INSPECT\s*mode", re.I), "notice: entrant has no documents"),
+    (re.compile(r"C[I1l]TAT[I1l]ON|PROTOCOL\s*V[I1l]OLATED", re.I), "citation slip"),
+)
 
 
 @dataclass
@@ -667,7 +682,8 @@ def _panel_boxes(native: np.ndarray, s: int) -> list[Box]:
 _PRI = {"text": 3, "icon": 2, "panel": 1}
 
 
-def _merge(texts: list[Box], icons: list[Box], panels: list[Box], frame_area: int) -> list[Box]:
+def _merge(texts: list[Box], icons: list[Box], panels: list[Box], frame_area: int,
+           keep_lines: bool = False) -> list[Box]:
     # 1. merge text fragments on the same line that nearly touch (pixel fonts
     #    sometimes split a word: "1.4." + "124-5").
     #    Repeat pairwise until stable (word order on a line is by x, not y1 jitter).
@@ -756,7 +772,12 @@ def _merge(texts: list[Box], icons: list[Box], panels: list[Box], frame_area: in
         if lab:
             pn.text = " ".join(t.text for t in sorted(lab, key=lambda b: (b.y1, b.x1)))[:120]
         keep_panels.append(pn)
-    texts = [t for t in texts if id(t) not in absorbed_ids]
+    # the entry ticket's lines stay separate too: its VALID ON date is the one line the Day 3 rule reads
+    for pn in keep_panels:
+        if pn.text and TICKET_RE.search(pn.text):
+            absorbed_ids -= {id(t) for t in absorbed[id(pn)]}
+    if not keep_lines:   # inspect mode: each line stays clickable on its own
+        texts = [t for t in texts if id(t) not in absorbed_ids]
 
     cands = texts + keep_icons + keep_panels
     # 4. drop unlabeled boxes with no detector class (defensive; every source sets kind)
@@ -997,6 +1018,21 @@ def _dedup(boxes: list[Box]) -> list[Box]:
 # --------------------------------------------------------------------------
 
 
+_TEXT_CAP_SET = {c for _, c in TEXT_CAPS}
+
+
+def _text_caps(boxes: list[Box]) -> None:
+    """Panels / icons / objects whose OCR text names the paper get that caption
+    (TEXT_CAPS); plain text lines keep no caption."""
+    for b in boxes:
+        if b.kind in ("text", "page_corner") or not b.text:
+            continue
+        for rx, cap in TEXT_CAPS:
+            if rx.search(b.text):
+                b.caption = cap
+                break
+
+
 def coarse_pos(b: Box, W: int, H: int) -> str:
     cx, cy = b.center
     v = "top" if cy < H / 3 else ("bottom" if cy > 2 * H / 3 else "middle")
@@ -1010,7 +1046,8 @@ def describe(box: Box, W: int | None = None, H: int | None = None) -> str:
     visible: no hints about which element to use."""
     if box.text and box.kind != "page_corner":
         t = box.text if len(box.text) <= 60 else box.text[:57] + "..."
-        d = f"{box.kind} — {box.caption}: '{t}'" if box.caption in DOC_CAPS else f"{box.kind} — '{t}'"
+        d = (f"{box.kind} — {box.caption}: '{t}'" if box.caption in DOC_CAPS or box.caption in _TEXT_CAP_SET
+             else f"{box.kind} — '{t}'")
     else:
         d = f"{box.kind} — {box.caption or 'unlabelled graphic'}"
     W = W or _LAST_WH[0]
@@ -1064,7 +1101,8 @@ def extract(frame_bgr: np.ndarray) -> list[Box]:
     texts, T["ocr_ms"] = fut.result()
     t = lap("ocr_wait_ms", t)
 
-    boxes = _merge(texts, icons, panels, W * H)
+    inspect_on = any(INSPECT_TEXT_RE.search(t.text or "") for t in texts)
+    boxes = _merge(texts, icons, panels, W * H, keep_lines=inspect_on)
     for cap, sc, *xy in _apply_dets(boxes, obj_dets, score):
         boxes.append(Box(*xy, kind="object", conf=round(sc, 3), caption=cap))
     boxes += _edge_tabs(native, s)
@@ -1074,6 +1112,7 @@ def extract(frame_bgr: np.ndarray) -> list[Box]:
     t = lap("merge_ms", t)
     boxes = _corners(boxes, dets, W * H)
     boxes = _dedup(boxes)
+    _text_caps(boxes)
     # pad text boxes a little so markers/clicks don't sit on the glyph edge
     for b in boxes:
         if b.kind == "text":

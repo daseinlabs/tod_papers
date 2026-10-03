@@ -391,3 +391,23 @@ Comparison on 6 frames (003519 raw_0000/0014/0020/0033, 221705 raw_0030, live gr
 - When the GPU or remote extractor is unavailable or slow, fall back to static alone: it is still actionable at 20 ms, with only document identity lost.
 - A later cheap improvement is to label static doc boxes by template/colour (the passport cover and the rulebook guide), so the GPU is not needed at all on Days 1–3.
 - Hook (loop.py is owned by another agent, so this is not applied): `--extractor {vision,static,hybrid}` choosing between `ex.extract`, `ex.extract_static` and `layout.merge_hybrid(ex.extract_static(f), ex.extract(f))` at the two `ex.extract(frame)` call sites (offline ~l.958, run ~l.1085).
+
+## Inspect-mode elements (missing-document interrogation), 2026-10-03
+
+The no-documents procedure (docs/game.md, "Missing-document interrogation") needs these elements as boxes. Checked on saved 2280x1280 frames with the hybrid extractor (`layout.extract_static` + `extract.extract`, merged by `layout.merge_hybrid`):
+
+| Element | Frames checked | Before | After |
+|---|---|---|---|
+| Inspect button (bottom right) | Day 2-3 booth frames | static element `inspect_toggle` | unchanged |
+| Rulebook contents tabs ("Basic Rules", "Regional Map", "Booth Info") | 20261002_114927 raw_0030-0080 | separate OCR text boxes | unchanged |
+| Rule lines on the Basic Rules page | none: no saved frame shows that page open | - | lines in inspect mode are kept separate (below); needs a live frame |
+| Empty counter shelf as a click target | 20261003_115900 raw_0047/0065, 105011 raw_0216 | drop target only | static element `counter_empty`, "counter shelf -- empty ..." |
+| "HIGHLIGHT DISCREPANCIES" bar text (inspect mode on) | 20261003_054238 raw_0048/0090 | text box | unchanged |
+| "THIS ENTRANT HAS NO DOCUMENTS / To proceed, use INSPECT mode to interrogate" notice | 20261003_115900 raw_0045/0065 | panels captioned "passport booklet" / "paper document" | captioned "notice: entrant has no documents" |
+| Interrogate prompt (after clicking rule + empty counter) | none on saved frames | - | vision text matching INTERROG / HIGHLIGHT / DISCREPAN / NO DOCUMENTS is kept anywhere on the booth; needs a live frame |
+| Entry ticket + "VALID ON 1982.11.25" line | 20261003_105011 raw_0216, 081222 raw_0010 | one panel captioned "passport booklet", date absorbed | panel captioned "entry ticket" + separate "VALID ON" / date text boxes |
+| The Pink Vice flyer | 20261003_115900 raw_0047 | panel captioned "booth" | captioned "flyer (The Pink Vice)" |
+
+What changed:
+- `layout.py`: `counter_empty` (click, the counter_shelf box) is shown on the booth when the inspect button exists (Day 2+) and `find_documents` finds nothing on the counter. `merge_hybrid` keeps inspect-mode prompt text (`PROMPT_TEXT_RE`) outside the desk/counter areas.
+- `extract.py`: when OCR reads "HIGHLIGHT DISCREPANCIES" (inspect mode on), text lines are no longer absorbed into their paper's panel, so each printed line (a rule, a date) is a box of its own. An entry ticket's lines are always kept. `TEXT_CAPS` gives a paper the caption its own printed words name (entry ticket, The Pink Vice flyer, no-documents notice, citation slip); `describe()` shows that caption with the text.

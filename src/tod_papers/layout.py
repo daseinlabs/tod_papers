@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 from dataclasses import dataclass
 
@@ -98,6 +99,12 @@ LAYOUT: list[Element] = [
     Element("counter_shelf", "region", "counter shelf under the window -- drop documents here (onto the "
             "hand-back slot) to hand them back", "target", (10, 212, 172, 266), "booth"),
     Element("desk", "region", "desk (drop documents here to read them)", "target", (196, 230, 340, 304), "booth"),
+    # the same shelf as a CLICK target while nothing lies on it (pixel test vs the empty reference counter) and the
+    # inspect button exists (Day 2+): in inspect mode the empty counter is clicked after the rule that requires the
+    # missing document (docs/game.md, missing-document interrogation). The TAS clicks inside this box.
+    Element("counter_empty", "object", "counter shelf -- empty (nothing lies on it); in inspect mode click it after a "
+            "rulebook rule to point out a missing document", "click", (10, 212, 172, 266),
+            "booth+inspect_button+counter_empty"),
     # rulebook slot below the counter: an open rulebook dropped here goes back into its slot (run 024712/030xxx:
     # the rulebook lay open over the desk and was only ever moved around on the desk)
     # run 044332 t35-38: drops on the drawer row (106-146, 272-316) did nothing; papers dragged left off the desk
@@ -481,6 +488,7 @@ def extract_static(frame_bgr: np.ndarray, targets: bool = True, informational: b
     pixels. targets=False drops drop-target regions (the loop derives its own);
     informational=True keeps read-only text (clock, date) and 'avoid' items."""
     t0 = time.perf_counter()
+    docs: list[dict] = []
     if ocr is None:
         ocr = os.environ.get("TOD_STATIC_OCR", "0") == "1"
     H, W = frame_bgr.shape[:2]
@@ -493,6 +501,8 @@ def extract_static(frame_bgr: np.ndarray, targets: bool = True, informational: b
         flags["rulebook_in_slot"] = _diff(n, ref, (114, 280, 138, 311)) <= 30
         flags["inspect_button"] = int(_red(_crop(n, BY_NAME["inspect_toggle"].box)).sum()) > 40
         flags["passport_under"] = passport_under(n) if flags["tray_open"] else []
+        docs = find_documents(n, flags["tray_open"])
+        flags["counter_empty"] = not any(d["where"] == "counter" for d in docs)
     out: list[Box] = []
     for e in LAYOUT:
         if not _visible(e.when, screen, flags):
@@ -503,9 +513,7 @@ def extract_static(frame_bgr: np.ndarray, targets: bool = True, informational: b
             continue
         x1, y1, x2, y2 = scale_box(e.box, W, H)
         out.append(LBox(x1, y1, x2, y2, "", e.kind, 1.0, caption=e.desc, name=e.name, affordance=e.affordance))
-    docs = []
     if screen == "booth":
-        docs = find_documents(n, flags["tray_open"])
         for i, d in enumerate(docs):
             key = "desk_under_tray" if d.get("under_tray") else d["where"]
             x1, y1, x2, y2 = scale_box(d["box"], W, H)
@@ -523,6 +531,13 @@ def extract_static(frame_bgr: np.ndarray, targets: bool = True, informational: b
 
 
 _MENU_NAMES = {"story", "day1_tile", "day2_tile", "day3_tile"}
+# inspect-mode text the game prints outside the desk / counter (the bottom-bar "HIGHLIGHT DISCREPANCIES", the
+# interrogate prompt below the counter): vision's OCR box for it is kept wherever it lies on the booth
+PROMPT_TEXT_RE = re.compile(r"INTERROG|HIGHL[I1l]GHT|D[I1l]SCREPAN|NO\s*DOCUMENTS", re.I)
+
+
+def _prompt_text(v: Box) -> bool:
+    return v.kind == "text" and bool(PROMPT_TEXT_RE.search(v.text or ""))
 
 
 def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: float = 0.3,
@@ -571,7 +586,7 @@ def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: flo
             return (COUNTER[0] <= cx <= COUNTER[2] and COUNTER[1] <= cy <= COUNTER[3]
                     and v.w / sx <= 70 and v.h / sy <= 70 and v.w / sx >= 15 and v.h / sy >= 15)
 
-        keep = [v for v in keep if doc_area(v)
+        keep = [v for v in keep if (doc_area(v) or _prompt_text(v))
                 and not inside(v, label) >= 0.6
                 and not (tray and inside(v, bar) >= 0.8)]
     vdocs = [v for v in keep if any(iou(v, d) > 0.1 for d in docs)]
