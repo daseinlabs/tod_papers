@@ -5,6 +5,7 @@ Verified against the live API 2026-10-01:
   Always send a custom UA.
 - Retries: 3 retries with 1/2/4 s backoff on 429/5xx, connection errors, SSL resets and read timeouts.
 - HTTP 402 or an insufficient_credit body raises TodCreditExhausted at once (no retry); loop.py stops on it.
+- Retries exhausted on a network error raise TodUnreachable; loop.py stops after --unreachable-stop in a row.
 - Several questions per request; image goes in the state list as a data URL.
 - Response per question: choice/noul/score + probabilities + confidence.
 """
@@ -103,6 +104,10 @@ RETRY_EXC = (urllib.error.URLError, ConnectionError, TimeoutError, socket.timeou
 BACKOFF_S = (1.0, 2.0, 4.0)
 
 
+class TodUnreachable(RuntimeError):
+    """Network failure that survived all retries (DNS, refused, reset, timeout)."""
+
+
 class TodCreditExhausted(RuntimeError):
     """HTTP 402 / insufficient_credit: no retry will help; the caller must stop (run 20261002_123058 skipped 27 ticks)."""
 
@@ -177,7 +182,7 @@ class TodClient:
                     self._backoff(attempt, f"{type(e).__name__}: {e}")
                     continue
         else:
-            raise RuntimeError(f"TOD unreachable after {self.retries} retries: {type(last).__name__}: {last}")
+            raise TodUnreachable(f"TOD unreachable after {self.retries} retries: {type(last).__name__}: {last}")
         wall = (time.perf_counter() - t0) * 1000
         answers = {}
         for qid, a in data["answers"].items():

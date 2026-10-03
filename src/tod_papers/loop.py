@@ -50,7 +50,7 @@ from .extract import Box
 from . import layout
 from . import manual as man
 from .som import annotate
-from .tod_client import TodClient, TodCreditExhausted, choice, noul
+from .tod_client import TodClient, TodCreditExhausted, TodUnreachable, choice, noul
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -1188,6 +1188,7 @@ def run(args) -> int:
     menu_bounces = 0
     ent = Entrant()
     pick_key, pick_n, refused_n = None, 0, 0   # --pick-stop / --refuse-stop counters
+    unreach_n = 0                               # --unreachable-stop counter (consecutive)
 
     def park_cursor():
         if not args.dry_run and is_foreground(hwnd):
@@ -1252,8 +1253,16 @@ def run(args) -> int:
                 print(f"[tick {tick:03d}] state request failed: {e}; skipping tick")
                 rec.update(tod_error=f"state: {e}", executed="none (state request error)")
                 row.update(action="none", effect="skipped: state request error")
+                unreach_n = unreach_n + 1 if isinstance(e, TodUnreachable) else 0
+                if args.unreachable_stop and unreach_n >= args.unreachable_stop:
+                    stop_reason = "TOD unreachable"
+                    print(f"[loop] STOP: {stop_reason} ({unreach_n} ticks in a row)")
+                    rec["stop_reason"] = stop_reason
+                    row["effect"] = "stop: " + stop_reason
                 with open(os.path.join(run_dir, f"tick_{tick:04d}.json"), "w", encoding="utf-8") as fh:
                     json.dump(rec, fh, indent=1)
+                if stop_reason:
+                    break
                 time.sleep(2.0)
                 continue
             dropped = gate_inspection(state, asked)
@@ -1324,11 +1333,20 @@ def run(args) -> int:
                 print(f"[tick {tick:03d}] TOD request failed: {e}; skipping tick")
                 rec.update(tod_error=str(e), executed="none (TOD error)")
                 row.update(action="none", effect="skipped: TOD error")
+                unreach_n = unreach_n + 1 if isinstance(e, TodUnreachable) else 0
+                if args.unreachable_stop and unreach_n >= args.unreachable_stop:
+                    stop_reason = "TOD unreachable"
+                    print(f"[loop] STOP: {stop_reason} ({unreach_n} ticks in a row)")
+                    rec["stop_reason"] = stop_reason
+                    row["effect"] = "stop: " + stop_reason
                 with open(os.path.join(run_dir, f"tick_{tick:04d}.json"), "w", encoding="utf-8") as fh:
                     json.dump(rec, fh, indent=1)
+                if stop_reason:
+                    break
                 time.sleep(2.0)
                 continue
             rec["tod_ms"] = round((time.perf_counter() - t1) * 1e3, 1)
+            unreach_n = 0
             rec["tod_request_id"] = res.request_id
             res.answers["screen"] = probe["screen"]  # overlay shows it alongside the other answers
 
@@ -1535,6 +1553,8 @@ def main(argv=None, result: dict | None = None) -> int:
                     "for N ticks (0 = off)")
     ap.add_argument("--pick-stop", type=int, default=10, help="stop when the manual step and TOD's pick stay the "
                     "same for N ticks (0 = off)")
+    ap.add_argument("--unreachable-stop", type=int, default=3, help="stop after N consecutive ticks whose TOD "
+                    "request failed with retries exhausted on a network error (0 = off)")
     ap.add_argument("--refuse-stop", type=int, default=5, help="stop after N refused stamp presses (0 = off)")
     args = ap.parse_args(argv)
     if args.frames:
