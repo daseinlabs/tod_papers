@@ -135,6 +135,8 @@ E. The stamp tray is open, the passport lies under a stamp head (the state block
    frame or as "passport read as <COUNTRY> at tick N". If the country is not known yet (the bottom of the
    passport with the country name is not visible), do not stamp: drag the passport to the "desk" target so
    the whole page can be read, then put it under the stamp you need.
+E?. The state block says "The decision is not known yet": the stamps are not offered. Drag the passport
+   to the "desk" target so its data page can be read; it goes under a stamp after that.
 E-. The state block says "the passport is under the wrong stamp": the stamps are not offered this turn (a
    press would mark nothing). Drag the passport onto the landing strip the state block names.
 H. INSPECT MODE (the state block says "Inspect mode is ON": desk darkened, red dotted frame, red text
@@ -164,7 +166,11 @@ while someone is still at the window does nothing.
   passport, e.g. ARSTOTZKA). Issuing country ARSTOTZKA -> APPROVED. Any other country -> DENIED.
   Expiry date and photo are NOT Day 1 rules; do not deny anyone on Day 1 for expiry or photo.
 - Day 2, 1982.11.24 (expiry and photo checks start today): foreigners may enter too. APPROVED if not
-  expired (expiry after 1982.11.24) and the photo matches the person; otherwise DENIED.
+  expired (expiry after 1982.11.24), the photo matches the person and the ISS. (issuing) city belongs to the
+  passport's country; otherwise DENIED. Valid issuing cities (rulebook Regional Map): ARSTOTZKA: Orvech
+  Vonor, East Grestin, Paradizna; ANTEGRIA: St. Marmero, Glorian, Outer Grouse; IMPOR: Enkyo, Haihan,
+  Tsunkeido; KOLECHIA: Yurko City, Vedor, West Grestin; OBRISTAN: Skal, Lorndaz, Mergerous; REPUBLIA: True
+  Glorian, Lesrenadi, Bostan; UNITED FEDERATION: Great Rapid, Shingleton, Korista City.
 - Day 3, 1982.11.25: Arstotzkans need a valid passport only. Foreigners also need an entry ticket dated
   1982.11.25; no ticket or a different date -> DENIED.
 The first entrant of day 1 is the tutorial; follow the same rule (his passport is Arstotzkan -> APPROVED).
@@ -221,7 +227,19 @@ DOC_KINDS = {"passport": "the entrant's passport (a small booklet or its open da
              "entry_ticket": "an entry ticket (small slip with a date)",
              "transcript": "the interview transcript printout",
              "other": "something else, or not a paper"}
-INSPECT_KEYS = ("issuing_country", "expiry_after_today", "photo_matches_person")
+INSPECT_KEYS = ("issuing_country", "expiry_after_today", "photo_matches_person", "issuing_city")
+CHECK_KEYS = ("expiry_after_today", "photo_matches_person", "entry_ticket_dated_today")
+CARRY_CHECK_MARGIN = 0.15   # a yes/no check is carried for the entrant when |p - 0.5| >= this
+ISSUING_CITIES = {   # game rule (rulebook Regional Map): the passport's ISS. city must belong to its country
+    "ARSTOTZKA": ("Orvech Vonor", "East Grestin", "Paradizna"),
+    "ANTEGRIA": ("St. Marmero", "Glorian", "Outer Grouse"),
+    "IMPOR": ("Enkyo", "Haihan", "Tsunkeido"),
+    "KOLECHIA": ("Yurko City", "Vedor", "West Grestin"),
+    "OBRISTAN": ("Skal", "Lorndaz", "Mergerous"),
+    "REPUBLIA": ("True Glorian", "Lesrenadi", "Bostan"),
+    "UNITED FEDERATION": ("Great Rapid", "Shingleton", "Korista City"),
+}
+CITY_TABLE = "; ".join(f"{c}: {', '.join(v)}" for c, v in ISSUING_CITIES.items())
 
 STATE_TEXT = ("A screenshot of the game Papers, Please (border inspection booth). Answer each question only "
               "from what is visible in this picture.")
@@ -300,6 +318,13 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
                             "'Arstotzkan' too -- only the PASSPORT counts.",
             "criteria": {**{c: f"the passport is issued by {c}" for c in COUNTRIES},
                          "unreadable": "no open passport, or its country name cannot be read"}},
+        "issuing_city": {
+            "type": "choice",
+            "instructions": "On the open passport data page: which city is printed after 'ISS.' (the issuing city)? "
+                            "Pick the exact name; a name that is spelled differently from every option is 'other'.",
+            "criteria": {**{c: f"ISS. {c}" for v in ISSUING_CITIES.values() for c in v},
+                         "other": "a city name that is not exactly one of the listed names",
+                         "unreadable": "no open passport data page, or the ISS. line cannot be read"}},
         "expiry_after_today": _noul(
             f"Today is {today}. If an open passport is visible: is its EXP. (expiry) date after today?",
             f"yes - the EXP. date is later than {today}",
@@ -333,6 +358,12 @@ _LABEL = {
     "bulletin_or_rulebook_covering_desk": "A bulletin/rulebook covers the passport",
     "inspect_mode_on": "Inspect mode is ON (desk darkened, red dotted frame, HIGHLIGHT DISCREPANCIES)",
 }
+
+
+_CHECK_LABEL = {"expiry_after_today": "Passport expiry date is after today",
+                "photo_matches_person": "Passport photo matches the person at the window",
+                "issuing_city_valid": "Passport ISS. city belongs to the passport's country",
+                "entry_ticket_dated_today": "An entry ticket dated today is visible"}
 
 
 def doc_question(d: dict) -> dict:
@@ -400,7 +431,7 @@ def known_country(state: dict, facts: dict | None):
     """(value, p, where) of the issuing country: this frame's reading if it was asked, else the most recent
     confident reading carried from earlier ticks of this entrant, else None."""
     c = state.get("issuing_country")
-    if c:
+    if c and c["value"] != "unreadable" and c["p"] >= 0.6:   # weak readings (run 022439 t74: 0.24) do not count
         return c["value"], c["p"], "this frame"
     cc = (facts or {}).get("country_carried")
     if cc:
@@ -408,22 +439,61 @@ def known_country(state: dict, facts: dict | None):
     return None
 
 
+def known_city(state: dict, facts: dict | None):
+    c = state.get("issuing_city")
+    if c and c["value"] != "unreadable" and c["p"] >= 0.6:
+        return c["value"], c["p"], "this frame"
+    cc = (facts or {}).get("city_carried")
+    if cc:
+        return cc["value"], cc["p"], f"tick {cc['tick']}"
+    return None
+
+
+def check_value(state: dict, facts: dict | None, k: str):
+    """True/False for a yes/no inspection check: this frame's answer, else the entrant's carried reading, else None.
+    issuing_city_valid = the rule table (section 5) applied to TOD's city + country readings."""
+    if k == "issuing_city_valid":
+        kc, ci = known_country(state, facts), known_city(state, facts)
+        if not kc or not ci:
+            return None
+        return ci[0] in ISSUING_CITIES.get(kc[0], ())
+    a = state.get(k)
+    if a and abs(a["p"] - 0.5) >= CARRY_CHECK_MARGIN:   # run 022439 t74: expiry p=0.44 is not a 'no'
+        return a["p"] >= 0.5
+    c = ((facts or {}).get("checks_carried") or {}).get(k)
+    return c["value"] if c else None
+
+
 def needed_stamp(state: dict, day: str, facts: dict | None) -> str | None:
-    """'approved'/'denied' per section 5 from TOD's request-1 answers (country read now or carried), or None when
-    it is not decidable yet (country unknown, or Day 3 where the entry ticket also matters)."""
+    """'approved'/'denied' per section 5 from TOD's request-1 answers (read now or carried for this entrant), or
+    None while a check the day needs is still unknown."""
     kc = known_country(state, facts)
     if not kc or kc[0] == "unreadable":
         return None
+    if day not in ("2", "3"):
+        return "approved" if kc[0] == "ARSTOTZKA" else "denied"
+    keys = ["expiry_after_today", "photo_matches_person", "issuing_city_valid"]
     if day == "3" and kc[0] != "ARSTOTZKA":
-        if "entry_ticket_dated_today" not in state:
-            return None
-        if not yes(state, "entry_ticket_dated_today"):
-            return "denied"
-    if day in ("2", "3"):
-        if "expiry_after_today" not in state or "photo_matches_person" not in state:
-            return None   # dropped by the inspection gate this frame: not decidable (never a default DENIED)
-        return "approved" if yes(state, "expiry_after_today") and yes(state, "photo_matches_person") else "denied"
-    return "approved" if kc[0] == "ARSTOTZKA" else "denied"
+        keys.append("entry_ticket_dated_today")
+    vals = [check_value(state, facts, k) for k in keys]
+    if vals[1] is None:
+        # photo answers sit at p 0.5-0.68 on real frames (runs 015649/022439); only a confident 'no' denies
+        vals[1] = True
+    if False in vals:
+        return "denied"
+    if None in vals:
+        return None
+    return "approved"
+
+
+def undecided_stamp(state: dict, day: str, facts: dict | None) -> bool:
+    """Tray open, passport under a stamp head, not stamped, but section 5 cannot be decided yet (manual step E?):
+    loop.prepare leaves the stamps out of the options (run 021438 t43: APPROVED pressed with the country unknown,
+    correct verdict was DENIED)."""
+    facts = facts or {}
+    if not (yes(state, "stamp_tray_open") or facts.get("tray_open_px")) or stamped(state, facts):
+        return False
+    return bool(facts.get("passport_under")) and needed_stamp(state, day, facts) is None
 
 
 def wrong_stamp(state: dict, day: str, facts: dict | None):
@@ -486,14 +556,17 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
                          f"strip under the {need.upper()} stamp")
         if ws:
             lines.append(f"- The passport is under the wrong stamp: drag it onto the {ws[1].upper()} landing strip")
+        elif undecided_stamp(state, day, facts):
+            lines.append("- The decision is not known yet (a check of section 5 could not be read): the stamps are not "
+                         "offered. Drag the passport to the 'desk' target so its data page can be read")
         elif len(pu) == 1:
             other = "approved" if pu[0] == "denied" else "denied"
             lines.append(f"- Click the stamp the passport is lying under ({pu[0].upper()}); if you want "
                          f"{other.upper()} instead, first drag the passport to the strip under the {other.upper()} "
                          f"stamp. Clicking {other.upper()} now would stamp nothing.")
         elif not pu:
-            lines.append("- The passport lies under neither stamp: clicking a stamp now stamps nothing (it will be "
-                         "refused); drag the passport to the landing strip under the stamp you want first")
+            lines.append("- The passport lies under neither stamp: the stamps are not offered (a press would mark "
+                         "nothing); drag the passport to the landing strip under the stamp you want first")
     if facts.get("handed_back") is not None:
         lines.append(f"- Documents were handed back at tick {facts['handed_back']}: this entrant is finished and "
                      "leaves by themselves; call the next person once the window is empty")
@@ -511,6 +584,15 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
             lines.append(f"- Passport expiry date is after today ({today}): {_yn(state, 'expiry_after_today')}")
         if "photo_matches_person" in state:
             lines.append(f"- Passport photo matches the person at the window: {_yn(state, 'photo_matches_person')}")
+    for k, c in ((facts.get("checks_carried") or {}).items() if day in ("2", "3") else ()):
+        if k not in state:
+            lines.append(f"- {_CHECK_LABEL[k]}: {'yes' if c['value'] else 'no'} (read at tick {c['tick']}, p={c['p']:.2f})")
+    ci = known_city(state, facts)
+    if day in ("2", "3") and ci:
+        kc = known_country(state, facts)
+        ok_c = check_value(state, facts, "issuing_city_valid")
+        lines.append(f"- Passport ISS. city: {ci[0]} (p={ci[1]:.2f}, {ci[2]})" + (
+            "" if ok_c is None else f" -- {'a valid' if ok_c else 'NOT a valid'} issuing city of {kc[0]}"))
     if day == "3" and "entry_ticket_dated_today" in state:
         lines.append(f"- An entry ticket dated today ({today}) is visible: {_yn(state, 'entry_ticket_dated_today')}")
     elif open_ok:  # Day 1 (or not yet known): expiry/photo are asked and logged but are not Day 1 rules
@@ -598,8 +680,8 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     if kc and kc[0] == "unreadable":
         kc = None
     ok = bool(kc) and kc[0] == "ARSTOTZKA"   # Day 1: the only rule
-    if day == "2":
-        ok = yes(state, "expiry_after_today") and yes(state, "photo_matches_person")
+    if day in ("2", "3"):
+        ok = needed_stamp(state, day, facts) == "approved"
     if stamped(state, facts):
         sides = [s for _, s in (facts or {}).get("stamp_clicks") or []]
         if sides and sides[-1] == "approved" and kc and not ok:
@@ -613,8 +695,8 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         if wrong and not f.get("passport_under"):
             return "E0", f"drag the {f['strip'][wrong[0]]['doc']} off the {wrong[0].upper()} strip -> desk"
         if f.get("passport_under"):
-            if not kc:
-                return "E?", "country unknown: drag passport -> desk to read it"
+            if not kc or needed_stamp(state, day, facts) is None:
+                return "E?", "decision unknown: drag passport -> desk to read it"
             need = "approved" if ok else "denied"
             pu = (facts or {}).get("passport_under") or []
             if pu and need not in pu:

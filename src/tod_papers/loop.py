@@ -355,9 +355,16 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
     q.update(man.state_questions(today, inspect))
     # TOD takes at most 16 questions per request (run 015649 t41-58: HTTP 422 with 5 doc questions + 14 state)
     docs = (facts or {}).get("docs") or []
-    for k in ("bulletin_or_rulebook_covering_desk",):   # lowest-value state question gives way to 2 paper identities
-        if docs and len(q) + min(2, len(docs)) > TOD_MAX_Q and k in q:
-            del q[k]
+    if (facts or {}).get("tray_open_px") is False:
+        for k in man.STRIP_KEYS:   # no stamp bar on the pixels: nothing can lie under a stamp head
+            q.pop(k, None)
+    # lowest-value state questions give way to 2 paper identities, then a hard cap at TOD's limit
+    for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable"):
+        if len(q) + min(2, len(docs)) > TOD_MAX_Q:
+            q.pop(k, None)
+    for k in ("photo_matches_person", "entry_ticket_dated_today", "inspect_mode_on"):
+        if len(q) > TOD_MAX_Q:
+            q.pop(k, None)
     for i, d in enumerate(docs[:max(0, TOD_MAX_Q - len(q))]):
         q[f"doc{i}"] = man.doc_question(d)
     small = _small_for_send(frame, args)
@@ -413,6 +420,8 @@ def state_line(state: dict) -> str:
             bits.append(f"{ab}={state[k]['p']:.2f}")
     if "issuing_country" in state:
         bits.append(f"iss={state['issuing_country']['value']}:{state['issuing_country']['p']:.2f}")
+    if "issuing_city" in state:
+        bits.append(f"city={state['issuing_city']['value']}:{state['issuing_city']['p']:.2f}")
     if "day" in state:
         bits.append(f"day={state['day']['value']}")
     return " ".join(bits)
@@ -453,7 +462,8 @@ def desk_facts(boxes: list, W: int, H: int, sinfo: dict | None = None) -> dict:
                  if (b.text or "").strip() and x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2]
         docs.append({"where": d["where"], "native": list(d["box"]), "box": [x1, y1, x2, y2],
                      "text": texts[:6], "pos": ex.coarse_pos(Box(x1, y1, x2, y2, "", "panel", 1.0), W, H)})
-    return {"desk_text": lines, "docs": docs[:MAX_DOC_Q]}
+    return {"desk_text": lines, "docs": docs[:MAX_DOC_Q],
+            "tray_open_px": bool(sinfo.get("tray_open")) if "tray_open" in sinfo else None}
 
 
 MAX_DOC_Q = 5   # per-document identity questions in request 1
@@ -879,9 +889,19 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     wrong = man.wrong_stamp(state, day if day in DAY_RULES else "1", facts) if booth else None
     if facts is not None:
         facts["e_minus"] = list(wrong) if wrong else None
-    hide_stamp = (lambda b: _stamp_side(b, frame) is not None) if wrong else (lambda b: False)
-    banned = ((lambda b: stuck.banned(tick, b) is not None or hide_stamp(b)) if stuck is not None
-              else (hide_stamp if wrong else None))
+    undecided = (not wrong and booth and man.undecided_stamp(state, day if day in DAY_RULES else "1", facts))
+    if facts is not None:
+        facts["e_undecided"] = bool(undecided)
+    pu_now = (facts or {}).get("passport_under") or []
+    if wrong or undecided:
+        hide_stamp = lambda b: _stamp_side(b, frame) is not None
+    elif booth and facts is not None and "strip" in facts:
+        # a stamp is offered only when request 1 puts the passport under it -- the same test as the refusal veto
+        # (run 022439 t69-76: 5 refused presses with the passport under neither head)
+        hide_stamp = lambda b: _stamp_side(b, frame) not in (None, *pu_now)
+    else:
+        hide_stamp = lambda b: False
+    banned = ((lambda b: stuck.banned(tick, b) is not None or hide_stamp(b)) if stuck is not None else hide_stamp)
     annotated, idmap = annotate(frame, list(boxes) + regions, max_marks=args.max_marks - 1 + len(regions),
                                 excluded=banned)
     if not booth:  # text/cutscene screens without a button are advanced by clicking the screen itself
@@ -1015,11 +1035,13 @@ class Entrant:
     tray_seen: list = field(default_factory=list)    # [(tick, tray_open)] -- open/close oscillation check
     missed_stamps: list = field(default_factory=list)  # [(tick, side)] stamp pressed, passport under the other head
     hb_drop: int | None = None   # tick of the last document drag onto the person that changed the screen
+    city: dict | None = None                     # {"value", "p", "tick"} issuing city reading (Day 2+)
+    checks: dict = field(default_factory=dict)   # {check key: {"value", "p", "tick"}} confident yes/no readings
     log: list = field(default_factory=list)          # [(tick, why)] every reset (for the run report)
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
-        self.hb_drop, self.missed_stamps = None, []
+        self.hb_drop, self.missed_stamps, self.checks, self.city = None, [], {}, None
         self.tray_seen = []   # run 005956 t18/t21: entrant 2's tray toggles blocked entrant 3's first tray opening
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
@@ -1047,6 +1069,14 @@ class Entrant:
         if (c and c["p"] >= CARRY_COUNTRY_P and c["value"] != "unreadable"
                 and (self.country is None or c["p"] >= self.country["p"] or c["value"] == self.country["value"])):
             self.country = {"value": c["value"], "p": c["p"], "tick": tick}
+        ci = state.get("issuing_city")
+        if (ci and ci["p"] >= CARRY_COUNTRY_P and ci["value"] != "unreadable"
+                and (self.city is None or ci["p"] >= self.city["p"] or ci["value"] == self.city["value"])):
+            self.city = {"value": ci["value"], "p": ci["p"], "tick": tick}
+        for k in man.CHECK_KEYS:   # Day 2/3 checks, carried like the country (the page is hidden once under a stamp)
+            a = state.get(k)
+            if a and abs(a["p"] - 0.5) >= man.CARRY_CHECK_MARGIN:
+                self.checks[k] = {"value": a["p"] >= 0.5, "p": a["p"], "tick": tick}
 
     def after_action(self, tick: int, state: dict, action: str, sb, tb, frame, changed) -> None:
         if not changed or sb is None:
@@ -1084,7 +1114,8 @@ class Entrant:
 
     def facts(self, tick: int, df: dict) -> dict:
         return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
-                "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips()}
+                "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
+                "checks_carried": dict(self.checks), "city_carried": self.city}
 
     def tray_flips(self) -> int:
         """Open<->closed changes of the stamp tray over the last 8 ticks with no stamp click in between.
@@ -1128,20 +1159,21 @@ def offline(args) -> int:
         boxes, vis, sinfo = get_boxes(frame, args.extractor)
         t_ex = (time.perf_counter() - t0) * 1e3
         df = desk_facts(boxes, frame.shape[1], frame.shape[0], sinfo)
-        asked = man.INSPECT_KEYS
-        probe, t_probe = _timed(state_probe, tod, frame, args, "unknown", asked, df)
+        oday = args.day or "unknown"   # offline only: the day the frames come from (live runs read it via request 1)
+        asked = ("issuing_country",) if oday == "1" else man.INSPECT_KEYS
+        probe, t_probe = _timed(state_probe, tod, frame, args, oday, asked, df)
         state = parse_state(probe)
         gate_inspection(state, asked)
         ent = Entrant()
         ent.observe(0, state)
         facts = ent.facts(0, df)
         add_tod_facts(facts, state, df, sinfo)
-        P = prepare(frame, boxes, state, deque(), "unknown", args, facts=facts)
+        P = prepare(frame, boxes, state, deque(), oday, args, facts=facts)
         t1 = time.perf_counter()
         res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
         t_tod = (time.perf_counter() - t1) * 1e3
         D = decide(res, P)
-        step = man.situation(state, "1", facts)
+        step = man.situation(state, oday if oday in DAY_RULES else "1", facts)
         r = {
             "frame": path, "extractor": args.extractor, "passport_under": facts.get("passport_under"),
             "n_boxes_raw": len(boxes), "n_sources": len(P["src_ids"]), "n_targets": len(P["tgt_ids"]),
@@ -1323,7 +1355,7 @@ def run(args) -> int:
             rec["e_minus"] = facts.get("e_minus")
             rec["docs_named"] = [{k: d[k] for k in ("where", "id", "p", "text")} for d in facts["docs_named"]]
             rec["strip"] = facts["strip"]
-            rec["entrant"] = {"country": ent.country, "stamp_clicks": list(ent.stamp_clicks),
+            rec["entrant"] = {"country": ent.country, "city": ent.city, "checks": dict(ent.checks), "stamp_clicks": list(ent.stamp_clicks),
                               "missed_stamps": list(ent.missed_stamps), "handed_back": ent.handed_back}
             step = man.situation(state, day if day in DAY_RULES else "1", facts)
             sline = state_line(state)
@@ -1595,6 +1627,7 @@ def main(argv=None, result: dict | None = None) -> int:
     ap.add_argument("--history", type=int, default=30, help="past actions listed in the request-2 text")
     ap.add_argument("--frames", nargs="+", help="offline: run on saved frames (no game window, no input)")
     ap.add_argument("--out", default=None, help="offline: output directory")
+    ap.add_argument("--day", choices=("1", "2", "3"), default=None, help="offline only: day the saved frames are from")
     ap.add_argument("--send-width", type=int, default=1140, help="downscale annotated frame to this width for TOD (0=full)")
     ap.add_argument("--settle", type=float, default=0.12, help="seconds between hover/down/up so Unity sees separate frames")
     ap.add_argument("--post-wait", type=float, default=0.8, help="seconds after input before verify grab")
