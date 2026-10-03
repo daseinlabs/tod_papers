@@ -273,6 +273,54 @@ def screen_of(n: np.ndarray) -> tuple[str, dict]:
     return ("button_screen" if flags else "other"), flags
 
 
+TILE_BAND = (0, 36, NATIVE_W, 112)     # day-select: the row of day tiles (labels + their click boxes), native
+DAY_LABEL_RE = re.compile(r"^\s*D\s*[A4]\s*[YVy]?\s*(\d{1,2})?\s*$", re.I)
+
+
+def day_tiles(n: np.ndarray) -> list[dict]:
+    """Day-select screen: every drawn day tile, read by OCR (loop14). Each "DAY" label the detector finds in the
+    tile band is one tile; its number is recognised from the small digit drawn under the label (the full-band
+    detector misses it: run 182022 raw_0002 read 'DAy' only); the text inside the click box below the label
+    ('NEW', ...) is read too. The click box is the tile body under the label (the label itself takes no click,
+    run 20261002_110614). Returns [{'day': int | None, 'text': str, 'box': native box}], left to right."""
+    from . import extract as ex
+    x0, y0, x1, y1 = TILE_BAND
+    band = np.ascontiguousarray(n[y0:y1, x0:x1])
+    try:
+        lines = ex._ocr_boxes(band, 1)
+    except Exception:
+        return []
+    eng = ex._ocr3_en or ex._get_ocr3()
+    labels = [b for b in lines if DAY_LABEL_RE.match(b.text or "")]
+    out = []
+    for lb in labels:
+        lx1, ly1, lx2, ly2 = lb.x1 + x0, lb.y1 + y0, lb.x2 + x0, lb.y2 + y0
+        cx = (lx1 + lx2) // 2
+        m = DAY_LABEL_RE.match(lb.text)
+        num = m.group(1) if m and m.group(1) else None
+        if num is None and eng is not None:
+            # the day number under the label
+            dc = n[ly2 - 1:ly2 + 15, max(0, lx1 - 6):lx2 + 6]
+            if dc.size:
+                up = cv2.copyMakeBorder(cv2.resize(dc, None, fx=4, fy=4, interpolation=cv2.INTER_NEAREST),
+                                        8, 8, 8, 8, cv2.BORDER_CONSTANT, value=0)
+                try:
+                    r = eng.recognize_txt([up])
+                    d = re.sub(r"\D", "", r.txts[0] if r.txts else "")
+                    num = d[:2] or None
+                except Exception:
+                    num = None
+        box = (max(0, cx - 34), ly2 + 16, min(NATIVE_W, cx + 34), min(NATIVE_H, ly2 + 46))
+        inner = " ".join(b.text for b in lines
+                         if b is not lb and box[0] <= (b.x1 + b.x2) / 2 + x0 <= box[2]
+                         and box[1] <= (b.y1 + b.y2) / 2 + y0 <= box[3] and b.text)
+        txt = f"DAY {num}" if num else "DAY ?"
+        out.append({"day": int(num) if num else None, "text": (txt + (" " + inner if inner else "")).strip(),
+                    "box": box})
+    out.sort(key=lambda t: t["box"][0])
+    return out
+
+
 def _red(c: np.ndarray) -> np.ndarray:
     c = c.astype(np.int16)
     b, g, r = c[..., 0], c[..., 1], c[..., 2]
@@ -805,6 +853,17 @@ def extract_static(frame_bgr: np.ndarray, targets: bool = True, informational: b
             continue
         x1, y1, x2, y2 = scale_box(e.box, W, H)
         out.append(LBox(x1, y1, x2, y2, "", e.kind, 1.0, caption=e.desc, name=e.name, affordance=e.affordance))
+    if screen == "day_select":
+        # loop14: every drawn day tile from OCR, with its text, replaces the fixed day1..3 boxes (loop13: only
+        # DAY 1 was ever offered; the fixed tile2/3 boxes were guesses without captions)
+        tiles = day_tiles(n)
+        flags["day_tiles"] = [t["text"] for t in tiles]
+        if tiles:
+            out = [b for b in out if not getattr(b, "name", "").startswith("day") or not b.name.endswith("_tile")]
+            for i, t in enumerate(tiles):
+                x1, y1, x2, y2 = scale_box(t["box"], W, H)
+                out.append(LBox(x1, y1, x2, y2, t["text"], "object", 1.0, caption="day tile",
+                                name=f"day_tile_{t['day'] or i}", affordance="click"))
     if screen == "booth":
         for i, d in enumerate(docs):
             key = "desk_under_tray" if d.get("under_tray") else d["where"]
@@ -857,7 +916,8 @@ def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: flo
     # APPROVED/DENIED text on a stamp body, the horn) is the same control: keep only the static one
     keep = [v for v in vision_boxes if all(iou(v, f) < iou_drop for f in fixed)
             and all(inside(v, f) < 0.6 for f in objs)]
-    if screen in ("title", "day_select") or any(getattr(f, "name", "") in _MENU_NAMES for f in fixed):
+    if screen in ("title", "day_select") or any(getattr(f, "name", "") in _MENU_NAMES
+                                                or getattr(f, "name", "").startswith("day_tile_") for f in fixed):
         # title / day-select: the static layout has every control; vision's boxes there (icon captions on the
         # black screen, the BACK text the layout deliberately does not offer) are dropped
         keep = []

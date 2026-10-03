@@ -137,7 +137,9 @@ D2. RECOVERY: the entrant's passport is no longer visible anywhere on the desk o
    desk" target). The hidden passport
    reappears; then continue with C.
 K. DESK CLUTTER: the state block names an M.O.A. CITATION slip or a flyer (the pink "The Pink Vice" card) lying in
-   the working area -- on a stamp landing strip, under the open stamp tray bar, or on the passport. Neither is the
+   the working area -- on a stamp landing strip, under the open stamp tray bar, or on the passport -- or an entry
+   ticket LEFT BEHIND by an entrant who has already gone (nobody at the window: it can no longer be handed back,
+   so it is stowed like a slip, never dragged onto the window). None is the
    entrant's document to check: never stamp it, never hand a citation to the entrant, never hand a flyer back
    instead of the passport. Order: (1) the state block says it lies UNDER THE OPEN STAMP TRAY BAR: close the tray
    first (drag the tray tab, left end of the open stamp bar, onto the "right edge of the desk" target);
@@ -170,10 +172,12 @@ H. INSPECT MODE (the state block says "Inspect mode is ON": desk darkened, red d
 F. The passport IS STAMPED. Any ONE of these lines in the state block is enough:
    (1) "A passport shows a stamp mark: yes";
    (2) "A stamp was clicked at tick N and the screen changed: the passport is stamped".
-   Then STOP clicking stamps: drag the stamped passport onto the person at the window ("the entrant at the
-   booth window -- drop documents ON THE PERSON to hand them back") to hand it back. The person takes it and
-   leaves on their own. Hand back every document the entrant gave you. The open stamp tray does not have to
-   be closed first; drag the passport by the part that is visible.
+   Then STOP clicking stamps and hand the papers back by dragging them onto the person at the window ("the
+   entrant at the booth window -- drop documents ON THE PERSON to hand them back"). ORDER: the entrant leaves
+   the moment the PASSPORT is back, and any paper still on the desk is left behind. So FIRST drag every OTHER
+   paper of the entrant's (the entry ticket from Day 3) onto the person, one per turn; the stamped PASSPORT goes
+   back LAST. While the state block names an entry ticket on the desk or the counter shelf, hand that back, not
+   the passport. The open stamp tray does not have to be closed first; drag a paper by the part that is visible.
 F2. WRONG STAMP: the state block says which stamp was clicked. If the passport was stamped APPROVED but the
    rule (section 5) says DENIED, click DENIED once more -- a DENIED stamp overrules APPROVED -- then hand it
    back. If it was stamped DENIED but should have been APPROVED, it cannot be fixed (DENIED always wins and
@@ -193,7 +197,9 @@ N. NO DOCUMENTS: the state block says "The person at the window has handed over 
    N5. "An INTERROGATE prompt is visible: yes": click it. The entrant answers and leaves on their own (or
        hands over a passport -- then continue with B). Then go back to A.
 G2. The state block says the entrant is STILL at the window waiting for the rest of their documents: drag
-   each paper of theirs still on the desk or the counter shelf (entry ticket ...) onto the entrant.
+   each paper of theirs still on the desk or the counter shelf (entry ticket ...) onto the entrant. If nobody
+   is at the window any more, the entrant has gone: a paper of theirs still lying there is left behind and is
+   stowed (step K), not handed back.
 G. After the documents were handed back (the state block says so) the person leaves by themselves; wait
    while they walk away. When the window is empty and nothing is on the counter: go back to A and click the
    loudspeaker to call the next person.
@@ -915,6 +921,11 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
                          + ("" if yes(state, "document_open_on_desk") else
                             "; if no open passport is visible on the desk (it may be hidden under the open stamp "
                             "tray), first drag the stamp tray tab right to put the tray away"))
+        elif stamped(state, facts) and ticket_to_return(state, facts):
+            lines.append("- The passport is already stamped: do not press a stamp again. The entrant's ENTRY TICKET "
+                         "still lies on the " + ticket_to_return(state, facts) + ": hand it back FIRST (drag the "
+                         "ticket onto the entrant at the window); the passport goes back LAST, because the entrant "
+                         "leaves as soon as the passport is returned (step F)")
         elif stamped(state, facts):
             lines.append("- The passport is already stamped: do not press a stamp again; hand the passport back "
                          "(drag it onto the entrant at the window)")
@@ -1078,6 +1089,10 @@ CLUTTER_NAMES = {"citation": "an M.O.A. CITATION slip", "flyer": "a flyer (The P
 
 def clutter_phrase(c: dict, tray_open: bool) -> str:
     """State-block tail for a citation slip / flyer (loop.clutter_facts: where it lies, whether it is in the way)."""
+    if c.get("left_behind"):
+        return (" -- LEFT BEHIND: its entrant has already left (nobody is at the window), so it cannot be handed "
+                "back any more. It is desk clutter now: drag it onto the 'counter shelf left of the desk' target "
+                "(step K), never onto the window")
     who = (" -- the inspector's CITATION slip, NOT the entrant's document: never stamp it, never hand it to the entrant"
            if c["id"] == "citation" else
            " -- the entrant's FLYER, not a document to check: never stamp it, never hand it back instead of the passport")
@@ -1102,6 +1117,17 @@ def clutter_step(state: dict, f: dict):
     if under and tray:
         return "K1", f"close the tray (tab -> right edge) to uncover the {under[0]['id']}"
     return "K", f"drag the {cl[0]['id']} -> counter shelf left of the desk"
+
+
+def ticket_to_return(state: dict, facts: dict | None) -> str | None:
+    """Step F order (loop14): where ('desk' / 'counter shelf') an entry ticket TOD named lies while the person is
+    still at the window -- it goes back before the passport. None when there is none."""
+    if not yes(state, "person_at_window"):
+        return None
+    for d in (facts or {}).get("docs_named") or []:
+        if d["id"] == "entry_ticket" and d["p"] >= 0.5:
+            return "counter shelf" if d["where"] == "counter" else "desk"
+    return None
 
 
 def no_passport(state: dict, facts: dict | None = None) -> bool:
@@ -1148,6 +1174,8 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
             [(facts or {})["mark_side"]["value"]] if (facts or {}).get("mark_side") else [])
         if sides and sides[-1] == "approved" and kc and not ok:
             return "F2", "click DENIED (overrules APPROVED)"
+        if ticket_to_return(state, facts):
+            return "F0", "drag the entry ticket -> entrant (before the passport)"
         return "F", "drag stamped passport -> entrant (hand back)"
     if yes(state, "bulletin_or_rulebook_covering_desk") and yes(state, "document_open_on_desk"):
         return "6", "drag bulletin/rulebook -> desk (aside)"

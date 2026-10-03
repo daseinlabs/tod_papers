@@ -1127,6 +1127,7 @@ def describe(box: Box, W: int | None = None, H: int | None = None) -> str:
     if box.text and box.kind != "page_corner":
         t = box.text if len(box.text) <= 60 else box.text[:57] + "..."
         d = (f"{box.kind} — {box.caption}: '{t}'" if box.caption in DOC_CAPS or box.caption in _TEXT_CAP_SET
+             or box.caption == "day tile"
              else f"{box.kind} — '{t}'")
     else:
         d = f"{box.kind} — {box.caption or 'unlabelled graphic'}"

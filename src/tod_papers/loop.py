@@ -607,6 +607,14 @@ def add_tod_facts(facts: dict, state: dict, df: dict, sinfo: dict | None) -> Non
     facts["passport_under"] = passport_sides(facts["strip"])
     facts["tray_open_px"] = bool((sinfo or {}).get("tray_open"))
     facts["clutter"] = clutter_facts(facts["docs_named"], facts["tray_open_px"])
+    if not man.yes(state, "person_at_window") and not man.yes(state, "document_open_on_desk"):
+        # loop14: the entrant leaves as soon as the passport is back; an entry ticket still on the desk then is
+        # left behind (TOD: nobody at the window) -> desk clutter, manual step K (stow), never a hand-back
+        for d in facts["docs_named"]:
+            if d["id"] == "entry_ticket" and d["p"] >= CLUTTER_P and d["where"] == "desk" and d.get("native"):
+                facts["clutter"].append({"id": "entry_ticket", "p": d["p"], "native": d["native"], "where": "desk",
+                                         "strips": [], "under_bar": False, "on_passport": False, "in_way": True,
+                                         "left_behind": True})
 
 
 CLUTTER_IDS = ("citation", "flyer")   # papers that are never stamped / checked (manual step K)
