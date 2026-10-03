@@ -991,6 +991,7 @@ def encode_image(img: np.ndarray, fmt: str = "png", quality: int = 90) -> str:
     return f"data:{mime};base64," + base64.b64encode(buf.tobytes()).decode()
 
 
+CITATION_RE = re.compile(r"CITATION|WARNING|PENALTY|ISSUED|Protocol|Violat|M\.?[O0]\.?[AR]\.", re.I)
 LAST_DAY_FILE = os.path.join(ROOT, "runs", "LAST_DAY.json")   # the day TOD last read, for a restart within the hour
 PAUSE_MIN_FRAC = 0.05     # changed fraction (vs the grabbed frame) that counts as "pause menu on screen"
 STAMP_REOFFER_TICKS = 6   # ticks after a recorded stamp press during which the stamps are not offered again
@@ -1046,6 +1047,19 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         ix1, iy1, ix2, iy2 = layout.scale_box(layout.BY_NAME["inspect_toggle"].box, W, H)
         boxes = [b for b in boxes if getattr(b, "name", "") == "inspect_toggle"
                  or not (ix1 <= b.center[0] <= ix2 and iy1 <= b.center[1] <= iy2)]
+    if booth:
+        # M.O.A. citation slips pile up on the desk after mistakes and are never needed on Days 1-3 (run 104848
+        # t329-342: 14 ticks of citation shuffling with the next passport waiting on the counter): not offered
+        cits = [d["box"] for d in (facts or {}).get("docs_named") or [] if d["id"] == "citation" and d["p"] >= 0.5]
+        if cits:   # only the slip itself (its panel and its own text lines), never a paper lying under/over it
+            def _cit(b) -> bool:
+                if getattr(b, "name", "") in layout.BY_NAME:
+                    return False
+                if b.text and CITATION_RE.search(b.text):
+                    return True
+                return b.kind == "panel" and any(_iou(b, Box(x1, y1, x2, y2, "", "", 0.0, None)) >= 0.6
+                                                 for x1, y1, x2, y2 in cits)
+            boxes = [b for b in boxes if not _cit(b)]
     handle = derive_tray_handle(boxes, frame, state) if booth else None
     if handle is not None:
         boxes = list(boxes) + [handle]
