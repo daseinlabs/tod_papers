@@ -27,6 +27,9 @@ from __future__ import annotations
 # days (docs/game.md section 5)
 # --------------------------------------------------------------------------
 
+TRAY_FLIP_LIMIT = 3   # open<->closed toggles without a stamp before the loop warns / skips the tray tab
+                      # (C open + D2 close + reopen = 2 is legitimate; run 005956 t12-16 ping-ponged 4x)
+
 DAY_DATES = {"1": "1982.11.23", "2": "1982.11.24", "3": "1982.11.25"}
 
 DAY_RULES = {
@@ -132,6 +135,8 @@ E. The stamp tray is open, the passport lies under a stamp head (the state block
    frame or as "passport read as <COUNTRY> at tick N". If the country is not known yet (the bottom of the
    passport with the country name is not visible), do not stamp: drag the passport to the "desk" target so
    the whole page can be read, then put it under the stamp you need.
+E-. The state block says "the passport is under the wrong stamp": the stamps are not offered this turn (a
+   press would mark nothing). Drag the passport onto the landing strip the state block names.
 F. The passport IS STAMPED. Any ONE of these lines in the state block is enough:
    (1) "A passport shows a stamp mark: yes";
    (2) "A stamp was clicked at tick N and the screen changed: the passport is stamped".
@@ -387,6 +392,31 @@ def known_country(state: dict, facts: dict | None):
     return None
 
 
+def needed_stamp(state: dict, day: str, facts: dict | None) -> str | None:
+    """'approved'/'denied' per section 5 from TOD's request-1 answers (country read now or carried), or None when
+    it is not decidable yet (country unknown, or Day 3 where the entry ticket also matters)."""
+    kc = known_country(state, facts)
+    if not kc or kc[0] == "unreadable" or day == "3":
+        return None
+    if day == "2":
+        return "approved" if yes(state, "expiry_after_today") and yes(state, "photo_matches_person") else "denied"
+    return "approved" if kc[0] == "ARSTOTZKA" else "denied"
+
+
+def wrong_stamp(state: dict, day: str, facts: dict | None):
+    """(side the passport lies under, side it needs) when the tray is open, request 1 puts the passport under
+    exactly one stamp head, the passport is not stamped yet and section 5 needs the OTHER stamp (manual step E-);
+    else None. loop.prepare then leaves the stamps out of the options: a press there is refused anyway."""
+    facts = facts or {}
+    if not (yes(state, "stamp_tray_open") or facts.get("tray_open_px")) or stamped(state, facts):
+        return None
+    pu = facts.get("passport_under") or []
+    need = needed_stamp(state, day, facts)
+    if len(pu) == 1 and need and need != pu[0]:
+        return pu[0], need
+    return None
+
+
 def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     facts = facts or {}
     today = DAY_DATES.get(day, DAY_DATES["1"])
@@ -408,7 +438,7 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     for t, side in facts.get("missed_stamps") or []:
         lines.append(f"- The {side.upper()} stamp was clicked at tick {t} while the passport lay under the other "
                      "stamp: nothing was stamped")
-    if (facts.get("tray_flips") or 0) >= 4:
+    if (facts.get("tray_flips") or 0) >= TRAY_FLIP_LIMIT:
         lines.append(f"- LOOP WARNING: the stamp tray was opened and closed {facts['tray_flips']} times in the last "
                      "8 ticks without a stamp. Toggling it again achieves nothing: leave the tray as it is and move a "
                      "DOCUMENT instead (the passport onto a stamp landing strip, or a visa/other paper back to the desk)")
@@ -425,7 +455,15 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
             lines.append(f"- A paper that is NOT the passport lies under the {' and '.join(w.upper() for w in wrong)} "
                          "stamp: stamping it is useless (the stamp press will be refused). Drag that paper off the "
                          "strip to the 'desk' target, then drag the PASSPORT to the strip under the stamp you need")
-        if len(pu) == 1:
+        ws = wrong_stamp(state, day, facts)
+        need = needed_stamp(state, day, facts)
+        if need and not stamped(state, facts):
+            kc = known_country(state, facts)
+            lines.append(f"- Issuing country {kc[0]} -> {need.upper()} (section 5): the passport belongs in the landing "
+                         f"strip under the {need.upper()} stamp")
+        if ws:
+            lines.append(f"- The passport is under the wrong stamp: drag it onto the {ws[1].upper()} landing strip")
+        elif len(pu) == 1:
             other = "approved" if pu[0] == "denied" else "denied"
             lines.append(f"- Click the stamp the passport is lying under ({pu[0].upper()}); if you want "
                          f"{other.upper()} instead, first drag the passport to the strip under the {other.upper()} "
@@ -557,7 +595,7 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
             return "E", "click " + need.upper()
         if yes(state, "document_open_on_desk"):
             return "D", "drag passport -> stamp landing strip"
-        if (yes(state, "person_at_window") and (facts or {}).get("tray_flips", 0) < 4
+        if (yes(state, "person_at_window") and (facts or {}).get("tray_flips", 0) < TRAY_FLIP_LIMIT
                 and not yes(state, "document_on_counter_shelf")):
             return "D2", "drag tray tab -> right edge (close tray, reveal hidden passport)"
     if yes(state, "document_on_counter_shelf") and not yes(state, "document_open_on_desk"):

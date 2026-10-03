@@ -287,6 +287,16 @@ class StuckTracker:
             f.banned_until = tick + 1 + self.ban_ticks
         return f
 
+    def ban(self, tick: int, action: str, b: Box, desc: str, count: int) -> "_Fail":
+        """Exclude an element now (repeat-drag rule: it 'changed' pixels but not the state)."""
+        f = self._find(action, b)
+        if f is None:
+            f = _Fail(action, b, desc)
+            self.fails.append(f)
+        f.box, f.desc, f.last_tick, f.count = b, desc, tick, max(f.count, count)
+        f.banned_until = tick + 1 + self.ban_ticks
+        return f
+
     def decay(self, tick: int) -> None:
         keep = []
         for f in self.fails:
@@ -850,7 +860,14 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     handle = derive_tray_handle(boxes, frame, state) if booth else None
     if handle is not None:
         boxes = list(boxes) + [handle]
-    banned = (lambda b: stuck.banned(tick, b) is not None) if stuck is not None else None
+    # step E- (passport under the WRONG stamp for the carried country): the stamps are not valid sources this tick
+    # (a press would be refused, run 005956 t33-35); they stay drawn, struck through, like an excluded element
+    wrong = man.wrong_stamp(state, day if day in DAY_RULES else "1", facts) if booth else None
+    if facts is not None:
+        facts["e_minus"] = list(wrong) if wrong else None
+    hide_stamp = (lambda b: _stamp_side(b, frame) is not None) if wrong else (lambda b: False)
+    banned = ((lambda b: stuck.banned(tick, b) is not None or hide_stamp(b)) if stuck is not None
+              else (hide_stamp if wrong else None))
     annotated, idmap = annotate(frame, list(boxes) + regions, max_marks=args.max_marks - 1 + len(regions),
                                 excluded=banned)
     if not booth:  # text/cutscene screens without a button are advanced by clicking the screen itself
@@ -879,7 +896,8 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
             ban_lines.append(f"{verb} '{short(f.desc, 60)}' did nothing (tried {f.count}x); excluded for "
                              f"{f.banned_until - tick} more tick(s)")
     # regions are drop targets only; the background is a click source only
-    src_ids = {k: v for k, v in desc.items() if k not in banned_ids and idmap[int(k)].kind != "region"}
+    src_ids = {k: v for k, v in desc.items() if k not in banned_ids and idmap[int(k)].kind != "region"
+               and not hide_stamp(idmap[int(k)])}
     tgt_ids = {k: v for k, v in desc.items() if idmap[int(k)].kind != "background"} or dict(desc)
     if booth:   # in the booth every drag ends on a drop-target region (manual section 3); nothing else is a target
         tgt_ids = {k: v for k, v in tgt_ids.items() if idmap[int(k)].kind == "region"} or tgt_ids
@@ -896,7 +914,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     return dict(annotated=annotated, idmap=idmap, desc=desc, banned_ids=banned_ids, doc_ids=doc_ids, src_ids=src_ids,
                 tgt_ids=tgt_ids, regions=region_info, booth=booth, questions=questions, state_text=state_text,
                 image_url=url, image_kb=round(len(url) * 3 / 4 / 1024, 1),
-                tray_flips=(facts or {}).get("tray_flips", 0),
+                tray_flips=(facts or {}).get("tray_flips", 0), e_minus=wrong,
                 prep_ms=round((time.perf_counter() - t0) * 1e3, 1))
 
 
@@ -914,7 +932,8 @@ def _clean_state(state: dict) -> dict:
             for k, v in state.items()}
 
 
-TRAY_FLIP_LIMIT = 4
+TRAY_FLIP_LIMIT = man.TRAY_FLIP_LIMIT
+REPEAT_DRAG_N = 4   # same drag source + same target, state summary unchanged, N ticks running -> exclude the source
 HORN_HIDE_P = 0.7
 HANDBACK_STAY = 4   # ticks a person may stay at the window after a hand-back before it is discounted
 REPEAT_WINDOW, REPEAT_STOP = 12, 10   # same executed input 10 of the last 12 ticks -> stall stop (run 114927)    # person_at_window P(yes) above which the horn is not offered
@@ -936,8 +955,12 @@ def decide(res, P: dict) -> dict:
         # run 094930/101021: TOD toggled the tray open/closed for 48 ticks; the warning in the state block did
         # not stop it. Take TOD's best other drag-able element (the documents) instead of the tab.
         ps = res["source"].probabilities
-        alt = [k for k in sorted(P["src_ids"], key=lambda k: -float(ps.get(k, 0)))
-               if not _is_tray_tab(P["idmap"].get(int(k))) and _cls(P["idmap"].get(int(k)), P["booth"]) == "drag"]
+        docs = P.get("doc_ids", ())
+        # papers TOD named first (run 005956 t18: the fallback re-pick was the bulletin-storage drawer, which then
+        # looped 14 ticks), then any other drag-able element
+        alt = [k for k in sorted(P["src_ids"], key=lambda k: (int(k) not in docs, -float(ps.get(k, 0))))
+               if not _is_tray_tab(P["idmap"].get(int(k)))
+               and _cls(P["idmap"].get(int(k)), P["booth"], int(k) in docs) == "drag"]
         if alt:
             note = (note + "; " if note else "") + (f"tray toggled {P['tray_flips']}x without a stamp -> "
                                                     f"tab #{src} skipped, re-picked #{alt[0]}")
@@ -983,6 +1006,7 @@ class Entrant:
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
         self.hb_drop, self.missed_stamps = None, []
+        self.tray_seen = []   # run 005956 t18/t21: entrant 2's tray toggles blocked entrant 3's first tray opening
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
 
@@ -1187,7 +1211,9 @@ def run(args) -> int:
     recent_inputs: deque = deque(maxlen=REPEAT_WINDOW)
     menu_bounces = 0
     ent = Entrant()
-    pick_key, pick_n, refused_n = None, 0, 0   # --pick-stop / --refuse-stop counters
+    pick_key, pick_n, refused_n = None, 0, 0   # --pick-stop / --refuse-stop counters (per entrant)
+    drag_key, drag_n = None, 0                  # repeat-drag rule (REPEAT_DRAG_N)
+    n_resets = 0                                # len(ent.log) last seen -> entrant-scoped counters reset
     unreach_n = 0                               # --unreachable-stop counter (consecutive)
 
     def park_cursor():
@@ -1273,8 +1299,12 @@ def run(args) -> int:
             if dv.get("value") in DAY_RULES and dv.get("p", 0) >= 0.5:
                 day = dv["value"]
             ent.observe(tick, state)
+            if len(ent.log) != n_resets:   # new entrant: stall / pick / refusal counters are entrant-scoped
+                n_resets = len(ent.log)
+                refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0
             facts = ent.facts(tick, df)
             add_tod_facts(facts, state, df, sinfo)
+            rec["e_minus"] = facts.get("e_minus")
             rec["docs_named"] = [{k: d[k] for k in ("where", "id", "p", "text")} for d in facts["docs_named"]]
             rec["strip"] = facts["strip"]
             rec["entrant"] = {"country": ent.country, "stamp_clicks": list(ent.stamp_clicks),
@@ -1430,7 +1460,12 @@ def run(args) -> int:
                 g = changed_frac(m)
                 ls = changed_frac(m, sb) if sb.kind != "background" else 0.0
                 lt = changed_frac(m, tb) if (action == "drag" and tb is not None) else 0.0
-                changed = g > args.diff_global or ls > args.diff_local or lt > args.diff_local
+                if action == "drag":
+                    # a drag only counts when the source or the drop target changed (run 005956 t23-30: the
+                    # bulletin-storage drag moved nothing, src/tgt 0.000, but yard motion gave global 0.010)
+                    changed = ls > args.diff_local or lt > args.diff_local
+                else:
+                    changed = g > args.diff_global or ls > args.diff_local or lt > args.diff_local
                 rec.update(post_diff_global=round(g, 5), post_diff_src=round(ls, 4), post_diff_tgt=round(lt, 4),
                            post_hash=frame_hash(after))
                 print(f"           executed: {executed}; changed px global {g:.4f} src {ls:.3f}"
@@ -1462,6 +1497,18 @@ def run(args) -> int:
             else:
                 history.append(f"t{tick} | {ssum} | wait | - | -")
             last_state = state
+            if action == "drag" and sb is not None and tb is not None and not veto and executed.startswith("drag"):
+                dk = (src_desc, tb.caption or desc.get(tgt, ""), ssum)
+                same = (drag_key is not None and dk[1:] == drag_key[1:3] and _same_element(drag_key[3], sb))
+                drag_key, drag_n = dk + (sb,), (drag_n + 1 if same else 1)
+                if drag_n >= REPEAT_DRAG_N:
+                    f = stuck.ban(tick, "drag", sb, src_desc, drag_n)
+                    print(f"           repeat drag: '{short(src_desc, 50)}' -> same target {drag_n}x, state unchanged "
+                          f"-> excluded for {args.ban_ticks} ticks")
+                    rec["repeat_drag_ban"] = {"src": src_desc, "n": drag_n}
+                    drag_key, drag_n = None, 0
+            else:
+                drag_key, drag_n = None, 0
             recent_inputs.append(executed.split(";")[0] if not veto else "veto")
             if len(recent_inputs) >= REPEAT_WINDOW:
                 top_in = max(set(recent_inputs), key=list(recent_inputs).count)
@@ -1473,13 +1520,17 @@ def run(args) -> int:
             pick_key, pick_n = pk, (pick_n + 1 if pk == pick_key else 1)
             if args.pick_stop and pick_n >= args.pick_stop:
                 stop_reason = f"stalled: manual step {pk[0]} + TOD pick {pk[1]} '{pk[2]}' {pick_n} ticks running"
-            if veto and veto.startswith("refused"):
+            if veto and veto.startswith("refused") and D["tod_pick"][1] == src:
+                # counted only when TOD itself picked that stamp (run 005956 t4: a convention re-pick landed on it)
                 refused_n += 1
                 if args.refuse_stop and refused_n >= args.refuse_stop:
                     stop_reason = f"stalled: stamp press refused {refused_n} times"
             ent.last_under = facts.get("passport_under") or []
             rec["passport_under"] = ent.last_under
             ent.after_action(tick, state, action, sb, tb, frame, changed)
+            if len(ent.log) != n_resets:
+                n_resets = len(ent.log)
+                refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0
 
             # ---- log -----------------------------------------------------------------
             stem = os.path.join(run_dir, f"tick_{tick:04d}")
