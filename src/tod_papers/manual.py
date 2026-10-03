@@ -229,7 +229,8 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
 7. OTHER SCREENS
 - Main menu (title screen): click STORY.
 - Day-select screen ("Select day to continue or start a new game"): a row of day tiles near the top left.
-  At the start the only tile is DAY 1 / NEW -- click it (it is a tile, not a button). Never click BACK,
+  The goal is the LATEST day available: click the tile with the highest DAY number (on a fresh save the only
+  tile is DAY 1 / NEW). It is a tile, not a button. Never click BACK,
   QUIT, or the trash/delete icon on this screen: BACK returns to the main menu and undoes progress, the
   trash icon deletes the save. If no day tile is drawn yet, choose wait.
 - After the day tile, the intro, newspaper and bulletin screens advance with NEXT, then WALK TO WORK takes
