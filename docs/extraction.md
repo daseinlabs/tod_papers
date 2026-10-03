@@ -411,3 +411,62 @@ The no-documents procedure (docs/game.md, "Missing-document interrogation") need
 What changed:
 - `layout.py`: `counter_empty` (click, the counter_shelf box) is shown on the booth when the inspect button exists (Day 2+) and `find_documents` finds nothing on the counter. `merge_hybrid` keeps inspect-mode prompt text (`PROMPT_TEXT_RE`) outside the desk/counter areas.
 - `extract.py`: when OCR reads "HIGHLIGHT DISCREPANCIES" (inspect mode on), text lines are no longer absorbed into their paper's panel, so each printed line (a rule, a date) is a box of its own. An entry ticket's lines are always kept. `TEXT_CAPS` gives a paper the caption its own printed words name (entry ticket, The Pink Vice flyer, no-documents notice, citation slip); `describe()` shows that caption with the text.
+
+## Citation slip / Pink Vice flyer merged with the passport (2026-10-03, runs 161058 / 164732, Day 2)
+
+Problem: a citation slip lying on or against the open passport was ONE desk document. Its text was the citation's
+("M.O.A. CITATION", "Protocol Violated", "WARNING ISSUED - NO PENALTY") and TOD named it the passport
+(164732 tick 106: `passport 0.49`), so the citation got stamped and handed back. Affected ticks: 161058 t0090-0123
+(SoM tick PNGs only, no `--save-raw`) and 164732 t0091-0121 (raw PNGs). Causes:
+
+1. `find_documents`: papers that touch form one bright component, and `_split_by_paper` only splits a sheet lying
+   INSIDE another one (it needs one colour filling >= 80% of the component). Side-by-side papers stayed one box.
+2. `_merge_strip` (open tray) merged every component whose bottom was below the bar's top edge, i.e. also every
+   paper below the bar: t0119 gave one doc `[282,103,570,317]` = passport above the bar + citation + flyer.
+3. The red INSPECT button (Day 2+, `[541,299,568,317]`) was reported as a desk document (TOD: `passport 0.32`) and
+   merged with a passport lying next to it (boxes 138 px wide instead of 130).
+4. Vision: one contour around two papers absorbed both papers' lines (t0099 panel `[281,132,570,301]`
+   "The Pink Vice M.O.A. CITATION Protocol Violated ..."). Text is attributed to a doc by its centre lying in the
+   doc box, so any box covering two papers mixes them.
+
+Fix (no fixed positions; paper colour + OCR content):
+
+- `layout._sheets` (new, before `_split_by_paper`): every paper is one flat colour (passport cream (237,224,216)
+  RGB, citation pink-white (243,215,230), flyer purple (60,38,92)). Each exact colour covering a solid region
+  (>= 250 px, closed-fill >= 0.45 of its bbox) is a sheet; regions mostly inside an accepted sheet are its
+  ink/photo; same-colour regions are one sheet; stacked regions with the same left/right edges are the two pages of
+  one booklet and are rejoined. `_split_by_paper` then still finds a sheet lying on top of another, and now trims the
+  sheet underneath to its largest visible side (except for the other page of the same booklet), so it no longer
+  contains the top sheet's lines; after a `_sheets` split, a same-edge "page" sub-box is dropped.
+- `_merge_strip`: only pieces whose bottom is the bar's top edge are merged; a piece below the bar joins them only
+  with the same left/right edges or the same paper colour (a passport straddling the bar stays one doc).
+- INSPECT button masked out of the desk mask when it is red.
+- `extract._merge`: a panel whose lines are of two kinds (`PAPER_LINE_RES`: citation / flyer / passport fields
+  NAME, DOB, EXP, ISS, SEX, dates, `XXXXX-XXXXX`) is split into the `_sheets` of its region (each keeping the
+  lines centred on it, recursively split by kind if a hidden paper's line is still inside), or by line kind; a
+  mixed panel bigger than any paper is dropped (its lines stay text boxes). `TEXT_CAPS` "citation slip" also
+  matches "WARNING ... PENALTY" (the "LAST WARNING - NO PENALTY" slip was captioned "passport booklet").
+- `layout.refine_docs_by_text` (OCR safety net, run by `merge_hybrid` on the booth): a desk doc still holding two
+  kinds keeps its majority kind (tie: passport), is trimmed until the other kind's lines are outside it, and those
+  lines become a doc of their own (`partial: True`, `under_tray` when inside the open bar). This mutates
+  `layout.LAST["docs"]` IN PLACE, the list `loop.get_boxes` passes on as `sinfo["docs"]` (loop.py unchanged).
+
+Before / after (hybrid, offline on raw PNGs; desk docs as native boxes with their text, as TOD gets them):
+
+| Frame | Before | After |
+|---|---|---|
+| 164732 t0091 | `[180,138,465,300]` flyer + citation lines; INSPECT button doc | flyer `[180,138,320,237]` "The Pink Vice ..."; citation `[282,220,465,300]` "...CITATION Protocol Violated" |
+| 164732 t0099 | `[282,186,570,300]` "The Pink Vice M.O.A. CITATION ..."; vision panel `[281,132,570,301]` both papers | citation `[282,220,464,300]`; flyer `[423,186,570,285]`; vision panels "citation slip" / "flyer (The Pink Vice)" |
+| 164732 t0102 | citation + INSPECT button doc | citation `[282,220,465,300]` only |
+| 164732 t0106 | `[282,212,570,317]` citation + flyer + passport lines (TOD: passport 0.49); passport `[443,239,565,311]` + flyer line | citation `[282,212,443,316]`; passport `[443,250,565,311]` "DOB 1959.12.30 ... EXP 1984.11.02"; flyer (partial) `[424,236,551,252]` |
+| 164732 t0119 | one doc `[282,103,570,317]` (passport + citation + flyer) | citation `[282,250,570,300]`; passport top above bar `[424,103,554,133]`; passport (partial, under tray) `[420,188,556,241]`; flyer (partial) `[425,237,550,252]` |
+
+Regression: 164732 Day 1 t0001-0004, t0012, t0027: docs and boxes identical. Static `find_documents` over all
+2026-10-03 raw frames: Day 1 531/547 unchanged (the 16 changed are citation splits in 082521/084326); Day 2/3 changes
+are the INSPECT-button doc gone, passports beside it 130 px wide, and citation/flyer splits.
+
+Limits: 161058 has no raw frames; its tick PNGs carry the SoM marks, `screen_of` does not see a booth there and no
+desk docs are found, so those ticks could not be re-run meaningfully. Two citation slips of the same colour that
+overlap stay one doc. The landing strips under the stamp heads are still masked with the bar (unmasking them changed
+Day 1 passport boxes); a paper visible only in a strip is reported by `passport_under`, not as a doc. The remote L4
+server runs its own copy of `extract.py`: redeploy it for the vision-side split.

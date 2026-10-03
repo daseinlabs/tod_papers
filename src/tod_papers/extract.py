@@ -137,7 +137,7 @@ TEXT_CAPS = (
     (TICKET_RE, "entry ticket"),
     (re.compile(r"P[I1l]NK\s*V[I1l]CE|FANTAS|FAHTAS", re.I), "flyer (The Pink Vice)"),
     (re.compile(r"HAS\s*NO\s*DOCUMENTS|use.?INSPECT\s*mode", re.I), "notice: entrant has no documents"),
-    (re.compile(r"C[I1l]TAT[I1l]ON|PROTOCOL\s*V[I1l]OLATED", re.I), "citation slip"),
+    (re.compile(r"C[I1l]TAT[I1l]ON|PROTOCOL\s*V[I1l]OLATED|WARN[I1l]NG.{0,12}PENALT", re.I), "citation slip"),
 )
 
 
@@ -683,7 +683,7 @@ _PRI = {"text": 3, "icon": 2, "panel": 1}
 
 
 def _merge(texts: list[Box], icons: list[Box], panels: list[Box], frame_area: int,
-           keep_lines: bool = False) -> list[Box]:
+           keep_lines: bool = False, native: np.ndarray | None = None, s: int = 1) -> list[Box]:
     # 1. merge text fragments on the same line that nearly touch (pixel fonts
     #    sometimes split a word: "1.4." + "124-5").
     #    Repeat pairwise until stable (word order on a line is by x, not y1 jitter).
@@ -769,13 +769,23 @@ def _merge(texts: list[Box], icons: list[Box], panels: list[Box], frame_area: in
         if not inside and any(o is not pn and o.area > pn.area and _contain_frac(pn, o) > 0.8 for o in panels):
             continue  # untexted sub-part of a bigger object (logo letters, photo inside a doc)
         lab = absorbed[id(pn)] or inside
+        if lab and _mixed_paper_text(lab):
+            # one contour around two papers (a citation slip lying on the open passport): never label it with
+            # both papers' lines -- split it into the sheets it covers, or drop it (its lines stay as text boxes)
+            parts = _split_mixed(pn, lab, native, s, pn.area >= COLLAPSE_MAX_FRAC * frame_area)
+            for q, ql in parts:
+                absorbed[id(q)] = ql
+                keep_panels.append(q)
+            done = {id(t) for _, ql in parts for t in ql}
+            absorbed_ids -= {id(t) for t in absorbed[id(pn)] if id(t) not in done}
+            continue
         if lab:
             pn.text = " ".join(t.text for t in sorted(lab, key=lambda b: (b.y1, b.x1)))[:120]
         keep_panels.append(pn)
     # the entry ticket's lines stay separate too: its VALID ON date is the one line the Day 3 rule reads
     for pn in keep_panels:
         if pn.text and TICKET_RE.search(pn.text):
-            absorbed_ids -= {id(t) for t in absorbed[id(pn)]}
+            absorbed_ids -= {id(t) for t in absorbed.get(id(pn), [])}
     if not keep_lines:   # inspect mode: each line stays clickable on its own
         texts = [t for t in texts if id(t) not in absorbed_ids]
 
@@ -801,6 +811,76 @@ def _merge(texts: list[Box], icons: list[Box], panels: list[Box], frame_area: in
         if any(k.kind == "page_corner" and iou(cb, k) > 0.3 for k in out):
             continue
         out.append(cb)
+    return out
+
+
+# Which paper a printed line belongs to. A citation slip / the Pink Vice flyer often lies on or against the open
+# passport and the contour finder returns ONE panel around both (runs 20261003_161058 / 164732, Day 2): that panel
+# then read "M.O.A. CITATION ... WARNING ISSUED" and was identified as the passport. A panel holding lines of two of
+# these kinds is never one paper.
+PAPER_LINE_RES = (
+    ("citation", re.compile(r"C[I1l]TAT[I1l]ON|PROTOCOL|V[I1l]OLATED|WARN[I1l]NG|PENALT|M\.?\s?O\.?\s?[AR]\.", re.I)),
+    ("flyer", re.compile(r"P[I1l]NK|^V[I1l]CE$|FANTAS|FAHTAS|FOR\s*ALL\s*YOUR", re.I)),
+    ("passport", re.compile(r"\bNAME\b|\bD[O0][BE]\b|\bEXP\b|\b[I1l]SS\b|\bSEX\b|\bSER\b"
+                            r"|\d{4}\.\d{2}\.\d{2}|\b[A-Z0-9]{5}-[A-Z0-9]{5}\b", re.I)),
+)
+
+
+def _line_kind(t: str) -> str | None:
+    for k, rx in PAPER_LINE_RES:
+        if rx.search(t or ""):
+            return k
+    return None
+
+
+def _mixed_paper_text(lines: list[Box]) -> bool:
+    return len({k for k in (_line_kind(t.text) for t in lines) if k}) >= 2
+
+
+def _split_mixed(pn: Box, lines: list[Box], native: np.ndarray | None, s: int,
+                 big: bool) -> list[tuple[Box, list[Box]]]:
+    """Panel pn spans several papers. Returns [(sub-panel, its lines)]: one per paper sheet found by flat paper
+    colour inside pn (layout._sheets, the same split the static document finder uses), each keeping only the
+    lines centred on it. Without a colour split, a paper-sized panel is split by line kind (bbox of each kind's
+    lines, unclassified lines joining the nearest kind); a panel bigger than any paper is dropped ([])."""
+    sheets: list[list[int]] = []
+    if native is not None:
+        from .layout import _sheets
+        nb = [pn.x1 // s, pn.y1 // s, -(-pn.x2 // s), -(-pn.y2 // s)]
+        valid = native.max(2) > 60
+        sheets = [sh for sh in _sheets(native, nb, valid) if sh != nb]
+    out: list[tuple[Box, list[Box]]] = []
+    if len(sheets) >= 2:
+        for sh in sheets:
+            fb = Box(sh[0] * s, sh[1] * s, sh[2] * s, sh[3] * s, "", "panel", pn.conf)
+            mine = [t for t in lines if fb.x1 <= t.center[0] <= fb.x2 and fb.y1 <= t.center[1] <= fb.y2
+                    and min((q for q in sheets if q[0] * s <= t.center[0] <= q[2] * s
+                             and q[1] * s <= t.center[1] <= q[3] * s),
+                            key=lambda q: (q[2] - q[0]) * (q[3] - q[1])) == sh]
+            if mine:
+                fb.text = " ".join(t.text for t in sorted(mine, key=lambda b: (b.y1, b.x1)))[:120]
+            if _mixed_paper_text(mine):   # a sheet still holding another paper's lines (one mostly hidden)
+                out += _split_mixed(fb, mine, None, s, False)
+            else:
+                out.append((fb, mine))
+        return out
+    if big:
+        return []
+    groups: dict[str, list[Box]] = {}
+    loose = []
+    for t in lines:
+        k = _line_kind(t.text)
+        (groups.setdefault(k, []) if k else loose).append(t)
+    for t in loose:   # e.g. the holder's name line: goes with the kind printed closest to it
+        k = min(groups, key=lambda g: min(abs(t.center[1] - o.center[1]) + 0.25 * abs(t.center[0] - o.center[0])
+                                          for o in groups[g]))
+        groups[k].append(t)
+    pad = 3 * s
+    for k, g in groups.items():
+        fb = Box(max(pn.x1, min(t.x1 for t in g) - pad), max(pn.y1, min(t.y1 for t in g) - pad),
+                 min(pn.x2, max(t.x2 for t in g) + pad), min(pn.y2, max(t.y2 for t in g) + pad), "", "panel", pn.conf)
+        fb.text = " ".join(t.text for t in sorted(g, key=lambda b: (b.y1, b.x1)))[:120]
+        out.append((fb, g))
     return out
 
 
@@ -1102,7 +1182,7 @@ def extract(frame_bgr: np.ndarray) -> list[Box]:
     t = lap("ocr_wait_ms", t)
 
     inspect_on = any(INSPECT_TEXT_RE.search(t.text or "") for t in texts)
-    boxes = _merge(texts, icons, panels, W * H, keep_lines=inspect_on)
+    boxes = _merge(texts, icons, panels, W * H, keep_lines=inspect_on, native=native, s=s)
     for cap, sc, *xy in _apply_dets(boxes, obj_dets, score):
         boxes.append(Box(*xy, kind="object", conf=round(sc, 3), caption=cap))
     boxes += _edge_tabs(native, s)

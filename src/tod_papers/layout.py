@@ -341,11 +341,27 @@ def _components(mask: np.ndarray, min_area: int) -> list[list[int]]:
             if a >= min_area and w >= 6 and h >= 6]
 
 
-def _merge_strip(boxes: list[list[int]], top: int, gap: int = 36) -> list[list[int]]:
+def _paper_colour(n: np.ndarray, b) -> int | None:
+    """most common exact colour of the bright (max channel > 60) pixels in native box b, packed BGR"""
+    c = n[b[1]:b[3], b[0]:b[2]].astype(np.int32)
+    m = c.max(2) > 60
+    if m.sum() < 20:
+        return None
+    k = (c[..., 0] << 16) | (c[..., 1] << 8) | c[..., 2]
+    v, cnt = np.unique(k[m], return_counts=True)
+    return int(v[cnt.argmax()])
+
+
+def _merge_strip(boxes: list[list[int]], top: int, gap: int = 36, n: np.ndarray | None = None) -> list[list[int]]:
     """Paper peeking above the open tray is cut into pieces by the stamp knobs:
     merge pieces that touch the bar's top edge and are < gap apart."""
-    edge = sorted([b for b in boxes if b[3] >= top - 8], key=lambda b: b[0])
-    rest = [b for b in boxes if b[3] < top - 8]
+    # only pieces whose bottom IS the bar's top edge; a paper below the bar (its bottom far below `top`) is a
+    # separate document (164732 tick 119: a slip below the bar was merged with the passport above it)
+    def at_edge(b) -> bool:
+        return top - 8 <= b[3] <= top + 2
+
+    edge = sorted([b for b in boxes if at_edge(b)], key=lambda b: b[0])
+    rest = [b for b in boxes if not at_edge(b)]
     out: list[list[int]] = []
     for b in edge:
         if out and b[0] - out[-1][2] <= gap:
@@ -353,10 +369,23 @@ def _merge_strip(boxes: list[list[int]], top: int, gap: int = 36) -> list[list[i
             out[-1] = [min(o[0], b[0]), min(o[1], b[1]), max(o[2], b[2]), max(o[3], b[3])]
         else:
             out.append(list(b))
+    # a sheet straddling the bar (passport pushed half under the tray) shows above AND below it: rejoin the two
+    # parts when they have the same left/right edges, or (knobs cut the top part) the same paper colour over
+    # overlapping columns. A different paper below the bar stays separate.
+    below = [b for b in rest if b[1] >= TRAY_BAR[3] - 4 and b[1] <= TRAY_BAR[3] + 2]
+    for o in out:
+        for b in below:
+            if b not in rest:
+                continue
+            if (abs(b[0] - o[0]) <= 4 and abs(b[2] - o[2]) <= 4) or (
+                    n is not None and min(o[2], b[2]) - max(o[0], b[0]) > 0.5 * (o[2] - o[0])
+                    and _paper_colour(n, o) is not None and _paper_colour(n, o) == _paper_colour(n, b)):
+                o[:] = [min(o[0], b[0]), o[1], max(o[2], b[2]), max(o[3], b[3])]
+                rest.remove(b)
     return rest + out
 
 
-def _split_by_paper(n: np.ndarray, b: list[int]) -> list[list[int]]:
+def _split_by_paper(n: np.ndarray, b: list[int], drop_pages: bool = False) -> list[list[int]]:
     """A component can be two overlapping documents (entry visa on the rulebook):
     the paper colours inside it (quantised to 24 levels) are separate sheets when
     one colour fills the component and another is a large sub-rectangle of it."""
@@ -387,9 +416,117 @@ def _split_by_paper(n: np.ndarray, b: list[int]) -> list[list[int]]:
         sa = (s[2] - s[0]) * (s[3] - s[1])
         if s in full or sa < 0.12 * area or sa > 0.7 * area:
             continue
+        if drop_pages and abs(s[0] - b[0]) <= 4 and abs(s[2] - b[2]) <= 4:
+            continue   # the other page of the same open booklet (a sheet _sheets already separated), not a paper
         if all(_iou4(s, o) < 0.6 for o in out):
             out.append(s)
+    if len(out) > 1:
+        # the sheet underneath must not keep the top sheet's area: text is attributed to a document by its centre
+        # lying in the box, so a container box would read the top sheet's lines as its own (a citation slip
+        # dropped on the passport made the passport 'say' M.O.A. CITATION). Keep the container's largest visible
+        # side next to each top sheet.
+        i = int(order[0])
+        own = (key == vals[i]) & pm
+        # (not for a sub-sheet sharing the container's left and right edges: that is the other page of the same
+        # open passport, which Day 1 has always reported as container + data page)
+        inner = [s for s in out[1:] if not (abs(s[0] - out[0][0]) <= 4 and abs(s[2] - out[0][2]) <= 4)]
+        out[0] = _trim_around(out[0], inner, own, x1, y1)
     return out
+
+
+def _trim_around(outer: list[int], inners: list[list[int]], own: np.ndarray, ox: int, oy: int) -> list[int]:
+    """outer box minus each inner box -> the side rectangle (left/right/top/bottom of the inner one) holding the
+    most of outer's own pixels (own: mask in the crop starting at (ox, oy)). Unchanged if no side is >= 8 px."""
+    o = list(outer)
+    for s in inners:
+        ix1, iy1, ix2, iy2 = max(o[0], s[0]), max(o[1], s[1]), min(o[2], s[2]), min(o[3], s[3])
+        if ix2 <= ix1 or iy2 <= iy1:
+            continue
+        sides = [[o[0], o[1], ix1, o[3]], [ix2, o[1], o[2], o[3]], [o[0], o[1], o[2], iy1], [o[0], iy2, o[2], o[3]]]
+        best, best_n = None, 0
+        for c in sides:
+            if c[2] - c[0] < 8 or c[3] - c[1] < 8:
+                continue
+            k = int(own[c[1] - oy:c[3] - oy, c[0] - ox:c[2] - ox].sum())
+            if k > best_n:
+                best, best_n = c, k
+        if best is not None:
+            o = best
+    return o
+
+
+SHEET_MIN_PX = 250      # a flat paper colour covering fewer native px than this is ink, not a sheet
+SHEET_CLOSE = 7         # closing kernel that fills a sheet's printed text (pixel font lines are 1-3 px apart)
+SHEET_FILL = 0.45       # a sheet's colour fills at least this much of its own bbox (after closing)
+
+
+def _sheets(n: np.ndarray, b: list[int], valid: np.ndarray) -> list[list[int]]:
+    """Split one desk component into the separate sheets lying SIDE BY SIDE / overlapping at the edges.
+    Every paper in the game is printed on one flat colour (Arstotzkan passport cream (237,224,216) RGB, citation
+    slip pink-white (243,215,230), Pink Vice flyer purple (60,38,92)), so each exact colour that covers a solid
+    region is a sheet candidate. A region lying mostly inside an already accepted sheet is that sheet's ink /
+    photo / a sheet on top (left to _split_by_paper). Stacked regions with the same left and right edges are the
+    two pages of one open booklet and are rejoined. valid: the desk mask (paper pixels) for the whole frame."""
+    x1, y1, x2, y2 = b
+    c = n[y1:y2, x1:x2]
+    vm = valid[y1:y2, x1:x2].astype(bool)
+    tot = int(vm.sum())
+    if tot < 2 * SHEET_MIN_PX:
+        return [b]
+    c32 = c.astype(np.int32)
+    key = (c32[..., 0] << 16) | (c32[..., 1] << 8) | c32[..., 2]
+    vals, cnt = np.unique(key[vm], return_counts=True)
+    regions = []   # (px, colour key, box)
+    k = np.ones((SHEET_CLOSE, SHEET_CLOSE), np.uint8)
+    for i in np.argsort(-cnt)[:6]:
+        if cnt[i] < max(SHEET_MIN_PX, 0.05 * tot):
+            break
+        mc = ((key == vals[i]) & vm).astype(np.uint8)
+        mcl = cv2.morphologyEx(mc, cv2.MORPH_CLOSE, k)
+        nl, lab, st, _ = cv2.connectedComponentsWithStats(mcl, connectivity=8)
+        for j in range(1, nl):
+            rx, ry, rw, rh, _a = st[j]
+            px = int(mc[lab == j].sum())
+            if px < SHEET_MIN_PX or rw < 12 or rh < 10 or int(st[j][4]) < SHEET_FILL * rw * rh:
+                continue
+            regions.append((px, int(vals[i]), [int(x1 + rx), int(y1 + ry), int(x1 + rx + rw), int(y1 + ry + rh)]))
+    regions.sort(key=lambda r: -r[0])
+    sheets: list[list] = []   # [colour, box]
+    for px, col, rb in regions:
+        if any(_inside4(rb, s[1]) >= 0.6 for s in sheets):
+            continue   # ink, a photo, or a sheet lying on top of an accepted one (_split_by_paper's case)
+        same = [s for s in sheets if s[0] == col]
+        if same:       # the same paper showing on both sides of a sheet lying across it
+            s = same[0]
+            s[1] = [min(s[1][0], rb[0]), min(s[1][1], rb[1]), max(s[1][2], rb[2]), max(s[1][3], rb[3])]
+            continue
+        sheets.append([col, rb])
+    # two pages of one open booklet: same left/right edges, touching vertically
+    merged = True
+    while merged:
+        merged = False
+        for a in sheets:
+            for o in sheets:
+                if a is o:
+                    continue
+                if abs(a[1][0] - o[1][0]) <= 3 and abs(a[1][2] - o[1][2]) <= 3 and -3 <= o[1][1] - a[1][3] <= 3:
+                    a[1] = [min(a[1][0], o[1][0]), a[1][1], max(a[1][2], o[1][2]), o[1][3]]
+                    sheets.remove(o)
+                    merged = True
+                    break
+            if merged:
+                break
+    if len(sheets) < 2:
+        return [b]
+    return [s[1] for s in sheets]
+
+
+def _inside4(a, b) -> float:
+    """fraction of box a lying inside box b"""
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    aa = (a[2] - a[0]) * (a[3] - a[1])
+    return ix * iy / aa if aa else 0.0
 
 
 def _iou4(a, b) -> float:
@@ -419,16 +556,23 @@ def find_documents(n: np.ndarray, is_tray_open: bool | None = None) -> list[dict
     else:
         tx1, ty1, tx2, ty2 = BY_NAME["tray_tab"].box
         m[ty1 - y0:ty2 - y0, tx1 - x0 - 2:tx2 - x0] = False
+    ib = BY_NAME["inspect_toggle"].box   # Day 2+ red INSPECT button in the desk's corner is not a document
+    if int(_red(_crop(n, ib)).sum()) > 40:
+        m[ib[1] - y0:ib[3] - y0, ib[0] - x0:ib[2] - x0] = False
     m = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    valid = np.zeros(n.shape[:2], bool)
+    valid[y0:y1_, x0:x1_] = m > 0
     comps = [[a + x0, b + y0, c + x0, e + y0] for a, b, c, e in _components(m, DOC_MIN_AREA)]
     if is_tray_open:
-        comps = _merge_strip(comps, TRAY_BAR[1])
+        comps = _merge_strip(comps, TRAY_BAR[1], n=n)
     # a knob-cut fragment lying inside another document's box is part of it
     comps = [b for i, b in enumerate(comps) if not any(
         j != i and o[0] <= b[0] and o[1] <= b[1] and b[2] <= o[2] + 1 and b[3] <= o[3]
         and (o[2] - o[0]) * (o[3] - o[1]) > (b[2] - b[0]) * (b[3] - b[1]) for j, o in enumerate(comps))]
     for b in comps:
-        for s in _split_by_paper(n, b):
+        shs = _sheets(n, b, valid)
+        for s in (s2 for sh in shs for s2 in _split_by_paper(n, sh, drop_pages=len(shs) > 1)):
+            s = [int(v) for v in s]
             docs.append({"where": "desk", "box": s, "under_tray": is_tray_open and s[3] >= TRAY_BAR[1] - 2
                          and s[1] >= DESK[1] and s[0] >= TRAY_BAR[0] - 2})
     # counter: difference vs the empty reference counter
@@ -738,4 +882,62 @@ def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: flo
                 and not inside(v, label) >= 0.6
                 and not (tray and inside(v, bar) >= 0.8)]
     vdocs = [v for v in keep if any(iou(v, d) > 0.1 for d in docs)]
-    return fixed + keep + ([] if vdocs else docs)
+    out = fixed + keep + ([] if vdocs else docs)
+    if frame_wh is not None and screen == "booth" and LAST.get("docs"):
+        refine_docs_by_text(LAST["docs"], out, *frame_wh)
+    return out
+
+
+def refine_docs_by_text(docs: list[dict], boxes: list[Box], W: int, H: int) -> None:
+    """OCR safety net over the colour split, IN PLACE on find_documents' list (LAST['docs'], which the loop
+    passes on as sinfo['docs'] and reads each document's text from: every text box centred in the doc box).
+    A desk document whose lines are of two paper kinds (extract.PAPER_LINE_RES: citation / flyer / passport
+    fields) still covers part of another paper (a mostly hidden flyer band across the passport's top). The doc
+    keeps its majority kind (ties: passport); its box is trimmed until the other kind's lines are outside it
+    (never cutting off one of its own lines), and those lines become a doc of their own ('partial': True) --
+    a partly visible slip / flyer still gets a box with its visible text."""
+    from . import extract as ex
+    sx, sy = W / NATIVE_W, H / NATIVE_H
+    lines = []
+    for b in boxes:
+        k = ex._line_kind(b.text or "") if (b.text or "").strip() else None
+        if k:
+            lines.append((k, b.center[0] / sx, b.center[1] / sy, [b.x1 / sx, b.y1 / sy, b.x2 / sx, b.y2 / sy]))
+    if not lines:
+        return
+    pri = {"passport": 0, "citation": 1, "flyer": 2}
+    for d in list(docs):
+        if d.get("where") != "desk":
+            continue
+        bx = d["box"]
+        mine = [ln for ln in lines if bx[0] <= ln[1] <= bx[2] and bx[1] <= ln[2] <= bx[3]]
+        kinds: dict[str, list] = {}
+        for ln in mine:
+            kinds.setdefault(ln[0], []).append(ln)
+        if len(kinds) < 2:
+            continue
+        keep = min(kinds, key=lambda k: (-len(kinds[k]), pri.get(k, 9)))
+        own = kinds[keep]
+        o = list(bx)
+        for k, ls in kinds.items():
+            if k == keep:
+                continue
+            for _, cx, cy, lb in ls:
+                if not (o[0] <= cx <= o[2] and o[1] <= cy <= o[3]):
+                    continue
+                # candidate cuts: put the foreign line's box outside on one side, keep every own line centre in
+                cuts = [[o[0], max(o[1], int(np.ceil(lb[3]))), o[2], o[3]], [o[0], o[1], o[2], min(o[3], int(lb[1]))],
+                        [max(o[0], int(np.ceil(lb[2]))), o[1], o[2], o[3]], [o[0], o[1], min(o[2], int(lb[0])), o[3]]]
+                cuts = [c for c in cuts if c[2] - c[0] >= 8 and c[3] - c[1] >= 8
+                        and all(c[0] <= ox <= c[2] and c[1] <= oy <= c[3] for _, ox, oy, _ in own)]
+                if cuts:
+                    o = max(cuts, key=lambda c: (c[2] - c[0]) * (c[3] - c[1]))
+            # the other paper's visible lines -> its own (partial) document box
+            gb = [int(min(ln[3][0] for ln in ls)) - 2, int(min(ln[3][1] for ln in ls)) - 2,
+                  int(np.ceil(max(ln[3][2] for ln in ls))) + 2, int(np.ceil(max(ln[3][3] for ln in ls))) + 2]
+            if not any(dd is not d and dd.get("where") == "desk"
+                       and all(dd["box"][0] <= ln[1] <= dd["box"][2] and dd["box"][1] <= ln[2] <= dd["box"][3]
+                               for ln in ls) for dd in docs):
+                under = bool(LAST.get("flags", {}).get("tray_open")) and gb[1] < TRAY_BAR[3] and gb[0] >= TRAY_BAR[0] - 2
+                docs.append({"where": "desk", "box": gb, "under_tray": under, "partial": True})
+        d["box"] = [int(v) for v in o]
