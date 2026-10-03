@@ -615,7 +615,8 @@ REGION_CAPS = {
     "hand_back": "the entrant at the booth window -- drop documents ON THE PERSON to hand them back",
     "desk": "desk (drop documents here to read them)",
     "tray_stow": "right edge of the desk (drag the tray tab here to put the stamp tray away)",
-    "stow_papers": "rulebook slot below the counter -- drop the rulebook here to put it away",
+    "stow_papers": "counter shelf left of the desk -- drop the rulebook or bulletin here to put it away (it closes "
+                   "and leaves the desk)",
 }
 
 
@@ -927,7 +928,11 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if booth and man.yes(state, "person_at_window", HORN_HIDE_P):
         # the horn only calls someone when the window is empty (runs 114927 t38-97: 50 horn clicks with the
         # entrant standing at the window); TOD says someone is there, so it is not offered
-        nb = [b for b in boxes if getattr(b, "name", "") != "horn" and b.caption != "speaker/horn"]
+        # the paper stores below the counter (bulletin, rulebook slot, transcript printer) are not needed on Days 1-3
+        # and only add papers to the desk (run 044332 t48-52: a fresh bulletin dragged onto the stamp strips;
+        # run 005956 t18-31: 14 bulletin-storage drags)
+        nb = [b for b in boxes if getattr(b, "name", "") not in ("horn", "bulletin", "rulebook", "transcript")
+              and b.caption != "speaker/horn"]
         if len(nb) < len(boxes) and facts is not None:
             facts["horn_hidden"] = True
         boxes = nb

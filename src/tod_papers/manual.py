@@ -99,8 +99,8 @@ Dragging a stamp does nothing. Clicking a document does nothing. Clicking empty 
   here to open and read them, or to move a bulletin/rulebook out of the way.
 - "right edge of the desk (drag the tray tab here to put the stamp tray away)": offered while the tray is
   out. Dragging the tray tab here closes the tray.
-- "rulebook slot below the counter -- drop the rulebook here to put it away": an open rulebook dropped here
-  closes and goes back into its slot, clearing the desk. The rulebook is never needed on Days 1-3.
+- "counter shelf left of the desk -- drop the rulebook or bulletin here to put it away": an open rulebook or
+  bulletin dropped here closes and leaves the desk. Neither is needed on Days 1-3.
 
 4. PROCESSING ONE ENTRANT -- FIND THE FIRST LINE THAT MATCHES WHAT IS CURRENTLY TRUE
 A. Nobody is at the window and no document is on the counter or desk: click the loudspeaker on the booth
@@ -128,8 +128,8 @@ D2. RECOVERY: the entrant's passport is no longer visible anywhere on the desk o
    reappears; then continue with C.
 E0. A paper that is NOT the passport (the rulebook, the bulletin, a transcript) lies under a stamp (the state
    block says "the RULEBOOK ... lies under the DENIED stamp, not the passport"): stamping it is useless and
-   will be refused. Drag the rulebook onto the "rulebook slot below the counter" target (other papers to the
-   "desk" target), then drag the PASSPORT (from the
+   will be refused. Drag the rulebook or bulletin onto the "counter shelf left of the desk" target (other
+   papers to the "desk" target), then drag the PASSPORT (from the
    counter shelf or the desk) to the strip under the stamp you need. The rulebook is never needed on Day 1.
 E. The stamp tray is open, the passport lies under a stamp head (the state block says "The passport is
    under: APPROVED" or "DENIED"), and it is NOT stamped yet (none of the three "stamped" signs of F is in the
@@ -597,8 +597,8 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         lines.append(f"- {_LABEL[k]}: {_yn(state, k)}")
     for d in facts.get("docs_named") or []:
         where = "counter shelf" if d["where"] == "counter" else "desk"
-        tail = (" -- not needed on Days 1-3; to clear the desk drop it on the 'rulebook slot below the counter' target"
-                if d["id"] == "rulebook" and d["where"] == "desk" and d["p"] >= 0.6 else "")
+        tail = (" -- not needed on Days 1-3; to clear the desk drop it on the 'counter shelf left of the desk' target"
+                if d["id"] in ("rulebook", "bulletin") and d["where"] == "desk" and d["p"] >= 0.6 else "")
         lines.append(f"- Paper on the {where} ({d['pos']}): {d['id'].upper()} (p={d['p']:.2f}){tail}")
     if yes(state, "passport_open_readable") and not yes(state, "stamp_tray_open"):
         lines.append("- The passport is already open on the desk and the stamp tray is closed: dragging the passport "
@@ -625,7 +625,7 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         if wrong:
             lines.append(f"- A paper that is NOT the passport lies under the {' and '.join(w.upper() for w in wrong)} "
                          "stamp: stamping it is useless (the stamp press will be refused). Drag that paper off the "
-                         "strip (the rulebook onto the 'rulebook slot below the counter' target, other papers to the "
+                         "strip (the rulebook/bulletin onto the 'counter shelf left of the desk' target, other papers to the "
                          "'desk' target), then drag the PASSPORT to the strip under the stamp you need")
         ws = wrong_stamp(state, day, facts)
         need = needed_stamp(state, day, facts)
