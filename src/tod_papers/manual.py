@@ -15,11 +15,17 @@ it gets two requests (loop.py):
    state block and the history change between ticks. No rule is pre-selected
    for TOD: it matches the situation itself.
 
+The verdict (APPROVED / DENIED / cannot_decide_yet) is TOD's own answer to
+`verdict_question` (request 1b): today's rule as text plus TOD's own earlier
+readings of the entrant's papers, labelled as such. No code computes a verdict
+(the old needed_stamp / wrong_stamp / undecided_stamp were removed, audit A1-A4).
+
 `situation(state)` names the manual step that applies to a state. It is for
 logs and dry-run evaluation only and is never sent to TOD.
 
 `input_class(box, booth)` is the click-only / drag-only convention the manual
-states, used by loop.py to enforce it on TOD's pick.
+states. loop.py only logs a mismatch with TOD's `action` answer; it never
+changes TOD's input.
 """
 from __future__ import annotations
 
@@ -54,8 +60,9 @@ MANUAL = """\
 PAPERS, PLEASE -- HOW TO WORK THE BORDER BOOTH WITH THE MOUSE
 
 You are the border inspector. Every input is either a CLICK on one numbered element or a DRAG of one
-numbered element onto a numbered drop target. You decide one input per turn by choosing the element; whether
-it is clicked or dragged follows from the element (section 2). Choose "wait" when nothing should be done.
+numbered element onto a numbered drop target. Each turn you choose the input (click, drag or wait), the element
+and, for a drag, the drop target. Stamps and buttons are clicked; papers and the tray tab are dragged (section 2).
+Choose "wait" when nothing should be done.
 
 1. WHAT IS WHERE ON THE BOOTH SCREEN
 - Top strip: the border yard seen from above (the queue of people on the left, guards, the road). Just
@@ -115,6 +122,9 @@ A. Nobody is at the window and no document is on the counter or desk: click the 
 B. A person is at the window and their passport lies on the counter shelf under the window: drag the
    passport down to the desk ("desk" target) to open it. Clicking it does nothing. From Day 3 a foreigner
    also hands over an ENTRY TICKET (small slip): drag it to the desk as well so its date can be read.
+   A paper the state block calls UNREAD ("document on the counter -- unread": nobody could tell what it is,
+   counter papers are too small to read) is not known to be a ticket, a flyer or anything else: drag it to the
+   "desk" target so it can be read.
 C. An open passport lies on the desk and the stamp tray is closed: read the passport (on Day 1 only the
    issuing country at the bottom matters; from Day 2 also the EXP. date and ISS. city), then open the stamp tray by dragging the tab at the right edge of the
    desk to the left (drop it on the "desk" target). If the state block says the passport's data page is NOT
@@ -122,7 +132,8 @@ C. An open passport lies on the desk and the stamp tray is closed: read the pass
    "clear desk space" target so its whole page shows.
 D. The stamp tray is open but the passport is NOT lying under a stamp head (it is off to the side, or it
    has slid up behind the tray so only an edge shows): stamps only mark a document lying directly beneath
-   the stamp heads, in the dark strip under the tray. First decide APPROVED or DENIED (section 5), then
+   the stamp heads, in the dark strip under the tray. First decide APPROVED or DENIED (section 5; the state
+   block shows your own verdict answer), then
    drag the PASSPORT (not the entry ticket) to the stamp landing strip under THAT stamp. The verdict cannot be
    decided while the passport's data page is not readable: if the state block says "Passport data page
    readable: no", the next move is the passport onto the "clear desk space" target, NOT onto a stamp strip. Both strips are valid landing places:
@@ -153,38 +164,34 @@ E0. A paper that is NOT the passport (the rulebook, the bulletin, a transcript; 
    papers to the "desk" target), then drag the PASSPORT (from the
    counter shelf or the desk) to the strip under the stamp you need. The rulebook is never needed on Day 1.
 E. The stamp tray is open, the passport lies under a stamp head (the state block says "The passport is
-   under: APPROVED" or "DENIED"), and it is NOT stamped yet (none of the three "stamped" signs of F is in the
-   state block): decide with section 5, then click the stamp the passport is lying under; if you want the
+   under: APPROVED" or "DENIED"), and it is NOT stamped yet (no stamp ink is read on it, see F): decide with
+   section 5, then click the stamp the passport is lying under; if you want the
    other decision, first drag the passport to the other strip. ONE click. Clicking the stamp the passport is
-   NOT under stamps nothing. Decide only when the issuing country is known -- the state block shows it either as read in this
-   frame or as "passport read as <COUNTRY> at tick N". If the country is not known yet (the bottom of the
-   passport with the country name is not visible), do not stamp: drag the passport to the "desk" target so
-   the whole page can be read, then put it under the stamp you need.
-E?. The state block says "The decision is not known yet": the stamps are not offered. Drag the passport
-   to the "desk" target so its data page can be read; it goes under a stamp after that.
-E-. The state block says "the passport is under the wrong stamp": the stamps are not offered this turn (a
-   press would mark nothing). Drag the passport onto the landing strip the state block names.
+   NOT under stamps nothing (the press is refused). Decide only when every reading today's rule needs is known
+   -- the state block lists your own readings (issuing country, and from Day 2 the EXP. date and ISS. city, on
+   Day 3 the entry ticket of a foreigner). If one is not read yet (your verdict was cannot_decide_yet), do not
+   stamp: drag the passport (or the ticket) to the "desk" target so it can be read, then put the passport under
+   the stamp you need.
 H. INSPECT MODE (the state block says "Inspect mode is ON": desk darkened, red dotted frame, red text
    HIGHLIGHT DISCREPANCIES): documents cannot be moved and stamps cannot be used while it is on. Click the red
    inspect-mode button at the lower right of the desk once to leave it, then continue with the matching step.
    Inspect mode is not needed on Days 1-3 except in step N (no passport presented): the button is only offered
    while inspect mode is on or in step N, and in step N you stay in inspect mode until the interrogation is done.
-F. The passport IS STAMPED. Any ONE of these lines in the state block is enough:
-   (1) "A passport shows a stamp mark: yes";
-   (2) "A stamp was clicked at tick N and the screen changed: the passport is stamped".
+F. The passport IS STAMPED: the state block says "Stamp ink on the passport: APPROVED" or "DENIED" (ink read
+   on its page). A stamp press alone ("a stamp was clicked at tick N") is not proof: the press may have missed.
    Then STOP clicking stamps and hand the papers back by dragging them onto the person at the window ("the
    entrant at the booth window -- drop documents ON THE PERSON to hand them back"). ORDER: the entrant leaves
    the moment the PASSPORT is back, and any paper still on the desk is left behind. So FIRST drag every OTHER
    paper of the entrant's (the entry ticket from Day 3) onto the person, one per turn; the stamped PASSPORT goes
    back LAST. While the state block names an entry ticket on the desk or the counter shelf, hand that back, not
    the passport. The open stamp tray does not have to be closed first; drag a paper by the part that is visible.
-F2. WRONG STAMP: the state block says which stamp was clicked. If the passport was stamped APPROVED but the
+F2. WRONG STAMP: the state block says which ink is on the passport. If it was stamped APPROVED but the
    rule (section 5) says DENIED, click DENIED once more -- a DENIED stamp overrules APPROVED -- then hand it
    back. If it was stamped DENIED but should have been APPROVED, it cannot be fixed (DENIED always wins and
    an APPROVED stamp on top does not count): hand it back as it is. The first two mistakes of each day are
    only warnings.
 N. NO DOCUMENTS: the state block says "The person at the window has handed over no documents: yes". There is
-   nothing to stamp: this entrant is sent away WITHOUT a stamp; the stamp tray and the stamps are not offered.
+   nothing to stamp: this entrant is sent away WITHOUT a stamp; the stamp tray tab is not offered.
    Waiting does not help (the day does not go on until you ask for the passport). Ask for it with inspect
    mode, one input per tick, reading the state block like in C/D/E:
    N1. "Rulebook page open on the desk: NOT_OPEN": drag the rulebook from its slot below the counter onto the
@@ -218,6 +225,8 @@ while someone is still at the window does nothing.
   Glorian, Lesrenadi, Bostan; UNITED FEDERATION: Great Rapid, Shingleton, Korista City.
 - Day 3, 1982.11.25: Arstotzkans need a valid passport only. Foreigners also need an entry ticket dated
   1982.11.25; no ticket or a different date -> DENIED.
+A reading the rule needs that is not read yet (country, EXP. date, ISS. city, a foreigner's ticket on Day 3) is
+  not a reason to approve or to deny: the verdict cannot be decided yet; get the paper read first (desk target).
 The first entrant of day 1 is the tutorial; follow the same rule (his passport is Arstotzkan -> APPROVED).
 
 6. BULLETIN, RULEBOOK AND MULTI-PAGE PAPERS
@@ -255,7 +264,7 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
 - Clicking the loudspeaker over and over while the entrant was still at the window.
 - Clicking the clock/date drawer: it does nothing useful.
 - Run 20261002_083908: the passport was stamped DENIED at tick 9, then the stamps were clicked 10 more
-  times instead of handing it back. Once ANY of the three stamped signs is shown, hand the passport back.
+  times instead of handing it back. Once stamp ink is read on the passport, hand the passport back.
 - Run 20261002_083908: the stamp was chosen while the issuing country was not yet visible (it read "other"
   with only the visa page in view). Stamp only once the country name has been read.
 - Leaving the passport hidden behind the open tray and clicking the loudspeaker: nothing happens; close
@@ -391,11 +400,7 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS, 
             "yes - the entrant's passport lies under the APPROVED stamp",
             "no - nothing, or a paper that is not the passport (rulebook, bulletin ...), lies under the APPROVED "
             "stamp, or there is no stamp bar"),
-        "passport_shows_stamp_mark": _noul(
-            "Does a passport visible anywhere on screen carry a stamp mark: green APPROVED or red DENIED ink "
-            "printed on its page (not the stamps on the tray themselves)?",
-            "yes - a green APPROVED or red DENIED ink mark is printed on a passport page",
-            "no - no stamp ink on any visible passport"),
+        # passport_shows_stamp_mark (yes/no) is no longer asked: 'stamped' is TOD's STAMP_INK_Q choice (audit B19)
         "bulletin_or_rulebook_covering_desk": _noul(
             "Does an open bulletin (Ministry of Admission sheet) or the rulebook lie ON TOP of the passport, "
             "hiding part of it? A bulletin lying next to the passport without covering it does not count.",
@@ -457,13 +462,11 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS, 
     return {k: v for k, v in q.items() if k not in INSPECT_KEYS or k in inspect}
 
 
-# loop10 restart (runs 162909/163640, Uvilia): the stamp-press memory was lost with the loop restart, the mark question
-# is only asked after a recorded press, so a stamped passport under a strip stayed 'undecided' (E?) for 60+ ticks.
-# After UNDECIDED_RECHECK E? ticks in a row request 1 asks which ink the passport carries (loop.probe_context);
-# a confident answer makes the passport stamped from the screen alone (stamped(), facts['mark_side']).
-UNDECIDED_RECHECK = 3
+# 'Stamped' is TOD's answer to STAMP_INK_Q (audit B19): asked while a passport can carry ink (tray open with a paper,
+# a stamp press on record, or ink read before; loop.probe_context). A stamp press that changed pixels is only history.
 MARK_SIDE_P = 0.75   # p the ink-side choice needs to count (163640 dry run: the yes/no mark question sat at
 # 0.20-0.54 on the inked Uvilia passport while this choice read DENIED 0.53-0.84 on ticks 8-15, >= 0.80 on 11, 12, 15)
+MARK_NOPRESS_P = 0.85   # without a stamp press on record for this entrant (restart) the ink answer needs this p
 STAMP_INK_Q = {"type": "choice",
                "instructions": "Look at the entrant's passport wherever it lies (on the desk or in the dark strip under "
                                "the stamp tray). Is a stamp ink mark printed on its page? The two big stamps sitting on "
@@ -506,16 +509,116 @@ _CHECK_LABEL = {"expiry_after_today": "Passport expiry date is after today",
                 "entry_ticket_dated_today": "An entry ticket dated today is visible"}
 
 
+DOC_KINDS_TEXT = {
+    "passport": "the entrant's passport: text such as ENTRY VISA, a 'Surname, Given' name, DOB./DOE., SEX, ISS. or EXP. "
+                "dates and a country name (ARSTOTZKA, KOLECHIA, IMPOR, REPUBLIA, ...)",
+    "rulebook": "the inspector's rulebook: RULES & REGULATIONS cover, or pages headed CONTENTS, Basic Rules, Regional Map, "
+                "Booth Info",
+    "bulletin": "the Ministry of Admission bulletin: a sheet of today's rules / news",
+    "entry_ticket": "a small slip reading ENTRY TICKET with a VALID ON date (often ARSTOTZKA as its header)",
+    "transcript": "the interview transcript printout (lines of dialogue)",
+    "flyer": "an advert reading The Pink Vice (a pink card with an East Grestin address and FOR ALL YOUR FANTASIES)",
+    "citation": "an M.O.A. CITATION slip reading CITATION / Protocol Violated / WARNING ISSUED / NO PENALTY",
+    "other": "none of these, or not a paper",
+}
+# identity gate (ticket_flyer_identity notes): textless counter papers came back at p <= 0.32 on every tick
+# (chance 0.125) and were still used as 'entry ticket' / 'flyer' (182519 t118-119, t125-134). An identity answer
+# below this p is 'unread': the paper is a document on the counter/desk, never a ticket, flyer or passport for any step.
+IDENTITY_MIN_P = 0.4
+UNREAD = "unread"
+
+
 def doc_question(d: dict) -> dict:
-    """Request-1 identity question for one paper the layout found (position + the OCR text inside it)."""
+    """Request-1 identity question for one paper: its OCR lines verbatim, each choice defined by its printed text
+    (A/B run 20261003_182519: text papers 18/18, p(gt) 0.90 -> 0.93 vs the previous wording)."""
     where = "on the counter shelf under the booth window" if d["where"] == "counter" else "on the dark desk"
-    txt = "; ".join(repr(t) for t in d.get("text") or []) or "(no readable text)"
+    tx = d.get("text") or []
+    ocr = ("OCR read these lines inside it, verbatim (pixel font, may contain misreads):\n"
+           + "\n".join(f"  | {t}" for t in tx)) if tx else \
+        "OCR read no text inside it (counter papers are too small to read); judge from the picture only."
     return {"type": "choice",
-            "instructions": f"Look at the paper lying {where}, at the {d['pos']} of the picture. OCR read inside "
-                            f"it: {txt}. What is this paper? Text such as ENTRY VISA, a name, DOB, SEX, ISS. or EXP. "
-                            f"means the open passport; ENTRY TICKET or VALID ON (a small slip, often with ARSTOTZKA "
-                            f"as its header) means the entry ticket.",
-            "criteria": dict(DOC_KINDS)}
+            "instructions": f"Look at the paper lying {where}, at the {d['pos']} of the picture. {ocr}\n"
+                            f"What is this paper? Each choice is defined by the text printed on it.",
+            "criteria": dict(DOC_KINDS_TEXT)}
+
+
+# hand-back state (audit B20): TOD's answer on the frame replaces the old tick windows (HANDBACK_STAY 4 /
+# HANDBACK_DOCS_STAY 14) and the Day-3 combination rule
+PASSPORT_RETURNED_Q = {
+    "type": "choice",
+    "instructions": "Look at the booth window (left), the counter shelf under it, the dark desk and the strip under "
+                    "the stamp tray. Does the entrant at the window still have to get their PASSPORT back from the "
+                    "inspector?",
+    "criteria": {"returned": "a person is at the window and their passport is no longer on the counter shelf, the desk "
+                             "or under the stamp tray (it was handed back); other small papers may still lie there",
+                 "still_here": "the entrant's passport (closed booklet or open pages) still lies on the counter shelf, "
+                               "the desk or under the stamp tray",
+                 "no_person": "nobody is standing at the booth window"}}
+RETURNED_P = 0.6   # p the 'returned' / 'still_here' answer needs before the entrant memory uses it
+
+
+def returned_answer(state: dict) -> str | None:
+    a = state.get("passport_returned")
+    return a["value"] if a and a["p"] >= RETURNED_P else None
+
+
+# ---- the verdict: TOD's own answer (audit A1-A4) ------------------------------------------------------------------
+VERDICT_P = 0.5   # p the verdict answer needs before the state block calls it TOD's verdict
+VERDICT_RULES = {
+    "1": "Day 1 (1982.11.23): only Arstotzkan citizens may enter. Issuing country ARSTOTZKA -> APPROVED; any other "
+         "country -> DENIED. Expiry, city and tickets are NOT checked today.",
+    "2": "Day 2 (1982.11.24): foreigners are allowed too. APPROVED if the passport is valid: it is not expired (its EXP. "
+         "date is after 1982.11.24) AND its ISS. (issuing) city is in the rulebook list for the passport's country; "
+         "otherwise DENIED. Rulebook cities: " + CITY_TABLE + ".",
+}
+VERDICT_RULES["3"] = (VERDICT_RULES["2"].replace("Day 2 (1982.11.24): foreigners are allowed too.",
+                                                 "Day 3 (1982.11.25): the Day 2 passport rule still holds:")
+                      .replace("1982.11.24", "1982.11.25")
+                      + " NEW TODAY: a foreigner (any country other than ARSTOTZKA) also needs an ENTRY TICKET VALID ON "
+                        "1982.11.25; no ticket, or a ticket with another date -> DENIED. Arstotzkans need no ticket.")
+
+
+def _reading(r: dict | None, fmt) -> str:
+    return f"{fmt(r)} (your answer at tick {r['tick']}, p={r['p']:.2f})" if r else "not read yet"
+
+
+def verdict_question(day: str, mem: dict) -> dict:
+    """Request-1b `verdict` choice: today's rule as text + the readings TOD itself gave for this entrant on earlier
+    ticks (`mem`: country / exp / city / ticket, each {value, p, tick} or None), labelled as TOD's own answers. TOD
+    applies the rule; no code compares anything."""
+    d = day if day in VERDICT_RULES else "1"
+    lines = [f"- issuing country: {_reading(mem.get('country'), lambda r: r['value'])}"]
+    if d in ("2", "3"):
+        lines.append(f"- EXP. date: {_reading(mem.get('exp'), lambda r: r['value'])}")
+        lines.append(f"- ISS. city: {_reading(mem.get('city'), lambda r: repr(r['value']))}")
+    if d == "3":
+        lines.append(f"- entry ticket: {_reading(mem.get('ticket'), lambda r: r['value'])}")
+    return {"type": "choice",
+            "instructions": "You are the border inspector deciding the entrant at the window. TODAY'S RULE: "
+                            + VERDICT_RULES[d] + "\nYOUR OWN EARLIER READINGS of this entrant's papers (answers you "
+                            "gave on earlier ticks; check them against the picture, the papers may be visible now):\n"
+                            + "\n".join(lines) + "\nApply today's rule. If a reading the rule needs is not read yet "
+                            "and is not readable in this picture either, answer cannot_decide_yet.",
+            "criteria": {"approved": "APPROVED: the entrant's papers meet today's rule",
+                         "denied": "DENIED: the entrant's papers break today's rule",
+                         "cannot_decide_yet": "a reading today's rule needs (country, EXP. date, ISS. city or, for a "
+                                              "foreigner on Day 3, the entry ticket) is missing or unreadable"}}
+
+
+def tod_verdict(state: dict, facts: dict | None) -> dict | None:
+    """TOD's verdict answer: this tick's (request 1b), else the last one carried for this entrant.
+    {'value': 'approved'|'denied'|'cannot_decide_yet', 'p', 'where'} or None when never asked."""
+    v = state.get("verdict")
+    if v:
+        return {"value": v["value"], "p": v["p"], "where": "this frame"}
+    c = (facts or {}).get("verdict_carried")
+    return {"value": c["value"], "p": c["p"], "where": f"tick {c['tick']}"} if c else None
+
+
+def verdict_side(state: dict, facts: dict | None) -> str | None:
+    """'approved'/'denied' when TOD's verdict answer names one at p >= VERDICT_P (diagnostics / F2 only)."""
+    v = tod_verdict(state, facts)
+    return v["value"] if v and v["value"] in ("approved", "denied") and v["p"] >= VERDICT_P else None
 
 
 def under_phrase(facts: dict, side: str) -> str:
@@ -564,18 +667,25 @@ def desk_text_block(facts: dict | None) -> str:
     return "\n".join(out)
 
 
+def ink_now(state: dict, facts: dict | None) -> dict | None:
+    """This tick's STAMP_INK_Q answer when it names an ink side confidently enough (MARK_SIDE_P with a stamp press
+    on record for this entrant, MARK_NOPRESS_P without)."""
+    f = facts or {}
+    ms = mark_side_answer(state)
+    if ms and (f.get("stamp_clicks") or f.get("missed_stamps") or ms["p"] >= MARK_NOPRESS_P):
+        return ms
+    return None
+
+
 def stamped(state: dict, facts: dict | None) -> list[str]:
-    """The three 'passport is stamped' signs that are currently true (manual rule F)."""
-    facts = facts or {}
-    out = []
-    if yes(state, "passport_shows_stamp_mark") and (facts.get("stamp_clicks") or facts.get("missed_stamps")):
-        # a mark needs a stamp press for this entrant (run 054238 t62-137: mark p=0.77 on an unstamped passport)
-        out.append("mark")
-    elif facts.get("mark_side"):   # recheck after UNDECIDED_RECHECK E? ticks: the ink side read from the screen
-        out.append("mark")
-    if facts.get("stamp_clicks"):
-        out.append("history")
-    return out
+    """['ink'] when TOD read stamp ink on the passport (this tick, or carried for this entrant as mark_side), else
+    [] (manual rule F). A stamp press that changed pixels is NOT a stamped sign (audit B19)."""
+    return ["ink"] if ink_now(state, facts) or (facts or {}).get("mark_side") else []
+
+
+def ink_side(state: dict, facts: dict | None) -> str | None:
+    ms = ink_now(state, facts) or (facts or {}).get("mark_side")
+    return ms["value"] if ms else None
 
 
 def known_country(state: dict, facts: dict | None):
@@ -606,13 +716,13 @@ CHECK_YES = {"valid": True, "match": True, "expired": False, "different": False,
 
 
 def check_answer(a: dict | None):
-    """True/False/None from one request-1 answer of a check (3-way choice or yes/no)."""
+    """True/False/None from one request-1 answer of a check (3-way choice or yes/no). Only carries TOD's reading
+    for the verdict question's text; the same p is needed either way (audit D6: no approve/deny asymmetry)."""
     if not a:
         return None
     if isinstance(a.get("value"), str) and a["value"] not in ("True", "False"):
         v = CHECK_YES.get(a["value"])
-        # a finding that denies needs more confidence (run 022439 t60: a valid passport read 'expired' at 0.61)
-        return v if v is not None and a["p"] >= (0.6 if v else DENY_P) else None
+        return v if v is not None and a["p"] >= 0.6 else None
     return (a["p"] >= 0.5) if abs(a["p"] - 0.5) >= CARRY_CHECK_MARGIN else None
 
 
@@ -625,14 +735,6 @@ def known_exp(state: dict, facts: dict | None):
     return (c["value"], c["p"], f"tick {c['tick']}") if c else None
 
 
-def expiry_valid(state: dict, day: str, facts: dict | None):
-    """True/False/None: the EXP. date TOD picked, compared with today (section 5). 'Expired' needs p >= DENY_P."""
-    e = known_exp(state, facts)
-    if not e:
-        return None
-    y, m, d = (int(x) for x in e[0].split("."))
-    ok = (y, m, d) > tuple(int(x) for x in DAY_DATES.get(day, DAY_DATES["2"]).split("."))
-    return ok if ok or e[1] >= DENY_P else None
 
 
 # ---- request 1b: Day 2/3 readings as choices over the strings the OCR read on the screen ----------------------
@@ -761,70 +863,12 @@ def read_inspection_answers(state: dict, cand: dict) -> None:
             state["issuing_city"] = {"value": rule, "p": min(a["p"], sp["p"])}
 
 
-def check_value(state: dict, facts: dict | None, k: str):
-    """True/False for a yes/no inspection check: this frame's answer, else the entrant's carried reading, else None.
-    issuing_city_valid = the rule table (section 5) applied to TOD's city + country readings."""
-    if k == "expiry_after_today":
-        return expiry_valid(state, (facts or {}).get("day", "2"), facts)
-    if k == "issuing_city_valid":
-        kc, ci = known_country(state, facts), known_city(state, facts)
-        if not kc or not ci:
-            return None
-        return ci[0] in ISSUING_CITIES.get(kc[0], ())
-    v = check_answer(state.get(k))   # run 022439 t74: expiry p=0.44 is not a 'no'
-    if v is not None:
-        return v
-    c = ((facts or {}).get("checks_carried") or {}).get(k)
-    return c["value"] if c else None
 
 
-def needed_stamp(state: dict, day: str, facts: dict | None) -> str | None:
-    """'approved'/'denied' per section 5 from TOD's request-1 answers (read now or carried for this entrant), or
-    None while a check the day needs is still unknown."""
-    kc = known_country(state, facts)
-    if not kc or kc[0] == "unreadable":
-        return None
-    if day not in ("2", "3"):
-        return "approved" if kc[0] == "ARSTOTZKA" else "denied"
-    # photo check retired (eval: 54 Day-2 entrants, AUC 0.31-0.51 over 5 wordings; at DENY_P it caught 0/7
-    # mismatches and false-denied 4/47 valid entrants). A mismatch is approved: ~1 citation per Day 2, inside the 2 free.
-    keys = ["expiry_after_today", "issuing_city_valid"]
-    if day == "3" and kc[0] != "ARSTOTZKA":
-        keys.append("entry_ticket_dated_today")
-    vals = [check_value(state, {**(facts or {}), "day": day}, k) for k in keys]
-    if vals[1] is None:
-        vals[1] = True   # city not read confidently: only a confident mismatch denies (an unread city must not stall)
-    if len(vals) > 2 and vals[2] is None:
-        vals[2] = True   # Day 3 ticket: only a confident 'other date' denies (an unread ticket must not stall)
-    if False in vals:
-        return "denied"
-    if None in vals:
-        return None
-    return "approved"
 
 
-def undecided_stamp(state: dict, day: str, facts: dict | None) -> bool:
-    """Tray open, passport under a stamp head, not stamped, but section 5 cannot be decided yet (manual step E?):
-    loop.prepare leaves the stamps out of the options (run 021438 t43: APPROVED pressed with the country unknown,
-    correct verdict was DENIED)."""
-    facts = facts or {}
-    if not (yes(state, "stamp_tray_open") or facts.get("tray_open_px")) or stamped(state, facts):
-        return False
-    return bool(facts.get("passport_under")) and needed_stamp(state, day, facts) is None
 
 
-def wrong_stamp(state: dict, day: str, facts: dict | None):
-    """(side the passport lies under, side it needs) when the tray is open, request 1 puts the passport under
-    exactly one stamp head, the passport is not stamped yet and section 5 needs the OTHER stamp (manual step E-);
-    else None. loop.prepare then leaves the stamps out of the options: a press there is refused anyway."""
-    facts = facts or {}
-    if not (yes(state, "stamp_tray_open") or facts.get("tray_open_px")) or stamped(state, facts):
-        return None
-    pu = facts.get("passport_under") or []
-    need = needed_stamp(state, day, facts)
-    if len(pu) == 1 and need and need != pu[0]:
-        return pu[0], need
-    return None
 
 
 def state_block(state: dict, day: str, facts: dict | None = None) -> str:
@@ -835,18 +879,17 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     if scr:
         lines.append(f"- Screen: {scr['value']} (p={scr['p']:.2f})")
     for k in STATE_KEYS:
-        if k == "passport_shows_stamp_mark" and facts.get("mark_side") and not facts.get("stamp_clicks"):
-            ms = facts["mark_side"]
-            lines.append(f"- {_LABEL[k]}: yes -- {ms['value'].upper()} ink read on the passport at tick {ms['tick']} "
-                         f"(p={ms['p']:.2f}); the passport is stamped {ms['value'].upper()}")
-            continue
-        if k == "passport_shows_stamp_mark" and "mark" not in stamped(state, facts):
-            if facts.get("stamp_clicks"):   # run 070005 t25-31: said 'no stamp pressed' after 3 recorded presses
-                t_, side_ = facts["stamp_clicks"][-1]
-                lines.append(f"- {_LABEL[k]}: the passport was stamped {side_.upper()} at tick {t_} (the ink may be "
-                             f"hidden under the tray in this frame)")
-            else:
-                lines.append(f"- {_LABEL[k]}: no (no stamp has been pressed for this entrant yet)")
+        if k == "passport_shows_stamp_mark":   # 'stamped' = TOD's ink reading (STAMP_INK_Q), never a pixel change
+            ink = ink_now(state, facts)
+            ms = ink or facts.get("mark_side")
+            if ms:
+                where = "this frame" if ink else f"tick {ms['tick']}"
+                lines.append(f"- Stamp ink on the passport: {ms['value'].upper()} (your reading, {where}, "
+                             f"p={ms['p']:.2f}): the passport is stamped {ms['value'].upper()}")
+            elif "passport_stamp_ink" in state:
+                a_ = state["passport_stamp_ink"]
+                lines.append(f"- Stamp ink on the passport: none read (your reading this frame: {a_['value']}, "
+                             f"p={a_['p']:.2f})")
             continue
         lines.append(f"- {_LABEL[k]}: {_yn(state, k)}")
     for k in ("no_documents_presented", "interrogate_prompt_visible"):
@@ -858,11 +901,13 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     if no_passport(state, facts):
         lines.append("- The person has presented no documents: there is nothing to stamp; they are sent away "
                      "without a stamp. Ask for the passport with inspect mode (step N)")
-        if (state.get("rulebook_page") or {}).get("value", "not_open") == "not_open":
-            lines.append("- Step N1: the rulebook goes from its slot below the counter onto the DESK (target 'desk "
-                         "(drop documents here to read them)'), not onto the counter shelf left of the desk")
     for d in facts.get("docs_named") or []:
         where = "counter shelf" if d["where"] == "counter" else "desk"
+        if d["id"] == UNREAD:
+            lines.append(f"- Paper on the {where} ({d['pos']}): UNREAD (what it is could not be read: best identity "
+                         f"{d.get('raw_id', '?')} at only p={d['p']:.2f}). It is not known to be a ticket, flyer or "
+                         "passport" + ("; on the desk it can be read" if where == "counter shelf" else ""))
+            continue
         tail = (" -- not needed on Days 1-3; to clear the desk drop it on the 'counter shelf left of the desk' target"
                 if d["id"] in ("rulebook", "bulletin") and d["where"] == "desk" and d["p"] >= 0.6
                 and not (d["id"] == "rulebook" and no_passport(state, facts)) else "")   # step N reads it on the desk
@@ -876,105 +921,69 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         why = [f"issuing country read as {c.get('value', 'unknown')} (p={c.get('p', 0):.2f})"]
         if day in ("2", "3") and not known_exp(state, facts):
             why.append("EXP. date not read")
-        lines.append("- Passport data page readable: no (" + "; ".join(why) + "). The verdict cannot be decided "
-                     "until the page is readable: drag the passport onto the 'clear desk space' target, not onto a "
-                     "stamp strip")
-    if yes(state, "passport_open_readable") and not yes(state, "stamp_tray_open"):
-        lines.append("- The passport is already open on the desk and the stamp tray is closed: dragging the passport "
-                     "to the desk again changes nothing; the next step is C (drag the stamp tray tab to the desk)")
+        lines.append("- Passport data page readable: no (" + "; ".join(why) + "); the 'clear desk space' target "
+                     "moves it so the whole page shows")
     for t, side in facts.get("stamp_clicks") or []:
-        lines.append(f"- A stamp was clicked at tick {t} ({side.upper()}) and the screen changed: the passport is "
-                     f"stamped {side.upper()}")
+        lines.append(f"- The {side.upper()} stamp was pressed at tick {t} and the screen changed (a press; whether it "
+                     "marked the passport is the stamp-ink reading)")
     for t, side in facts.get("missed_stamps") or []:
         lines.append(f"- The {side.upper()} stamp was clicked at tick {t} while the passport lay under the other "
                      "stamp: nothing was stamped")
-    if (facts.get("tray_flips") or 0) >= TRAY_FLIP_LIMIT:
-        lines.append(f"- LOOP WARNING: the stamp tray was opened and closed {facts['tray_flips']} times in the last "
-                     "8 ticks without a stamp. Toggling it again achieves nothing: leave the tray as it is and move a "
-                     "DOCUMENT instead (the passport onto a stamp landing strip, or a visa/other paper back to the desk)")
     if "strip" in facts and (yes(state, "stamp_tray_open") or facts.get("tray_open_px")):
         pu = facts.get("passport_under") or []
         for side in ("denied", "approved"):
             lines.append(f"- Under the {side.upper()} stamp: " + (
-                f"the PASSPORT (p={facts['strip'][side]['passport_p']:.2f})" if side in pu
+                f"the PASSPORT (p={(facts['strip'][side]['passport_p'] or 0):.2f})" if side in pu
                 else under_phrase(facts, side)))
-        lines.append("- The passport is under: " + (" and ".join(x.upper() for x in pu) if pu else "none"))
+        lines.append("- The passport is under: " + (" and ".join(x.upper() for x in pu) if pu else "none")
+                     + ". Both stamps can be pressed; a press on a stamp the passport is not under is refused")
         wrong = [s_ for s_ in ("denied", "approved") if (facts["strip"][s_].get("doc") or "passport") != "passport"
                  and s_ not in pu]
         if wrong:
             lines.append(f"- A paper that is NOT the passport lies under the {' and '.join(w.upper() for w in wrong)} "
-                         "stamp: stamping it is useless (the stamp press will be refused). Drag that paper off the "
-                         "strip (the rulebook, bulletin, a citation slip or flyer onto the 'counter shelf left of the desk' target, other papers to the "
-                         "'desk' target), then drag the PASSPORT to the strip under the stamp you need")
-        ws = wrong_stamp(state, day, facts)
-        need = needed_stamp(state, day, facts)
-        if need and not stamped(state, facts):
-            kc = known_country(state, facts)
-            why = f"issuing country {kc[0]}" if day not in ("2", "3") else "the passport readings in this list"
-            lines.append(f"- Section 5 applied to {why} -> {need.upper()}: the passport belongs in the landing "
-                         f"strip under the {need.upper()} stamp")
-        if ws:
-            lines.append(f"- The passport is under the wrong stamp: drag it onto the {ws[1].upper()} landing strip")
-        elif undecided_stamp(state, day, facts):
-            lines.append("- The decision is not known yet (a check of section 5 could not be read): the stamps are not "
-                         "offered. Drag the passport to the 'desk' target so its data page can be read"
-                         + ("" if yes(state, "document_open_on_desk") else
-                            "; if no open passport is visible on the desk (it may be hidden under the open stamp "
-                            "tray), first drag the stamp tray tab right to put the tray away"))
-        elif stamped(state, facts) and ticket_to_return(state, facts):
-            lines.append("- The passport is already stamped: do not press a stamp again. The entrant's ENTRY TICKET "
-                         "still lies on the " + ticket_to_return(state, facts) + ": hand it back FIRST (drag the "
-                         "ticket onto the entrant at the window); the passport goes back LAST, because the entrant "
-                         "leaves as soon as the passport is returned (step F)")
-        elif stamped(state, facts):
-            lines.append("- The passport is already stamped: do not press a stamp again; hand the passport back "
-                         "(drag it onto the entrant at the window)")
-        elif len(pu) == 1:
-            other = "approved" if pu[0] == "denied" else "denied"
-            lines.append(f"- Click the stamp the passport is lying under ({pu[0].upper()}); if you want "
-                         f"{other.upper()} instead, first drag the passport to the strip under the {other.upper()} "
-                         f"stamp. Clicking {other.upper()} now would stamp nothing.")
-        elif not pu and (facts.get("desk_target") or {}).get("target") == "desk_clear":
-            lines.append("- The passport lies under neither stamp and its page is not readable yet: the stamps are "
-                         "not offered; move the passport onto the 'clear desk space' target first")
-        elif not pu:
-            lines.append("- The passport lies under neither stamp: the stamps are not offered (a press would mark "
-                         "nothing); drag the passport to the landing strip under the stamp you want first")
+                         "stamp (a stamp press there is refused)")
+    tr = ticket_to_return(state, facts)
+    if stamped(state, facts) and tr:
+        lines.append(f"- The entrant's ENTRY TICKET still lies on the {tr} (the entrant leaves as soon as the "
+                     "passport is returned)")
+    v = tod_verdict(state, facts)
+    if v:
+        lines.append(f"- Your verdict for this entrant (your own answer, {v['where']}): {v['value'].upper()} "
+                     f"(p={v['p']:.2f})")
+    ra = state.get("passport_returned")
     if facts.get("waiting_docs"):
-        hb = f" at tick {facts['handed_back']}" if facts.get("handed_back") is not None else " (no passport is visible)"
-        lines.append(f"- The passport was handed back{hb}, but the entrant is STILL at the "
-                     "window: they wait for the rest of their documents (e.g. the entry ticket). Drag every paper "
-                     "of theirs still lying on the desk or the counter shelf onto the entrant (step G2)")
+        said = f"you said 'returned', p={ra['p']:.2f}" if ra else "your answer on an earlier tick"
+        lines.append(f"- The entrant's passport has been handed back ({said}) and the entrant is STILL at the window "
+                     "with papers of theirs on the desk or counter shelf: they wait for the rest of their documents "
+                     "(step G2)")
     elif facts.get("handed_back") is not None:
         lines.append(f"- Documents were handed back at tick {facts['handed_back']}: this entrant is finished and "
                      "leaves by themselves; call the next person once the window is empty")
     open_ok = yes(state, "passport_open_readable")
     c = state.get("issuing_country")
     if c:
-        lines.append(f"- Passport issuing country (read in this frame): {c['value']} (p={c['p']:.2f})")
+        lines.append(f"- Passport issuing country (your reading, this frame): {c['value']} (p={c['p']:.2f})")
     elif open_ok:
         lines.append("- Passport issuing country: not readable in this frame")
     cc = facts.get("country_carried")
     if cc and cc.get("tick") != facts.get("tick"):
-        lines.append(f"- Passport read as {cc['value']} at tick {cc['tick']} (p={cc['p']:.2f})")
+        lines.append(f"- Passport read as {cc['value']} at tick {cc['tick']} (your reading, p={cc['p']:.2f})")
     if day in ("2", "3"):
         e = known_exp(state, facts)
-        if e:
-            ok_e = expiry_valid(state, day, facts)
-            lines.append(f"- Passport EXP. read as {e[0]} (p={e[1]:.2f}, {e[2]}); today is {today}: "
-                         + ("not expired" if ok_e else "EXPIRED" if ok_e is False else "not decidable yet"))
+        lines.append(f"- Passport EXP. date (your reading, {e[2]}, p={e[1]:.2f}): {e[0]}; today is {today}" if e
+                     else "- Passport EXP. date: not read yet")
+        ci = known_city(state, facts)
+        lines.append(f"- Passport ISS. city (your reading, {ci[2]}, p={ci[1]:.2f}): {ci[0]}" if ci
+                     else "- Passport ISS. city: not read yet")
     for k, c in ((facts.get("checks_carried") or {}).items() if day in ("2", "3") else ()):
         if k not in state:
-            lines.append(f"- {_CHECK_LABEL[k]}: {'yes' if c['value'] else 'no'} (read at tick {c['tick']}, p={c['p']:.2f})")
-    ci = known_city(state, facts)
-    if day in ("2", "3") and ci:
-        kc = known_country(state, facts)
-        ok_c = check_value(state, facts, "issuing_city_valid")
-        lines.append(f"- Passport ISS. city: {ci[0]} (p={ci[1]:.2f}, {ci[2]})" + (
-            "" if ok_c is None else f" -- {'a valid' if ok_c else 'NOT a valid'} issuing city of {kc[0]}"))
+            lines.append(f"- {_CHECK_LABEL[k]}: {'yes' if c['value'] else 'no'} (your reading at tick {c['tick']}, "
+                         f"p={c['p']:.2f})")
     if day == "3" and "entry_ticket_dated_today" in state:
-        lines.append(f"- An entry ticket dated today ({today}) is visible: {_yn(state, 'entry_ticket_dated_today')}")
-    elif open_ok:  # Day 1 (or not yet known): expiry/photo are asked and logged but are not Day 1 rules
+        a_ = state["entry_ticket_dated_today"]
+        lines.append(f"- Entry ticket (your reading, this frame): {a_['value']}"
+                     + (f" ({a_['from']})" if a_.get("from") else "") + f" (p={a_['p']:.2f})")
+    elif open_ok and day not in ("2", "3"):  # Day 1: expiry is not a rule
         lines.append("- (Day 1: expiry is not checked; only the issuing country decides)")
     d = DAY_RULES.get(day)
     lines.append(f"- Day: {day} -- {d}" if d else "- Day: not yet known (treat as day 1 until a later date shows)")
@@ -1038,9 +1047,11 @@ def _day_rule_section(sec5: str, day: str) -> str:
     for ln in lines[1:]:
         if ln.startswith("- Day "):
             cur = ln[6]
+        elif ln.startswith("A reading"):
+            cur = "all"   # the cannot-decide-yet line holds on every day
         elif not ln.startswith("  "):
             cur = "tail1"
-        if cur == d or (cur == "tail1" and d == "1"):
+        if cur in (d, "all") or (cur == "tail1" and d == "1"):
             keep.append(ln)
     return "\n".join(head + keep) + "\n"
 
@@ -1065,6 +1076,8 @@ def build(state: dict, history, day: str, ban_lines: list[str] | None = None, fa
     head = f"LAST {len(hist)} ACTIONS" if hist else "LAST ACTIONS"
     if (facts or {}).get("cycle_note"):   # the loop's cycle guard (loop.CycleDetector)
         h = f"CYCLE: {facts['cycle_note']}\n{h}"
+    if (facts or {}).get("tray_note"):    # tray toggle loop: the closing tab is excluded (loop.prepare, audit A5)
+        h = f"{facts['tray_note']}\n{h}"
     nb = (facts or {}).get("menu_bounces") or 0
     if nb >= 2:
         h = (f"You have gone back and forth between the main menu and day select {nb} times. BACK undoes "
@@ -1166,13 +1179,9 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     kc = known_country(state, facts)
     if kc and kc[0] == "unreadable":
         kc = None
-    ok = bool(kc) and kc[0] == "ARSTOTZKA"   # Day 1: the only rule
-    if day in ("2", "3"):
-        ok = needed_stamp(state, day, facts) == "approved"
+    vside = verdict_side(state, facts)   # TOD's own verdict answer (diagnostic: which step TOD's answer implies)
     if stamped(state, facts):
-        sides = [s for _, s in (facts or {}).get("stamp_clicks") or []] or (
-            [(facts or {})["mark_side"]["value"]] if (facts or {}).get("mark_side") else [])
-        if sides and sides[-1] == "approved" and kc and not ok:
+        if ink_side(state, facts) == "approved" and vside == "denied":
             return "F2", "click DENIED (overrules APPROVED)"
         if ticket_to_return(state, facts):
             return "F0", "drag the entry ticket -> entrant (before the passport)"
@@ -1183,26 +1192,23 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     k_step = clutter_step(state, f)
     if k_step:
         return k_step
-    # loop13 run 182519 t89-92 (Maslov, gt APPROVED): B moved only the passport, the ticket stayed on the counter,
-    # TOD answered no_ticket 0.91 and he was DENIED. Day 3 foreigner: the counter paper goes to the desk before stamping
-    # (at most 3 B3 ticks per entrant: a slip stowed on the counter shelf must not loop it).
-    tk = check_value(state, {**f, "day": day}, "entry_ticket_dated_today") if day == "3" else True
-    if (day == "3" and kc and kc[0] not in ("ARSTOTZKA", "unreadable") and tk is not True
-            and yes(state, "document_on_counter_shelf") and yes(state, "document_open_on_desk")
-            and f.get("b3_n", 0) < 3):
-        return "B3", "drag the other paper on the counter (entry ticket) -> desk so its VALID ON date can be read"
+    # loop13 run 182519 t89-92 (Maslov): the ticket stayed on the counter. Any counter paper that is UNREAD (identity
+    # gate) or TOD's entry ticket goes to the desk once the passport is open there (no tick cap: the identity gate
+    # keeps a stowed slip from looping it, it is named on the desk)
+    if (yes(state, "document_open_on_desk") and any(
+            d["where"] == "counter" and d["id"] in (UNREAD, "entry_ticket") for d in f.get("docs_named") or [])):
+        return "B3", "drag the unread / ticket paper on the counter -> desk so it can be read"
     if yes(state, "stamp_tray_open") or f.get("tray_open_px"):
-        wrong = [s_ for s_, v in (f.get("strip") or {}).items() if v.get("doc") and v["doc"] != "passport"]
+        wrong = [s_ for s_, v in (f.get("strip") or {}).items() if v.get("doc") and v["doc"] not in ("passport", UNREAD)]
         if wrong and not f.get("passport_under"):
             return "E0", f"drag the {f['strip'][wrong[0]]['doc']} off the {wrong[0].upper()} strip -> desk"
         if f.get("passport_under"):
-            if not kc or needed_stamp(state, day, facts) is None:
-                return "E?", "decision unknown: drag passport -> desk to read it"
-            need = "approved" if ok else "denied"
-            pu = (facts or {}).get("passport_under") or []
-            if pu and need not in pu:
-                return "E-", f"drag passport -> strip under the {need.upper()} head (it lies under {pu[0].upper()})"
-            return "E", "click " + need.upper()
+            if vside is None:
+                return "E?", "TOD's verdict: cannot_decide_yet / not given: drag passport -> desk to read it"
+            pu = f.get("passport_under") or []
+            if vside not in pu:
+                return "E-", f"drag passport -> strip under the {vside.upper()} head (TOD's verdict)"
+            return "E", "click " + vside.upper()
         if yes(state, "document_open_on_desk"):
             return "D", "drag passport -> stamp landing strip"
         if (yes(state, "person_at_window") and (facts or {}).get("tray_flips", 0) < TRAY_FLIP_LIMIT

@@ -3,19 +3,22 @@
 Each tick:  wait-until-stable grab
             -> extract -> REQUEST 1 (state, unmarked frame + desk OCR text): screen, day, the
                booth facts the manual is keyed on (person at window, document on counter,
-               open passport, tray open, passport under stamp, stamp mark, covered) and the
-               inspection decisions (issuing country, expiry, photo) -- all read by TOD
-               from the picture, nothing inferred from detector labels
+               open passport, tray open, passport under stamp, stamp ink, passport returned) and the
+               readings (issuing country; request 1b: EXP. date, ISS. city, ticket, paper identities)
+               plus TOD's VERDICT (approved / denied / cannot_decide_yet) -- all TOD answers
             -> extract -> drop-target regions (stamp landing strip, counter shelf, desk;
-               derived from detected boxes, else anchors.json fallback) -> som
+               derived from detected boxes, else not offered) -> som
             -> REQUEST 2 (action, SoM frame): the whole manual (manual.py) + what request 1
                says is true + the last 30 actions; questions action / source / target
-            -> click/drag convention enforced on the pick -> execute -> verify -> log.
+            -> TOD's action / source / target executed as answered (a click/drag convention
+               mismatch is only logged) -> execute -> verify -> log.
 
-TOD makes every decision: what is on screen, what kind of input (click/drag/wait),
-which numbered element, which drop target. One image per request. The only
-geometry the loop adds is the drop-target regions TOD needs that no detector
-finds; their source (derived/fallback) is written to every tick json.
+TOD makes every decision: what is on screen, the verdict, what kind of input (click/drag/wait),
+which numbered element, which drop target. One image per request. The loop adds geometry
+(drop-target regions, drop points), bookkeeping (entrant memory of TOD's own answers) and
+guards that refuse or exclude (stamp press refused unless TOD put the passport under that
+stamp; no-effect / cycle exclusions). Region sources (static/derived/derived_frame/dropped)
+are written to every tick json.
 
 Run (from repo root):
     .venv-loop\\Scripts\\python.exe -m tod_papers.loop --max-ticks 10
@@ -457,20 +460,24 @@ def probe_context(prev_facts: dict | None, prev_state: dict | None) -> dict:
     pp_desk = man.yes(ps, "document_open_on_desk") or any(
         d["where"] == "desk" and d["id"] == "passport" and d["p"] >= 0.5 for d in dn)
     cover = any(d["where"] == "desk" and d["id"] in ("rulebook", "bulletin") and d["p"] >= 0.3 for d in dn)
-    return {"stamped": bool(pf.get("stamp_clicks") or pf.get("missed_stamps")),
-            "papers": bool(papers), "covering_possible": bool(pp_desk and cover),
-            "recheck_mark": (pf.get("undecided_n") or 0) >= man.UNDECIDED_RECHECK and not pf.get("mark_side")}
+    pressed = bool(pf.get("stamp_clicks") or pf.get("missed_stamps"))
+    return {"stamped": pressed, "papers": bool(papers), "covering_possible": bool(pp_desk and cover),
+            # STAMP_INK_Q (audit B19: 'stamped' is TOD's ink answer): after a press, once ink was read, or while
+            # the passport lies under a stamp head (a loop restart loses the press memory)
+            "ask_ink": bool(pressed or pf.get("mark_side") or pf.get("passport_under")),
+            # PASSPORT_RETURNED_Q (audit B20): after a drop on the person, a press or ink, or once handed back
+            "ask_returned": bool(man.yes(ps, "person_at_window") and (
+                pressed or pf.get("mark_side") or pf.get("hb_drop") is not None
+                or pf.get("handed_back") is not None or pf.get("waiting_docs")))}
 
 
 def select_state_questions(q: dict, ctx: dict | None, strip_px: list | None) -> list[str]:
     """Booth request 1: drop the questions whose answer nothing would consume this tick (audit section 4).
     Returns the dropped keys (logged). ctx None (first tick, offline frames) keeps everything."""
     drop = []
-    if strip_px is not None:   # pixel check: no paper in that strip -> strip_facts/passport_sides ignore the answer
-        drop += [f"passport_under_{s}" for s in ("denied", "approved") if s not in strip_px]
+    # the strip questions are always asked while the tray is open (audit B27: the pixel strip test no longer
+    # replaces TOD's answer; it is only a tie-breaker in passport_sides)
     if ctx is not None:
-        if not ctx["stamped"]:
-            drop.append("passport_shows_stamp_mark")   # manual.stamped() reads the mark only after a stamp press
         if not ctx["covering_possible"]:
             drop.append("bulletin_or_rulebook_covering_desk")   # needs a passport AND a rulebook/bulletin on the desk
         if not ctx["papers"]:
@@ -504,9 +511,10 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
         for k in man.STRIP_KEYS:   # no stamp bar on the pixels: nothing can lie under a stamp head
             q.pop(k, None)
     dropped = select_state_questions(q, ctx, strip_px if tray_px else None)
-    if (ctx or {}).get("recheck_mark") or (facts or {}).get("recheck_mark"):
-        # E? for man.UNDECIDED_RECHECK ticks: the stamp memory may be lost (restart); ask which ink the passport carries
-        q["passport_stamp_ink"] = man.STAMP_INK_Q
+    if ctx is None or ctx.get("ask_ink") or (facts or {}).get("ask_ink"):
+        q["passport_stamp_ink"] = man.STAMP_INK_Q   # 'stamped' = this answer (manual.stamped), never a pixel diff
+    if ctx is None or ctx.get("ask_returned") or (facts or {}).get("ask_returned"):
+        q["passport_returned"] = man.PASSPORT_RETURNED_Q   # hand-back / G2 state from the frame
     if facts is not None:
         facts["q_dropped"] = dropped
     docs = (facts or {}).get("docs") or []
@@ -514,9 +522,12 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
     for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable"):
         if len(q) + (min(2, len(docs)) if with_docs else 0) > REQ1_MAX_Q:
             q.pop(k, None)
-    for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable", "photo_matches_person"):
-        if len(q) > REQ1_MAX_Q:
+    for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable", "photo_matches_person",
+              "inspect_mode_on"):
+        if len(q) > TOD_MAX_Q:   # the ink / returned questions may take the request over REQ1_MAX_Q, never TOD's cap
             q.pop(k, None)
+            if facts is not None:
+                facts.setdefault("q_dropped", []).append(k)
     room = max(0, REQ1_MAX_Q - len(q)) if with_docs else 0
     for i, d in enumerate(docs if with_docs else ()):
         c = doc_cache_get(d, (facts or {}).get("tick", 0))
@@ -563,6 +574,9 @@ def doc_probe(tod: TodClient, frame: np.ndarray, args, facts: dict, day: str = "
             c["seen"] = tick
         else:
             q.update(iq)
+    if facts.get("ask_verdict"):
+        # audit A1: the verdict is TOD's answer -- today's rule + TOD's own earlier readings, no code comparison
+        q["verdict"] = man.verdict_question(day, facts.get("verdict_mem") or {})
     for i, d in enumerate((facts.get("docs") or []) if docs else []):
         c = doc_cache_get(d, tick)
         if c:
@@ -696,10 +710,15 @@ def name_docs(state: dict, df: dict) -> list[dict]:
     out = []
     for i, d in enumerate(df.get("docs") or []):
         a = state.get(f"doc{i}")
-        if a:
+        a = a if a else ({"value": d["cached"]["id"], "p": d["cached"]["p"]} if d.get("cached") else None)
+        if not a:
+            continue
+        if a["p"] < man.IDENTITY_MIN_P:
+            # identity gate (ticket_flyer_identity notes section 6): a near-uniform answer is no identity. The
+            # paper is 'unread' and never counts as a ticket, flyer or passport for any step
+            out.append({**d, "id": man.UNREAD, "raw_id": a["value"], "p": a["p"]})
+        else:
             out.append({**d, "id": a["value"], "p": a["p"]})
-        elif d.get("cached"):
-            out.append({**d, "id": d["cached"]["id"], "p": d["cached"]["p"]})
     return out
 
 
@@ -751,6 +770,9 @@ def state_line(state: dict) -> str:
             bits.append(f"{ab}={state[k]['value']}:{state[k]['p']:.2f}")
     if "issuing_city" in state:
         bits.append(f"city={state['issuing_city']['value']}:{state['issuing_city']['p']:.2f}")
+    for k, ab in (("passport_stamp_ink", "ink"), ("passport_returned", "ret"), ("verdict", "VERDICT")):
+        if k in state:
+            bits.append(f"{ab}={state[k]['value']}:{state[k]['p']:.2f}")
     if "day" in state:
         bits.append(f"day={state['day']['value']}")
     return " ".join(bits)
@@ -824,21 +846,36 @@ def strip_facts(state: dict, df: dict, sinfo: dict | None) -> dict:
     return out
 
 
+STRIP_TOD_P = 0.6   # TOD's strip answer decides at p >= this (yes) or <= 1 - this (no); in between the pixel
+# paper test + TOD's identity of the strip paper break the tie (logged as strip[side]['source'] = 'pixel_tiebreak')
+
+
 def passport_sides(strip: dict) -> list[str]:
-    """Stamp heads with the PASSPORT under them: paper in the strip (when the pixel check ran) and TOD says the
-    paper under that stamp is a passport."""
-    # also when TOD's identity of the paper over that strip says passport (14/26 strip drags landed while
-    # passport_under read 0.30-0.52: 005956 t8-9, 022439 t5-6/t67-76)
-    # a paper TOD names as something else (entry ticket, rulebook ...) at doc_p >= 0.6 is not the passport unless the
-    # strip question is confident (run 075504 t112-114: the ENTRY TICKET (0.93) lay under APPROVED with
-    # passport_under 0.50; APPROVED stamped the ticket, the unstamped passport went back, 25-tick stall)
-    return [s for s, v in strip.items()
-            if v["paper"] is not False
-            and not (v["doc"] not in (None, "passport") and (v["doc_p"] or 0) >= 0.6 and (v["passport_p"] or 0) < 0.75)
-            # a citation slip / flyer is never the thing to stamp (161058 t95-96: APPROVED pressed on a citation)
-            and not (v["doc"] in CLUTTER_IDS and (v["doc_p"] or 0) >= CLUTTER_P and (v["passport_p"] or 0) < 0.85)
-            and ((v["passport_p"] or 0.0) >= 0.5
-                 or (v["paper"] and v["doc"] == "passport" and (v["doc_p"] or 0) >= 0.5))]
+    """Stamp heads with the PASSPORT under them = TOD's passport_under_<side> answers (audit B27/D10). A paper TOD's
+    identity names as something else (entry ticket, rulebook ... at p >= 0.6; a citation / flyer) is not the passport
+    unless the strip answer is confident (run 075504 t112-114; 161058 t95-96). Only when TOD is unsure both ways
+    (p between 0.4 and 0.6, or not asked) does the pixel 'paper in the strip' test, together with TOD's identity
+    'passport' of the paper over that strip, break the tie; each side records strip[side]['source']."""
+    out = []
+    for s_, v in strip.items():
+        pp = v["passport_p"]
+        if v["doc"] not in (None, "passport", man.UNREAD) and (v["doc_p"] or 0) >= 0.6 and (pp or 0) < 0.75:
+            v["source"] = "tod_identity_not_passport"
+            continue
+        if v["doc"] in CLUTTER_IDS and (v["doc_p"] or 0) >= CLUTTER_P and (pp or 0) < 0.85:
+            v["source"] = "tod_identity_clutter"
+            continue
+        if pp is not None and pp >= STRIP_TOD_P:
+            v["source"] = "tod"
+            out.append(s_)
+        elif pp is not None and pp <= 1 - STRIP_TOD_P:
+            v["source"] = "tod"
+        else:
+            tie = bool(v["paper"] and v["doc"] == "passport" and (v["doc_p"] or 0) >= 0.5)
+            v["source"] = "pixel_tiebreak"
+            if tie:
+                out.append(s_)
+    return out
 
 
 INSPECT_OPEN_P = 0.6
@@ -986,9 +1023,6 @@ def passport_needs_clear_space(state: dict, facts: dict | None, day: str, info: 
 # drop-target regions (stamp landing strip, counter shelf, desk)
 # --------------------------------------------------------------------------
 
-ANCHORS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "anchors.json")
-_ANCHORS = None
-
 REGION_CAPS = {
     "stamp_landing_approved": "stamp landing strip (under the APPROVED stamp head)",
     "stamp_landing_denied": "stamp landing strip (under the DENIED stamp head)",
@@ -1000,17 +1034,6 @@ REGION_CAPS = {
     "stow_papers": "counter shelf left of the desk -- drop the rulebook, bulletin, a flyer or a citation slip here to put "
                    "it away (off the desk)",
 }
-
-
-def _anchor(name: str, W: int, H: int) -> Box:
-    global _ANCHORS
-    if _ANCHORS is None:
-        with open(ANCHORS_FILE, encoding="utf-8") as fh:
-            _ANCHORS = json.load(fh)
-    nw, nh = _ANCHORS.get("native_size", [570, 320])
-    x1, y1, x2, y2 = _ANCHORS[name]
-    sx, sy = W / nw, H / nh
-    return Box(int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy), "", "region", 0.0, caption=REGION_CAPS[name])
 
 
 def _stamp_side(b: Box, frame: np.ndarray):
@@ -1034,9 +1057,9 @@ def derive_regions(boxes: list, frame: np.ndarray, state: dict):
       the window (or a document lying on the counter), right edge = the shutter
       lever / window frame, bottom = the drawer row.
     - desk: free desk to the right of the counter shelf, below the tray.
-    Anything that cannot be derived (or fails a sanity check) comes from
-    anchors.json and is marked target_source=fallback.
-    Returns (regions, {name: 'derived'|'fallback'})."""
+    Anything that cannot be derived (or fails a sanity check) is NOT offered
+    (no fixed fallback coordinates; anchors.json was removed): target_source=dropped.
+    Returns (regions, {name: 'derived'|'dropped'})."""
     H, W = frame.shape[:2]
     regions: list = []
     src: dict = {}
@@ -1066,10 +1089,9 @@ def derive_regions(boxes: list, frame: np.ndarray, state: dict):
                     r = None
             if r is not None:
                 src[name] = "derived"
+                regions.append(r)
             else:
-                r = _anchor(name, W, H)
-                src[name] = "fallback"
-            regions.append(r)
+                src[name] = "dropped"
         # --- tray stow target: right of the APPROVED stamp, at the stamp bar's height
         ab = sides.get("approved")
         r = None
@@ -1081,10 +1103,9 @@ def derive_regions(boxes: list, frame: np.ndarray, state: dict):
                 r = None
         if r is not None:
             src["tray_stow"] = "derived"
+            regions.append(r)
         else:
-            r = _anchor("tray_stow", W, H)
-            src["tray_stow"] = "fallback"
-        regions.append(r)
+            src["tray_stow"] = "dropped"
 
     # --- counter shelf
     def left(b, maxfrac=0.36) -> bool:
@@ -1110,11 +1131,7 @@ def derive_regions(boxes: list, frame: np.ndarray, state: dict):
         cand = Box(x1, y1, x2, y2, "", "region", 0.0, caption=REGION_CAPS["counter_shelf"])
         if 0.55 * H <= y1 <= 0.75 * H and cand.h >= 0.06 * H and x2 <= 0.4 * W and cand.w >= 0.15 * W:
             shelf = cand
-    if shelf is not None:
-        src["counter_shelf"] = "derived"
-    else:
-        shelf = _anchor("counter_shelf", W, H)
-        src["counter_shelf"] = "fallback"
+    src["counter_shelf"] = "derived" if shelf is not None else "dropped"   # used only to place the desk
     # The counter shelf itself is NOT a hand-back target: run 092612 dropped the stamped passport on it
     # 5 times and it just lay there; dropped on the person above it, the entrant said "Thank you." and left.
     # --- hand back: the person at the window (face box, upper torso)
@@ -1127,10 +1144,9 @@ def derive_regions(boxes: list, frame: np.ndarray, state: dict):
             hb = cand
     if hb is not None:
         src["hand_back"] = "derived"
+        regions.append(hb)
     else:
-        hb = _anchor("hand_back", W, H)
-        src["hand_back"] = "fallback"
-    regions.append(hb)
+        src["hand_back"] = "dropped"
 
     # --- desk: right of the shelf, below the tray
     if src["counter_shelf"] == "derived":
@@ -1138,10 +1154,9 @@ def derive_regions(boxes: list, frame: np.ndarray, state: dict):
         desk = Box(x1, int(0.72 * H), min(W - 1, x1 + int(0.25 * W)), int(0.95 * H), "", "region", 0.0,
                    caption=REGION_CAPS["desk"])
         src["desk"] = "derived"
+        regions.append(desk)
     else:
-        desk = _anchor("desk", W, H)
-        src["desk"] = "fallback"
-    regions.append(desk)
+        src["desk"] = "dropped"
     return regions, src
 
 
@@ -1173,9 +1188,10 @@ def derive_tray_handle(boxes: list, frame: np.ndarray, state: dict):
 # --------------------------------------------------------------------------
 
 ACTION_RULE = (
-    "Constraint: the loudspeaker/horn, the APPROVED and DENIED stamps, buttons/menu text and page corners are "
-    "CLICK only; documents (passport, papers, bulletin, rulebook), the stamp tray tab and the shutter lever are "
-    "DRAG only. Drop targets (stamp landing strip, counter shelf, desk) are only the end point of a drag."
+    "Convention (manual section 2): stamps and buttons are clicked, papers and the tray tab are dragged -- the "
+    "loudspeaker/horn, the APPROVED and DENIED stamps, buttons/menu text and page corners are CLICKED; documents "
+    "(passport, papers, bulletin, rulebook), the stamp tray tab and the shutter lever are DRAGGED. Drop targets "
+    "(stamp landing strip, the entrant, desk) are only the end point of a drag."
 )
 
 
@@ -1183,11 +1199,18 @@ WAIT_KEY = "wait"
 WAIT_DESC = "wait - do nothing this turn (someone is walking in / a screen is changing)"
 
 
+ACTION_CHOICES = {
+    "click": "click one numbered element (stamps, the loudspeaker, buttons / menu text, page corners)",
+    "drag": "drag one numbered element (a paper, the stamp tray tab, the lever) onto a numbered drop target",
+    "wait": "do nothing this turn (someone is walking in / a screen is changing)",
+}
+
+
 def build_questions(src_ids: dict, tgt_ids: dict, booth: bool = True) -> dict:
-    """Request 2: which element (its click/drag input follows from the element, manual section 2) and, in the booth,
-    which drop target. The separate action question was dropped (it cost ~1.7 s per tick with the long text; the
-    convention already fixed the input for every element)."""
+    """Request 2: the input kind (TOD's `action`, audit B26), the element and, in the booth, the drop target."""
     q = {
+        "action": choice("Following the manual and what is currently true on screen, what kind of mouse input is "
+                         "the next step? " + ACTION_RULE, dict(ACTION_CHOICES)),
         "source": choice(
             "Following the manual and what is currently true on screen: which numbered element is clicked "
             "next, or, for a drag, picked up? Use the number drawn on its marker; choose 'wait' if nothing should "
@@ -1204,32 +1227,6 @@ def build_questions(src_ids: dict, tgt_ids: dict, booth: bool = True) -> dict:
     return q
 
 
-def _build_questions_old(src_ids: dict, tgt_ids: dict) -> dict:
-    return {
-        "action": choice(
-            "Following the manual and what is currently true on screen, what kind of mouse input is the next "
-            "step? " + ACTION_RULE,
-            {
-                "click": "click one numbered element (loudspeaker, a stamp, a button/menu text, a page corner)",
-                "drag": "drag one numbered element (a document, the stamp tray tab, the lever) onto a drop target",
-                "wait": "do nothing this turn (someone is walking in / a screen is changing)",
-            },
-        ),
-        "source": choice(
-            "Following the manual and what is currently true on screen: which numbered element is clicked "
-            "next, or, for a drag, picked up? Use the number drawn on its marker. Stamping: click the stamp the "
-            "passport is lying under; if you want the other decision, first drag the passport to the other strip.",
-            src_ids,
-        ),
-        "target": choice(
-            "If the next input is a drag: onto which numbered drop target or element should the dragged item be "
-            "released? (stamp landing strip = under a stamp so it can be stamped; counter shelf = hand documents "
-            "back; desk = read a document / put papers aside / pull the tray tab left.) Ignored for a click.",
-            tgt_ids,
-        ),
-    }
-
-
 def _cls(b, booth: bool, doc: bool = False):
     if b is None:
         return None
@@ -1238,35 +1235,6 @@ def _cls(b, booth: bool, doc: bool = False):
     if doc:
         return "drag"   # TOD's request-1 identity says this element is a paper (documents are drag-only)
     return man.input_class(b, booth)
-
-
-def enforce_input(action: str, src: str, res, idmap: dict, src_ids: dict, booth: bool, doc_ids=()):
-    """Apply the manual's click-only / drag-only convention to TOD's pick.
-    On a conflict (e.g. drag on a stamp) take the better of
-      (a) same element, its allowed input:  P(src) * P(allowed action)
-      (b) same input, best element allowed for it:  P(action) * P(element)
-    Returns (action, src, note); note == '' when nothing changed."""
-    if action not in ("click", "drag") or not src.isdigit():
-        return action, src, ""
-    cls = _cls(idmap.get(int(src)), booth, int(src) in doc_ids)
-    if cls in (None, action):
-        return action, src, ""
-    pa, ps = res["action"].probabilities, res["source"].probabilities
-    opts = []
-    if cls in ("click", "drag"):
-        opts.append((float(ps.get(src, 0)) * float(pa.get(cls, 0)), cls, src))
-    best = None
-    for k in src_ids:
-        if _cls(idmap.get(int(k)), booth, int(k) in doc_ids) in (None, action) and (best is None or ps.get(k, 0) > ps.get(best, 0)):
-            best = k
-    if best:
-        opts.append((float(pa.get(action, 0)) * float(ps.get(best, 0)), action, best))
-    if not opts:
-        return "wait", src, f"{action} on #{src} ({cls}-only), no compatible option -> wait"
-    _, a2, s2 = max(opts, key=lambda o: o[0])
-    note = (f"TOD chose {action} #{src} but that element is {cls}-only -> "
-            + (f"coerced to {a2} #{s2}" if s2 == src else f"kept {a2}, re-picked #{s2} (best {a2}-able element)"))
-    return a2, s2, note
 
 
 # --------------------------------------------------------------------------
@@ -1320,7 +1288,6 @@ def encode_image(img: np.ndarray, fmt: str = "png", quality: int = 90) -> str:
 CITATION_RE = re.compile(r"CITATION|WARNING|PENALTY|ISSUED|Protocol|Violat|M\.?[O0]\.?[AR]\.", re.I)
 LAST_DAY_FILE = os.path.join(ROOT, "runs", "LAST_DAY.json")   # the day TOD last read, for a restart within the hour
 PAUSE_MIN_FRAC = 0.05     # changed fraction (vs the grabbed frame) that counts as "pause menu on screen"
-STAMP_REOFFER_TICKS = 6   # ticks after a recorded stamp press during which the stamps are not offered again
 
 
 MULTIPAGE_IDS = ("rulebook", "bulletin", "transcript")   # papers whose page corner turns a page (a click)
@@ -1355,7 +1322,7 @@ def desk_target_redundant(idmap: dict, src_ids: dict, doc_ids, frame, state: dic
     step N, step E? and whenever the passport lies under a stamp head (it may have to go back to the desk)."""
     f = facts or {}
     desk = [k for k, b in idmap.items() if b.kind == "region" and b.caption == REGION_CAPS["desk"]]
-    if not desk or f.get("no_passport") or f.get("e_undecided") or f.get("passport_under"):
+    if not desk or f.get("no_passport") or f.get("passport_under"):
         return None
     # passport not read yet (country, and on Day 2/3 the EXP. date): moving it on the desk re-exposes the page
     # (runs 092642 t10/t105/t116, 150111 t20: desk -> desk moves while the country read 'unreadable')
@@ -1504,47 +1471,31 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     handle = derive_tray_handle(boxes, frame, state) if booth else None
     if handle is not None:
         boxes = list(boxes) + [handle]
-    # step E- (passport under the WRONG stamp for the carried country): the stamps are not valid sources this tick
-    # (a press would be refused, run 005956 t33-35); they stay drawn, struck through, like an excluded element
-    wrong = man.wrong_stamp(state, day if day in DAY_RULES else "1", facts) if booth else None
-    if facts is not None:
-        facts["e_minus"] = list(wrong) if wrong else None
-    undecided = (not wrong and booth and man.undecided_stamp(state, day if day in DAY_RULES else "1", facts))
-    if facts is not None:
-        facts["e_undecided"] = bool(undecided)
-    pu_now = (facts or {}).get("passport_under") or []
     if (facts or {}).get("waiting_docs"):
-        # G2: passport already handed back, the entrant waits for the rest (run 072926 t125-167: 40 ticks of tray
-        # open/close with the entry ticket in view). Opening the tray is not offered; closing it stays (a paper can
-        # hide under the open tray), the stamps are hidden below.
+        # G2 (TOD said the passport was returned and the entrant is still there): opening the tray is not offered
+        # (run 072926 t125-167: 40 ticks of tray open/close with the entry ticket in view); closing it stays
         boxes = [b for b in boxes if getattr(b, "name", "") != "tray_tab"
                  and not (b.caption or "").startswith("tab at screen edge")]
-    if undecided and man.yes(state, "document_open_on_desk"):
-        # E?: the page has to be read, not the tray closed (run 044332 t44: closing it started a C/E? loop) -- but
-        # only while TOD sees the passport open on the desk; with it hidden under the open tray, closing the tray
-        # is the way to it (loop10 run 162909 t20-47: tray close hidden, 'document under the open stamp tray'
-        # dragged / wait for 28 ticks)
-        boxes = [b for b in boxes if not (getattr(b, "name", "") == "tray_tab_open" or b.caption == TRAY_HANDLE_CAP)]
     if nopp:
         boxes = [b for b in boxes if not (_is_tray_tab(b) or b.caption == TRAY_HANDLE_CAP
                                           or (b.caption or "").startswith("tab at screen edge"))]
-    sc = (facts or {}).get("stamp_clicks") or []
-    # already stamped for this entrant (a press on record): a second press is useless (run 070005 t25-31: 7 more
-    # DENIED presses on a stamped passport); re-offered after STAMP_REOFFER_TICKS in case the press did not mark
-    restamp_block = bool(sc) and tick is not None and tick - sc[-1][0] < STAMP_REOFFER_TICKS
-    ms = (facts or {}).get("mark_side")
-    if ms and not sc and not (ms["value"] == "approved" and man.needed_stamp(state, day if day in DAY_RULES else "1",
-                                                                                facts) == "denied"):
-        restamp_block = True   # stamped per the screen (recheck); only F2 (APPROVED ink, DENIED needed) re-stamps
-    if wrong or undecided or restamp_block or nopp or (facts or {}).get("waiting_docs"):
-        hide_stamp = lambda b: _stamp_side(b, frame) is not None
-    elif booth and facts is not None and "strip" in facts:
-        # a stamp is offered only when request 1 puts the passport under it -- the same test as the refusal veto
-        # (run 022439 t69-76: 5 refused presses with the passport under neither head)
-        hide_stamp = lambda b: _stamp_side(b, frame) not in (None, *pu_now)
-    else:
-        hide_stamp = lambda b: False
-    banned = ((lambda b: stuck.banned(tick, b) is not None or hide_stamp(b)) if stuck is not None else hide_stamp)
+    # audit A1: both stamps are offered whenever the tray is open -- no stamp is hidden by a code verdict, a press
+    # memory or an ink reading. The only stamp guard is the refusal veto in run() (TOD's strip answer).
+    tray_note = None
+    flips = (facts or {}).get("tray_flips", 0)
+    if stuck is not None and flips >= TRAY_FLIP_LIMIT:
+        # audit A5: a tray open/close loop is excluded BEFORE request 2 (struck through, reason in the history
+        # callout); TOD's pick is never swapped afterwards. Only the CLOSING tab: opening a closed tray is step C.
+        for b in boxes:
+            if getattr(b, "name", "") == "tray_tab_open" or b.caption == TRAY_HANDLE_CAP:
+                why = (f"was opened and closed {flips} times in the last 8 ticks without a stamp (tray toggle "
+                       "loop)")
+                stuck.ban(tick, "drag", b, describe(b, W, H), 1, ticks=TRAY_BAN_TICKS, why=why)
+                tray_note = (f"TRAY LOOP: the stamp tray was opened and closed {flips} times in the last 8 ticks "
+                             f"without a stamp; its closing tab is ruled out for {TRAY_BAN_TICKS} ticks.")
+    if facts is not None:
+        facts["tray_note"] = tray_note
+    banned = (lambda b: stuck.banned(tick, b) is not None) if stuck is not None else (lambda b: False)
     annotated, idmap = annotate(frame, list(boxes) + regions, max_marks=args.max_marks - 1 + len(regions),
                                 excluded=banned)
     if not booth:  # text/cutscene screens without a button are advanced by clicking the screen itself
@@ -1561,7 +1512,11 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
             x1, y1, x2, y2 = d["box"]
             if x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 and getattr(b, "name", "") not in layout.BY_NAME:
                 rest = desc[str(i)].split(" — ", 1)[-1]   # drop the detector kind; TOD's identity names it
-                desc[str(i)] = f"{d['id']} (TOD {d['p']:.2f}) — {rest}"
+                if d["id"] == man.UNREAD:   # identity gate: no name below IDENTITY_MIN_P
+                    wh = "counter" if d["where"] == "counter" else "desk"
+                    desc[str(i)] = f"document on the {wh} — unread (TOD could not tell, p={d['p']:.2f}) — {rest}"
+                else:
+                    desc[str(i)] = f"{d['id']} (TOD {d['p']:.2f}) — {rest}"
                 if nopp and d["id"] == "rulebook":
                     pass   # step N: rulebook pages and rule lines are clicked (page corner, inspect-mode rule)
                 elif d["id"] != "other" or b.kind == "text":   # a texted 'other' paper is still a paper (run
@@ -1594,7 +1549,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         dup_ids.update(str(i) for i in els[1:])
     # regions are drop targets only; the background is a click source only
     src_ids = {k: v for k, v in desc.items() if k not in banned_ids and idmap[int(k)].kind != "region"
-               and not hide_stamp(idmap[int(k)]) and k not in dup_ids}
+               and k not in dup_ids}
     tgt_ids = {k: v for k, v in desc.items() if idmap[int(k)].kind != "background"} or dict(desc)
     if booth:   # in the booth every drag ends on a drop-target region (manual section 3); nothing else is a target
         tgt_ids = {k: v for k, v in tgt_ids.items() if idmap[int(k)].kind == "region"} or tgt_ids
@@ -1612,6 +1567,9 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         if name in ("desk", "desk_clear") and desk_info is not None:
             region_info[name]["plan"] = {k_: desk_info[k_] for k_ in ("drop_native", "passport_box_planned",
                                                                        "passport_from", "passport_box_now", "check")}
+    for name, v in region_src.items():
+        if v == "dropped":   # vision extractor: could not be derived from this frame -> not offered (logged)
+            region_info[name] = {"id": None, "box": None, "target_source": "dropped"}
     questions = build_questions(src_ids, tgt_ids, booth)
     # citation slips / flyers (TOD's identity) among the sources: their drop is checked in decide (never a stamp strip,
     # never the entrant -- a flyer only together with the entrant's papers after the passport went back)
@@ -1626,7 +1584,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
                 tgt_ids=tgt_ids, regions=region_info, booth=booth, questions=questions, state_text=state_text,
                 image_url=url, image_kb=round(len(url) * 3 / 4 / 1024, 1), clutter_src=clutter_src,
                 flyer_back=flyer_back,
-                tray_flips=(facts or {}).get("tray_flips", 0), e_minus=wrong,
+                tray_flips=(facts or {}).get("tray_flips", 0), region_src=region_src,
                 prep_ms=round((time.perf_counter() - t0) * 1e3, 1))
 
 
@@ -1664,11 +1622,10 @@ def _clean_state(state: dict) -> dict:
 
 
 TRAY_FLIP_LIMIT = man.TRAY_FLIP_LIMIT
+TRAY_BAN_TICKS = 4   # a toggle-looping closing tab stays excluded this long (A5)
 NONBOOTH_STOP = 60   # step-7 ticks in a row (cutscenes, day_end, menus) before the run stops
 REPEAT_DRAG_N = 4   # same drag source box (same place) N ticks running -> exclude the source
 HORN_HIDE_P = 0.7
-HANDBACK_STAY = 4   # ticks a person may stay at the window after a hand-back before it is discounted
-HANDBACK_DOCS_STAY = 14   # ... or, with papers still visible, before 'waiting for the rest of the documents' ends
 REPEAT_WINDOW, REPEAT_STOP = 12, 10   # same executed input 10 of the last 12 ticks -> stall stop (run 114927)    # person_at_window P(yes) above which the horn is not offered
 
 
@@ -1678,98 +1635,56 @@ def _is_tray_tab(b) -> bool:
 
 
 def fill_derived(res, D: dict) -> None:
-    """Logs/overlay expect 'action' (and 'target') answers; request 2 no longer asks them. Insert the derived input
-    (marked derived=True) so the JSON and the overlay stay readable."""
+    """Logs/overlay expect a 'target' answer; off the booth request 2 does not ask it. Insert a placeholder
+    (marked derived=True). `action` is TOD's own answer (request 2)."""
     from types import SimpleNamespace
-    if "action" not in res.answers:
-        res.answers["action"] = SimpleNamespace(value=D["action"], probabilities={D["action"]: 1.0}, confidence=None,
-                                                qtype="derived", derived=True)
     if "target" not in res.answers:
         res.answers["target"] = SimpleNamespace(value="none", probabilities={"none": 1.0}, confidence=None,
                                                 qtype="derived", derived=True)
 
 
 def decide(res, P: dict) -> dict:
-    """TOD's request-2 answers -> the input to perform (after the click/drag
-    convention). Pure: no I/O."""
+    """TOD's request-2 answers -> the input to perform. The input kind is TOD's `action` answer and the element is
+    TOD's `source` pick (audit A5/B26): a mismatch with the element's click/drag convention (manual section 2) is
+    logged in `note` / `convention_mismatch`, never corrected. Pure: no I/O."""
     src = str(res["source"].value)
-    if src == WAIT_KEY or not src.isdigit():
-        return dict(action="wait", src=src, tgt="none", note="", tod_pick=("wait", src),
+    act = str(res["action"].value) if "action" in res.answers else None
+    if src == WAIT_KEY or not src.isdigit() or act == "wait":
+        why = "" if (src == WAIT_KEY or not src.isdigit()) else f"TOD action=wait (source #{src} not used)"
+        return dict(action="wait", src=src, tgt="none", note=why, tod_pick=("wait", src), convention_mismatch=None,
                     p_src=float(res["source"].probabilities.get(src, 0.0)))
     cls = _cls(P["idmap"].get(int(src)), P["booth"], int(src) in P.get("doc_ids", ()))
-    action = "drag" if cls == "drag" else "click"   # the element's own input (manual section 2)
+    action = act if act in ("click", "drag") else ("drag" if cls == "drag" else "click")
     tod_pick = (action, src)
-    action, src, note = enforce_input(action, src, res, P["idmap"], P["src_ids"], P["booth"], P.get("doc_ids", ()))
-    sb0 = P["idmap"].get(int(src)) if src.isdigit() else None
-    closing = sb0 is not None and ("left end of the open" in (sb0.caption or "") or getattr(sb0, "name", "") == "tray_tab_open")
-    if P.get("tray_flips", 0) >= TRAY_FLIP_LIMIT and action == "drag" and _is_tray_tab(sb0) and closing:
-        # only the CLOSING half of the ping-pong is skipped: opening a closed tray is the next step (C) and run
-        # 044332 t43-51 sat in C because the guard replaced every opening drag with a document drag
-        # run 094930/101021: TOD toggled the tray open/closed for 48 ticks; the warning in the state block did
-        # not stop it. Take TOD's best other drag-able element (the documents) instead of the tab.
-        ps = res["source"].probabilities
-        docs = P.get("doc_ids", ())
-        # papers TOD named first (run 005956 t18: the fallback re-pick was the bulletin-storage drawer, which then
-        # looped 14 ticks), then any other drag-able element
-        alt = [k for k in sorted(P["src_ids"], key=lambda k: (int(k) not in docs, -float(ps.get(k, 0))))
-               if not _is_tray_tab(P["idmap"].get(int(k)))
-               and _cls(P["idmap"].get(int(k)), P["booth"], int(k) in docs) == "drag"]
-        if alt:
-            note = (note + "; " if note else "") + (f"tray toggled {P['tray_flips']}x without a stamp -> "
-                                                    f"tab #{src} skipped, re-picked #{alt[0]}")
-            src = alt[0]
+    note, mismatch = "", None
+    if cls in ("click", "drag") and cls != action:
+        mismatch = f"TOD chose {action} #{src}; by the convention that element is {cls}-only (executed as TOD chose)"
+        note = mismatch
     if action == "drag" and "target" not in res.answers:
-        return dict(action="wait", src=src, tgt="none", note="drag-only element off the booth -> wait",
-                    tod_pick=tod_pick, p_src=float(res["source"].probabilities.get(src, 0.0)))
+        return dict(action="wait", src=src, tgt="none", note="drag off the booth (no drop target) -> wait",
+                    tod_pick=tod_pick, convention_mismatch=mismatch,
+                    p_src=float(res["source"].probabilities.get(src, 0.0)))
     tgt = str(res["target"].value) if "target" in res.answers else "none"
     sb = P["idmap"].get(int(src)) if src.isdigit() else None
-    if action == "drag" and _is_tray_tab(sb):
-        # the tab only toggles the tray: an open tray's tab goes RIGHT onto the stow edge, a closed tray's tab LEFT
-        # onto the desk. Compare dry-run 2026-10-02 (003519_0033, loop5 live): TOD picked the open tab but dropped
-        # it on a stamp landing strip, where it does nothing.
-        is_open = "left end of the open" in (sb.caption or "") or getattr(sb, "name", "") == "tray_tab_open"
-        want = (REGION_CAPS["tray_stow"],) if is_open else (REGION_CAPS["desk"], REGION_CAPS["desk_clear"])
-        ok = [k for k, b in P["idmap"].items() if b.kind == "region" and b.caption in want]
-        if ok and tgt != str(ok[0]):
-            note = (note + "; " if note else "") + (f"tray tab dragged onto #{tgt} -> #{ok[0]} "
-                                                    f"({'stow edge' if is_open else 'desk'})")
-            tgt = str(ok[0])
     tb_ = P["idmap"].get(int(tgt)) if tgt.isdigit() else None
+    veto = None
     if (action == "drag" and sb is not None and tb_ is not None and tb_.kind == "region"
             and tb_.caption == REGION_CAPS["desk"] and not _is_tray_tab(sb)
             and tb_.x1 <= sb.center[0] <= tb_.x2 and tb_.y1 <= sb.center[1] <= tb_.y2):
-        # the paper already lies on the desk target: dropping it there again is a no-op (coordinator count: 26
-        # re-drops in runs 015649/022439) -> TOD's best other target
-        alt = [k for k, _ in sorted(res["target"].probabilities.items(), key=lambda kv: -kv[1])
-               if k != tgt and k != src and k.isdigit() and P["idmap"].get(int(k)) is not None
-               and P["idmap"][int(k)].caption != REGION_CAPS["hand_back"]]   # never an unplanned hand-back
-        if alt:
-            note = (note + "; " if note else "") + f"#{src} already lies on the desk target -> #{alt[0]}"
-            tgt = alt[0]
+        # the paper already lies on the desk target: executed as TOD chose (a no-op the stuck tracker sees), logged
+        note = (note + "; " if note else "") + f"#{src} already lies on the desk target #{tgt} (executed as chosen)"
     if action == "drag" and src in P.get("clutter_src", ()) and tb_ is not None:
-        # manual step K: a citation slip / flyer goes to the stow shelf (or the desk); never under a stamp, never to
-        # the entrant (a flyer: only once the passport went back, G2) -> TOD's best allowed target
+        # manual step K: a citation slip / flyer is never dropped under a stamp or on the tray edge, a citation never
+        # on the entrant (a flyer only after the passport went back, G2). Such a drop is REFUSED (no input, logged);
+        # TOD's target is never replaced by another one
         cid = P["desc"][src].split(" (TOD", 1)[0]
         bad = {REGION_CAPS["stamp_landing_denied"], REGION_CAPS["stamp_landing_approved"], REGION_CAPS["tray_stow"]}
         if not (cid == "flyer" and P.get("flyer_back")):
             bad.add(REGION_CAPS["hand_back"])
         if tb_.caption in bad:
-            alt = [k for k, _ in sorted(res["target"].probabilities.items(), key=lambda kv: -kv[1])
-                   if k.isdigit() and P["idmap"].get(int(k)) is not None and P["idmap"][int(k)].kind == "region"
-                   and P["idmap"][int(k)].caption not in bad]
-            if alt:
-                note = (note + "; " if note else "") + f"{cid} #{src} not onto #{tgt} (step K) -> #{alt[0]}"
-                tgt = alt[0]
-            else:
-                note = (note + "; " if note else "") + f"{cid} #{src} not onto #{tgt} (step K), no other target -> wait"
-                action = "wait"
-    if action == "drag" and tgt == src:
-        # dropping an item on itself is a no-op: take TOD's best other target
-        alt = [k for k, _ in sorted(res["target"].probabilities.items(), key=lambda kv: -kv[1]) if k != src]
-        if alt:
-            tgt = alt[0]
-    return dict(action=action, src=src, tgt=tgt, note=note, tod_pick=tod_pick,
-                p_src=float(res["source"].probabilities.get(src, 0.0)))
+            veto = f"refused: {cid} #{src} onto '{short(tb_.caption, 40)}' (step K: never stamped / handed back)"
+    return dict(action=action, src=src, tgt=tgt, note=note, tod_pick=tod_pick, convention_mismatch=mismatch,
+                veto=veto, p_src=float(res["source"].probabilities.get(src, 0.0)))
 
 
 @dataclass
@@ -1790,43 +1705,41 @@ class Entrant:
     exp: dict | None = None                      # {"year", "month", "p", "tick"} EXP. reading (Day 2+)
     checks: dict = field(default_factory=dict)   # {check key: {"value", "p", "tick"}} confident yes/no readings
     log: list = field(default_factory=list)          # [(tick, why)] every reset (for the run report)
-    waiting_docs: bool = False   # passport handed back, person still there, papers still visible (Day 3 ticket)
-    undecided_n: int = 0         # manual step E? ticks in a row (passport under a strip, verdict unknown)
-    b3_n: int = 0                # manual step B3 ticks for this entrant (ticket to the desk; capped in manual)
-    mark_side: dict | None = None   # {"value": 'approved'|'denied', "p", "tick"}: stamp ink read on the recheck
+    waiting_docs: bool = False   # TOD: passport returned, person still there, papers of theirs still visible (G2)
+    mark_side: dict | None = None   # {"value": 'approved'|'denied', "p", "tick"}: TOD's stamp-ink reading
+    verdict: dict | None = None     # {"value": approved|denied|cannot_decide_yet, "p", "tick"}: TOD's verdict answer
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
         self.hb_drop, self.missed_stamps, self.checks, self.city, self.exp = None, [], {}, None, None
         self.tray_seen = []   # run 005956 t18/t21: entrant 2's tray toggles blocked entrant 3's first tray opening
         self.waiting_docs = False
-        self.undecided_n, self.mark_side, self.b3_n = 0, None, 0
+        self.mark_side, self.verdict = None, None
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
 
     def observe(self, tick: int, state: dict, papers: bool = False, day: str = "1") -> None:
-        """Start-of-tick update from request 1 (`papers`: the layout found a paper on the desk or counter)."""
+        """Start-of-tick update from request 1 (`papers`: TOD named a paper of the entrant's -- passport, ticket,
+        flyer or an unread one -- on the desk or counter). The hand-back is TOD's PASSPORT_RETURNED_Q answer on this
+        frame (audit B20), not a tick window."""
         person = man.yes(state, "person_at_window")
-        if self.hb_drop is not None and tick - self.hb_drop <= 3 and not person:
-            # a document was dropped on the person and the person is gone now: they took it and left,
-            # whether or not a stamp was detected (run 101448: the stamp was missed, memory carried over)
-            self.reset(tick, f"hand-back drop at tick {self.hb_drop} + person gone")
-        elif self.hb_drop is not None and tick - self.hb_drop > 3:
-            self.hb_drop = None   # the person stayed: the drop was not a hand-back
-        elif (day == "3" and self.handed_back is not None and person and tick - self.handed_back > HANDBACK_STAY
-              and tick - self.handed_back <= HANDBACK_DOCS_STAY
-              and (papers or man.yes(state, "document_open_on_desk") or man.yes(state, "document_on_counter_shelf"))):
-            # run 070911 t79-111: the passport went back, the entrant waited for the entry ticket still on the desk;
-            # the reset below made the ticket 'a new passport' for 30 ticks. Keep the hand-back, ask for the rest.
-            self.waiting_docs = True
-        elif self.handed_back is not None and person and tick - self.handed_back > HANDBACK_STAY:
-            # the person is still at the window long after the 'hand-back': it was not one (run 114927 t36: the
-            # transcript printer was dragged onto the person; the state block then said 'finished' for 60 ticks)
-            self.reset(tick, f"person still at the window {tick - self.handed_back} ticks after the hand-back at "
-                             f"tick {self.handed_back}: not a hand-back")
-        elif not person and (self.handed_back is not None or not (
+        ra = man.returned_answer(state)
+        if ra == "returned" and person and self.handed_back is None and (
+                self.hb_drop is not None or self.stamp_clicks or self.mark_side):
+            # TOD: the passport is no longer here -> this entrant is done; the next one must not inherit the readings
+            self.reset(tick, f"TOD: passport returned (drop at tick {self.hb_drop}, country="
+                             f"{(self.country or {}).get('value')}, stamps={[sd for _, sd in self.stamp_clicks]})")
+            self.handed_back = tick
+        elif ra == "still_here":
+            self.hb_drop = None   # TOD still sees the passport: the drop on the person was not a hand-back
+            if self.handed_back is not None:
+                self.handed_back, self.waiting_docs = None, False
+        if self.handed_back is not None and person and ra == "returned":
+            # G2 (run 070911 t79-111: the entrant waited for the ticket still on the desk)
+            self.waiting_docs = bool(papers)
+        if not person and (self.handed_back is not None or self.hb_drop is not None or not (
                 man.yes(state, "document_open_on_desk") or man.yes(state, "document_on_counter_shelf"))):
-            if self.country or self.stamp_clicks or self.handed_back is not None:
+            if self.country or self.stamp_clicks or self.handed_back is not None or self.hb_drop is not None:
                 self.reset(tick, "window empty")
         if self.waiting_docs and man.yes(state, "document_open_on_desk", 0.6):
             # an open passport on the desk again = the next entrant's (run 113459 t82-92: G2 carried over to a new
@@ -1844,13 +1757,17 @@ class Entrant:
         e = state.get("exp_read")   # TOD's pick among the OCR dates (request 1b)
         if e and e["p"] >= 0.5 and (self.exp is None or e["p"] >= self.exp["p"]):
             self.exp = {"value": e["value"], "p": e["p"], "tick": tick}
-        ms = man.mark_side_answer(state)   # only asked after man.UNDECIDED_RECHECK E? ticks (probe_context)
-        if ms and not self.stamp_clicks:
+        ms = man.ink_now(state, {"stamp_clicks": self.stamp_clicks, "missed_stamps": self.missed_stamps})
+        if ms:   # TOD's stamp-ink reading (STAMP_INK_Q) is the 'stamped' sign (audit B19)
             self.mark_side = {**ms, "tick": tick}
+        v = state.get("verdict")
+        if v and v["p"] >= man.VERDICT_P:
+            self.verdict = {"value": v["value"], "p": v["p"], "tick": tick}
         for k in man.CHECK_KEYS:   # Day 2/3 checks, carried like the country (the page is hidden once under a stamp)
             v = man.check_answer(state.get(k))
             if v is not None:
-                self.checks[k] = {"value": v, "p": state[k]["p"], "tick": tick}
+                self.checks[k] = {"value": v, "raw": state[k]["value"], "from": state[k].get("from"),
+                                  "p": state[k]["p"], "tick": tick}
 
     def after_action(self, tick: int, state: dict, action: str, sb, tb, frame, changed, src_desc: str = "") -> None:
         if not changed or sb is None:
@@ -1878,32 +1795,26 @@ class Entrant:
             # the dropped paper must be the passport: TOD named it so, or it is an unnamed paper on the desk (run
             # 084642 t137: a counter paper TOD named 'rulebook' was dropped on the entrant right after the stamp, the
             # loop took it for the hand-back and the stamped passport stayed on the desk for 15 ticks)
-            named = src_desc.split(" (TOD", 1)[0] if " (TOD" in src_desc else None
-            is_pp = named == "passport" or (named is None and sb.caption != "document on counter")
-            if (self.stamp_clicks or self.mark_side or man.yes(state, "passport_shows_stamp_mark")) and is_pp:
-                # a stamped passport dropped on the person and the frame changed: this entrant is done. Reset
-                # now (the next entrant must not inherit the country/stamps) but keep handed_back so the
-                # manual says "wait for them to leave, then click the horn".
-                done = (f"hand-back drop at tick {tick} (country={(self.country or {}).get('value')}, "
-                        f"stamps={[sd for _, sd in self.stamp_clicks] or 'mark only'})")
-                self.reset(tick, done)
-                self.handed_back = tick
-            else:
-                self.hb_drop = tick   # unstamped: reset only if the person then leaves (observe)
+            # a drop on the person is only a candidate; TOD's PASSPORT_RETURNED_Q answer next tick decides whether
+            # the passport went back (observe), or the person leaving does
+            self.hb_drop = tick
 
     def facts(self, tick: int, df: dict) -> dict:
         return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
                 "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
                 "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp,
-                "waiting_docs": self.waiting_docs, "undecided_n": self.undecided_n, "mark_side": self.mark_side,
-                "b3_n": self.b3_n}
+                "waiting_docs": self.waiting_docs, "mark_side": self.mark_side, "hb_drop": self.hb_drop,
+                "verdict_carried": self.verdict}
 
-    def note_step(self, step: str, facts: dict) -> None:
-        """Count manual step E? ticks in a row; facts['undecided_n'] lets the next request 1 re-ask the stamp mark."""
-        self.undecided_n = self.undecided_n + 1 if step == "E?" else 0
-        facts["undecided_n"] = self.undecided_n
-        self.b3_n += step == "B3"
-        facts["b3_n"] = self.b3_n
+    def verdict_mem(self) -> dict:
+        """TOD's own readings for this entrant, for the verdict question's text (manual.verdict_question)."""
+        t = self.checks.get("entry_ticket_dated_today")
+        tk = None
+        if t:
+            txt = {"dated_today": "VALID ON 1982.11.25 (today)", "other_date": "a date other than today",
+                   "no_ticket": "no entry ticket among the papers"}.get(t.get("raw"), str(t.get("raw")))
+            tk = {"value": (t.get("from") or txt), "p": t["p"], "tick": t["tick"]}
+        return {"country": self.country, "exp": self.exp, "city": self.city, "ticket": tk}
 
     def tray_flips(self) -> int:
         """Open<->closed changes of the stamp tray over the last 8 ticks with no stamp click in between.
@@ -1911,6 +1822,25 @@ class Entrant:
         last_stamp = self.stamp_clicks[-1][0] if self.stamp_clicks else -1
         seq = [o for t, o in self.tray_seen if t > last_stamp]
         return sum(1 for a, b in zip(seq, seq[1:]) if a != b)
+
+
+ENTRANT_PAPER_IDS = ("passport", "entry_ticket", "flyer", man.UNREAD)
+
+
+def entrant_papers(state: dict, df: dict) -> bool:
+    """TOD named (or could not name) a paper of the entrant's on the desk or counter (G2 'papers still here')."""
+    return any(d["id"] in ENTRANT_PAPER_IDS for d in name_docs(state, df))
+
+
+def set_verdict_ask(df: dict, ent: "Entrant", prev_state: dict | None, prev_facts: dict | None, day: str) -> None:
+    """Request 1b asks TOD's verdict once the passport is readable: TOD read its country on an earlier tick, or last
+    tick TOD saw an open passport on the desk / named a desk paper the passport -- and it was not handed back yet.
+    The text carries TOD's own readings so far (Entrant.verdict_mem)."""
+    ps, pf = prev_state or {}, prev_facts or {}
+    seen = (ent.country is not None or man.yes(ps, "document_open_on_desk", INSPECT_OPEN_P)
+            or any(d["where"] == "desk" and d["id"] == "passport" and d["p"] >= 0.5 for d in pf.get("docs_named") or []))
+    df["ask_verdict"] = bool(seen and ent.handed_back is None and day in DAY_RULES)
+    df["verdict_mem"] = ent.verdict_mem()
 
 
 def gate_inspection(state: dict, asked: tuple, df: dict | None = None) -> dict:
@@ -1949,7 +1879,7 @@ def offline(args) -> int:
     # across them; each decision counts as executed and 'changed' (the next recorded frame is what followed)
     s_ent, s_hist, s_cyc = Entrant(), deque(maxlen=args.history), CycleDetector()
     s_stuck = StuckTracker(ban_ticks=args.ban_ticks)
-    s_note, s_resets, s_prev = ("", -1), 0, {}
+    s_note, s_resets, s_prev, s_prev_f = ("", -1), 0, {}, {}
     for fi, path in enumerate(args.frames):
         m_t = re.search(r"(\d+)\.(?:png|jpg)$", path)
         otick = int(m_t.group(1)) if (seq and m_t) else fi
@@ -1968,20 +1898,22 @@ def offline(args) -> int:
         s_stuck.decay(otick)
         oday = args.day or "unknown"   # offline only: the day the frames come from (live runs read it via request 1)
         asked = ("issuing_country",) if oday == "1" else man.INSPECT_KEYS
-        if seq:
-            df["recheck_mark"] = s_ent.undecided_n >= man.UNDECIDED_RECHECK and not s_ent.mark_side
-        probe, t_probe = _timed(state_probe, tod, frame, args, oday, asked, df, True, None,
-                                (s_prev or None) if seq else None)
+        ctx = probe_context(s_prev_f, s_prev) if (seq and s_prev) else None
+        probe, t_probe = _timed(state_probe, tod, frame, args, oday, asked, df, False, None,
+                                (s_prev or None) if seq else None, ctx)   # identities ride in 1b, as live
         state = parse_state(probe)
-        if oday in ("2", "3"):   # live: these ride in request 1b
-            dres, _ = _timed(doc_probe, tod, frame, args, df, oday, False)
-            if dres is not None:
-                state.update(parse_state(dres))
-            merge_doc_answers(state, df, otick)
+        if seq:
+            set_verdict_ask(df, s_ent, s_prev, s_prev_f, oday)
+        else:
+            df["ask_verdict"], df["verdict_mem"] = oday in DAY_RULES, {}
+        dres, _ = _timed(doc_probe, tod, frame, args, df, oday)   # request 1b (live: parallel to request 1)
+        if dres is not None:
+            state.update(parse_state(dres))
+        merge_doc_answers(state, df, otick)
         gate_inspection(state, asked, df)
         s_prev = state
         ent = s_ent if seq else Entrant()
-        ent.observe(otick, state, papers=bool(df.get("docs")), day=oday)
+        ent.observe(otick, state, papers=entrant_papers(state, df), day=oday)
         if seq and len(ent.log) != s_resets:
             s_resets = len(ent.log)
             s_cyc.reset()
@@ -1999,8 +1931,7 @@ def offline(args) -> int:
         D = decide(res, P)
         fill_derived(res, D)
         step = man.situation(state, oday if oday in DAY_RULES else "1", facts)
-        if seq:
-            ent.note_step(step[0], facts)
+        s_prev_f = facts
         cyc_rec = None
         if seq:
             scr = state.get("screen", {}).get("value", "")
@@ -2034,6 +1965,13 @@ def offline(args) -> int:
                 print(f"[offline] t{otick} cycle_break: {note_c}" + ("  -> stop reason: cycle" if hit["hits"] >= 2 else ""))
         r = {
             "frame": path, "tick": otick, "cycle_break": cyc_rec, "excluded": sorted(P["banned_ids"], key=int),
+            "verdict": state.get("verdict"), "verdict_carried": facts.get("verdict_carried"),
+            "verdict_asked": bool(df.get("ask_verdict")),
+            "stamps_offered": sorted(_stamp_side(P["idmap"][int(k)], frame) for k in P["src_ids"]
+                                     if _stamp_side(P["idmap"][int(k)], frame)),
+            "tray_open_px": facts.get("tray_open_px"), "stamped": man.stamped(state, facts),
+            "strip_source": {k: v.get("source") for k, v in (facts.get("strip") or {}).items()},
+            "unread_docs": [d["where"] for d in facts.get("docs_named") or [] if d["id"] == man.UNREAD],
             "extractor": args.extractor, "passport_under": facts.get("passport_under"),
             "n_boxes_raw": len(boxes), "n_sources": len(P["src_ids"]), "n_targets": len(P["tgt_ids"]),
             "extract_ms": round(t_ex), "state_ms": round(t_probe), "tod_ms": round(t_tod),
@@ -2289,6 +2227,7 @@ def run(args) -> int:
                     "screen", "tray_open", "passport_under", "ms")}
             df = desk_facts(boxes, frame.shape[1], frame.shape[0], sinfo)
             df["tick"] = tick
+            set_verdict_ask(df, ent, last_state, last_facts, day)   # TOD's verdict question rides in request 1b
             rec["desk_facts"], rec["inspect_asked"] = df, list(asked)
             try:
                 dfut = (_DOC_POOL.submit(_timed, doc_probe, tod, frame, args, df, day)
@@ -2348,36 +2287,22 @@ def run(args) -> int:
             if screen == "day_end" and (ent.country or ent.stamp_clicks or ent.handed_back is not None):
                 # the day is over (Day 2 ends at the bombing mid-entrant): nothing of this entrant carries into the next day
                 ent.reset(tick, "day_end screen")
-            ent.observe(tick, state, papers=bool(df.get("docs")), day=day)   # run 081222 t5: only the ticket was left
+            ent.observe(tick, state, papers=entrant_papers(state, df), day=day)
             if len(ent.log) != n_resets:   # new entrant: stall / pick / refusal counters are entrant-scoped
                 n_resets = len(ent.log)
                 refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0
                 cyc.reset()
             facts = ent.facts(tick, df)
             add_tod_facts(facts, state, df, sinfo)
-            dn = facts.get("docs_named") or []
-            if (day == "3" and not facts.get("waiting_docs") and man.yes(state, "person_at_window")
-                    and not man.yes(state, "document_open_on_desk")
-                    and not any(d["id"] == "passport" and d["p"] >= 0.3 for d in dn)
-                    and any(d["id"] == "entry_ticket" and d["where"] == "desk" and d["p"] >= 0.3 for d in dn)):
-                # Day 3, no passport anywhere, a ticket(-like) paper left, the person still waiting: the passport went
-                # back already (run 092521 after a loop restart: hand-back memory lost, 40 ticks of shuffling)
-                facts["waiting_docs"] = True
-                rec["waiting_docs_from_screen"] = True
-                ent.waiting_docs = True             # sticky for this entrant (reset when the window is empty)
-                if ent.handed_back is None:
-                    ent.handed_back = tick
             if tick < cycle_note[1]:
                 facts["cycle_note"] = cycle_note[0]
-            rec["e_minus"] = facts.get("e_minus")
             rec["docs_named"] = [{k: d[k] for k in ("where", "id", "p", "text")} for d in facts["docs_named"]]
             rec["strip"] = facts["strip"]
             rec["entrant"] = {"country": ent.country, "city": ent.city, "exp": ent.exp, "checks": dict(ent.checks), "stamp_clicks": list(ent.stamp_clicks),
                               "missed_stamps": list(ent.missed_stamps), "handed_back": ent.handed_back,
-                              "mark_side": ent.mark_side, "undecided_n": ent.undecided_n}
+                              "mark_side": ent.mark_side, "verdict": ent.verdict, "hb_drop": ent.hb_drop}
             rec["clutter"] = facts.get("clutter")
             step = man.situation(state, day if day in DAY_RULES else "1", facts)
-            ent.note_step(step[0], facts)
             sline = state_line(state)
             rec.update(state=_clean_state(state), state_line=sline,
                        manual_step_for_state=list(step))  # diagnostic only, never sent to TOD
@@ -2465,7 +2390,7 @@ def run(args) -> int:
             action, src, tgt = D["action"], D["src"], D["tgt"]
             p_src = D["p_src"]
             if D["note"]:
-                print(f"[tick {tick:03d}] input convention: {D['note']}")
+                print(f"[tick {tick:03d}] note: {D['note']}")
             rec.update(
                 state_text=P["state_text"],
                 descriptions=desc,
@@ -2474,6 +2399,7 @@ def run(args) -> int:
                 answers={q: {"choice": a.value, "probabilities": a.probabilities, "confidence": a.confidence}
                          for q, a in res.answers.items()},
                 tod_pick=list(D["tod_pick"]), input_convention=D["note"] or None,
+                convention_mismatch=D.get("convention_mismatch"),
             )
             sb = idmap.get(int(src)) if src.isdigit() else None
             tb = idmap.get(int(tgt)) if tgt.isdigit() else None
@@ -2492,7 +2418,7 @@ def run(args) -> int:
                 row["tgt_desc"] = desc.get(tgt, tgt)
 
             # ---- safety gates ----------------------------------------------------
-            veto = None
+            veto = D.get("veto")   # step K drop refused in decide (no input, TOD's target never replaced)
             if action in ("click", "drag") and sb is not None and screen in ("day_select", "menu") \
                     and RISKY_RE.search(src_desc) and p_src <= 0.9:
                 veto = f"declined '{short(src_desc, 50)}' on {screen} (destructive-looking, p={p_src:.2f} <= 0.9)"

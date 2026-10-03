@@ -6,10 +6,66 @@ Modules (`src/tod_papers/`):
 |---|---|
 | `extract.py` | `extract(frame_bgr) -> list[Box]`. Box = `(x1,y1,x2,y2,text,kind,conf,parent)`, client-relative physical px. |
 | `som.py` | `annotate(frame, boxes, max_marks=60) -> (annotated, {id: Box})`. Numbered tags + outlines, ids in reading order. |
-| `loop.py` | The agent. Two TOD requests per tick (one image each): state on the plain frame, action on the SoM frame. Executes the pick via `io_win.click/drag` at the box centre. |
-| `manual.py` | The Papers, Please playing guide sent in full with every action request, the state questions, the state block, the click-only / drag-only convention. |
-| `anchors.json` | Fallback drop regions (native 570x320 coords) used only when a region cannot be derived from detected boxes. |
+| `loop.py` | The agent. Up to three TOD requests per tick, one image each: request 1 (state, plain frame), request 1b (paper identities, Day 2/3 readings, the verdict; plain frame), request 2 (action, SoM frame). Executes TOD's input via `io_win.click/drag`. |
+| `manual.py` | The Papers, Please playing guide sent in full with every action request, the state / verdict / identity questions, the state block, the click-only / drag-only convention (stated as text; only logged). |
 | `overlay.py` | Writes `viz_NNNN.png`: source-probability heatmap (red fill) + target probability (blue outline) + legend. |
+
+## Decision path: what TOD decides and what code does (loop15, 2026-10-03)
+
+Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. One tick:
+
+1. **Request 1** (plain frame): screen, day, person / counter / open-on-desk / tray / inspect, `passport_under_<side>`
+   (always asked while the tray is open on the pixels), issuing country, Day 3 ticket choice, step-N questions,
+   `passport_stamp_ink` (STAMP_INK_Q: approved / denied / none) after a press, once ink was read, or while the
+   passport lay under a stamp head, and `passport_returned` (returned / still_here / no_person) after a drop on
+   the person, a press, ink, or a hand-back. First tick of a run: all of them.
+2. **Request 1b** (plain frame, parallel to request 1 live): paper identities (`doc_question`: the paper's OCR lines
+   verbatim, each choice defined by its printed text), Day 2/3 readings over the OCR strings (EXP. date, ISS.
+   city, spelling, ticket VALID ON), and the **verdict** question (`manual.verdict_question`): choice approved /
+   denied / cannot_decide_yet; its text is today's rule (Day 1: Arstotzkans only; Day 2: passport valid = not
+   expired and ISS. city in the rulebook list for its country; Day 3: + entry ticket VALID ON 1982.11.25 for
+   foreigners) and TOD's own earlier readings of this entrant (country, EXP., city, ticket with tick and p,
+   labelled "your answer at tick N"; "not read yet" otherwise). Asked once the passport was seen (country read
+   earlier, open on the desk last tick, or a desk paper named passport) until the hand-back
+   (`loop.set_verdict_ask`). No code compares a date, looks up a city or computes a verdict any more
+   (`needed_stamp`, `wrong_stamp`, `undecided_stamp`, `expiry_valid`, `check_value` were deleted).
+3. **Identity gate**: an identity answer below `manual.IDENTITY_MIN_P` (0.4) makes the paper `unread`
+   (`loop.name_docs`). It is offered as "document on the counter -- unread (TOD could not tell, p=...)", never
+   counted as ticket / flyer / passport by any step, the state block says it is not known, and manual step B
+   says to drag unread papers to the desk so they can be read. The old B3 cap (`b3_n`) is gone.
+4. **State block** (request-2 text): facts only, each TOD reading labelled "your reading"; TOD's own verdict answer
+   and p ("Your verdict for this entrant (your own answer, this frame|tick N)"); "stamped" only as TOD's ink
+   reading; stamp presses as history ("a press; whether it marked the passport is the stamp-ink reading"). Removed:
+   "Section 5 applied ... -> X", "the passport is under the wrong stamp: drag it onto X", "the next step is C",
+   "Click the stamp the passport is lying under", "The decision is not known yet ... the stamps are not offered",
+   the LOOP WARNING, "EXPIRED / not expired" and "(NOT) a valid issuing city".
+5. **Options**: both stamps are always offered when the tray is open (no verdict-, press- or ink-based hiding).
+   A tray toggle loop (>= 3 open/close in 8 ticks without a press) strikes the CLOSING tab through via
+   `stuck.ban` before request 2 (4 ticks) with the reason in RULED OUT and a `TRAY LOOP:` line at the top of the
+   history. The hand-back target is offered once TOD read stamp ink (or in G2 / step N). Desk regions on the
+   vision extractor come from the frame or are dropped (`target_source: dropped`); `anchors.json` was removed.
+6. **Request 2**: `action` (click / drag / wait, with the convention "stamps/buttons are clicked, papers/tab are
+   dragged" as text), `source`, `target`. `decide` executes TOD's answers: no tab re-pick, no tab-target rewrite,
+   no desk re-drop re-pick, no click/drag coercion. A convention mismatch is logged (`convention_mismatch`, note)
+   and executed as chosen. A citation/flyer dropped onto a strip / the tray edge / (citation) the entrant is
+   REFUSED (no input, logged), never redirected.
+7. **Guards that remain** (they refuse or exclude, never pick): stamp press refused unless TOD's strip answer puts
+   the passport under that stamp; delete/trash veto on menus; stuck / repeat-drag / cycle exclusions; stop rules.
+8. **Entrant memory**: carries TOD's own readings and answers (country, EXP., city, ticket, ink, verdict). The
+   hand-back is TOD's `passport_returned` answer: `returned` -> entrant done (`handed_back`); with an entrant paper
+   (passport / ticket / flyer / unread) still named on the desk or counter while the person stays -> G2
+   (`waiting_docs`); `still_here` -> the drop was not a hand-back. HANDBACK_STAY / HANDBACK_DOCS_STAY and the
+   Day-3 "no passport, ticket left" combination rule were removed.
+9. `passport_sides` (strip): TOD's `passport_under_<side>` decides at p >= 0.6 (yes) or <= 0.4 (no). Only in
+   between (or not asked) does the pixel paper test + TOD's identity "passport" of the strip paper break the tie;
+   `strip[side].source` = `tod` / `pixel_tiebreak` / `tod_identity_*` in the tick json.
+
+Still code (borderline, by design): question selection (which questions are asked, from the previous tick and a
+pixel tray test), drop-point geometry (desk spot, strip point), fixed-layout controls and targets in the hybrid
+extractor (`target_source: static`), the OCR citation regex that hides out-of-the-way citation boxes (B12), the
+horn / storage hiding while a person is at the window (B4), the inspect-button hiding (B5), step-N hiding, the
+G2 tray-open hiding (B9, now keyed on TOD's returned answer), carry thresholds (country 0.6, non-rulebook
+spelling DENY_P 0.75), and `situation()` (diagnostic step letter, never sent).
 
 ## Running
 
@@ -78,19 +134,18 @@ rapidocr/opencv come from there) plus `pywin32 dxcam mss comtypes`. Recipe in `r
      on the spot, IoU < 0.8) and request 1b could not read it (country unreadable / p < 0.6 and none
      carried, or Day 2/3 no EXP. date read and none carried) -- `loop.passport_needs_clear_space`. The tray
      tab's "drag left onto the desk" redirect accepts either target. While it is offered the state block
-     says "Passport data page readable: no (issuing country read as ..., p=...; EXP. date not read)" and that
-     the verdict cannot be decided until the page is readable; manual C/D say the same. Request 2 offline on
+     says "Passport data page readable: no (issuing country read as ..., p=...; EXP. date not read)" (loop15:
+     the verdict sentence is gone; TOD's own verdict answer says cannot_decide_yet); manual C/D. Request 2 offline on
      092642 t2/t11 and 150111 t2 (live: passport dropped on a stamp strip, country unreadable): target now
      `clear desk space` at p 0.95-0.96.
-   Each falls back to `anchors.json` (native 570x320 coords scaled to the client) if it cannot be derived;
-   the tick json has `regions` and `target_source` = {name: derived|fallback}. Regions are drop targets
+   A region that cannot be derived is not offered (loop15; `anchors.json` removed); the tick json has `regions`
+   and `target_source` = {name: static|derived|derived_frame|dropped}. Regions are drop targets
    only (never a source). The old generic "empty space" target is gone; the screen-centre option exists
    only as a click source on non-booth screens (cutscenes without a button).
    **Request-1 question budget (2026-10-03, audit section 4).** Booth request 1 asks only what this tick can
    consume (`loop.select_state_questions`, chosen from the previous tick's answers via `loop.probe_context`,
-   never used as an answer): `passport_under_<side>` only when the pixel check (`layout.passport_under`, part
-   of `screen_family`) sees a paper in that strip; `passport_shows_stamp_mark` only after a stamp press for
-   this entrant (`manual.stamped` ignores it otherwise); `bulletin_or_rulebook_covering_desk` only when a
+   never used as an answer): `passport_under_<side>` whenever the tray is open on the pixels (loop15: no longer
+   dropped by the pixel strip test); `passport_stamp_ink` / `passport_returned` per the decision path above; `bulletin_or_rulebook_covering_desk` only when a
    passport and a rulebook/bulletin lay on the desk; the passport readings (`issuing_country`, photo, Day 3
    ticket) only when a paper was on the counter/desk. First tick of a run: everything. Cap `REQ1_MAX_Q`=14.
    Dropped keys are logged as `q_dropped`. Runs 092642 (D1 t0-30, D2 t95-130) + 150111 replayed offline:
@@ -114,14 +169,11 @@ rapidocr/opencv come from there) plus `pywin32 dxcam mss comtypes`. Recipe in `r
    days 1-3, bulletin/rulebook/page corners, other screens, mistakes seen in run 20261002_003519) + a
    "WHAT IS CURRENTLY TRUE ON SCREEN" block from request 1 + the last 30 actions, one line each
    (`tick | state summary | input | element | effect`) + ruled-out elements. No rule is pre-selected for
-   TOD. Questions: `action` {click, drag, wait} (instruction states the click/drag constraint),
+   TOD. Questions: `action` {click, drag, wait} (instruction states the click/drag convention),
    `source` (element ids), `target` (element ids + regions).
-7. **Click/drag convention enforced in code** (`enforce_input`): horn, stamps (OCR APPROVED/DENIED,
-   stamp captions), buttons, page corners are click-only; documents (passport/paper/rulebook captions,
-   texted desk panels), the tray tab and the lever are drag-only. On a conflict the loop takes the better
-   of (a) same element with its allowed input, p(src)*p(action'), and (b) same input with the best
-   compatible element, p(action)*p(src'). TOD's raw pick and the note are logged (`tod_pick`,
-   `input_convention`) and shown in the overlay.
+7. **Click/drag convention: logged, not enforced** (loop15; `enforce_input` was dead code and is deleted):
+   TOD's `action` answer is executed. When it disagrees with the element class (`manual.input_class`, TOD's
+   paper identity) the tick json gets `convention_mismatch` and `input_convention`; the input is not changed.
 8. Execute, verify by frame diff, log (`tick_NNNN.{png,json}`, `viz_NNNN.png`, `raw_NNNN.png`,
    `summary.md` with state + manual step per tick). The JSON is written in the tick; the PNGs and the overlay
    render go to a log thread (`_LOG_POOL`, ~0.5-0.75 s off the tick), flushed before `summary.md`. `manual_step_for_state` in the json is
@@ -254,9 +306,8 @@ about 1 citation per Day 2, inside the 2 free warnings. The manual's Day 2 rule 
   history). A click on a stamp (OCR/caption side) whose effect was `changed` while request 1 said tray open and
   passport under the heads is recorded as a stamp. A changed drag of a document onto the counter shelf after a
   stamp marks the hand-back. Reset when the window is empty.
-- **Stamped = any of three** (manual rule F): TOD's `passport_shows_stamp_mark`, `stamped=yes (OCR)` (APPROVED/
-  DENIED-like word below the stamp bar, e.g. `DENETAS` = DENIED ink over ENTRY VISA), or the history line
-  "A stamp was clicked at tick N ... the passport is stamped". F2: APPROVED by mistake -> click DENIED (DENIED
+- (superseded loop15) ~~Stamped = any of three~~: stamped is now only TOD's `passport_stamp_ink` reading
+  (p >= 0.75 after a press, >= 0.85 without one); a press that changed pixels is history only. F2: APPROVED by mistake -> click DENIED (DENIED
   overrules APPROVED, Fandom "Entry denial"); DENIED by mistake cannot be undone -> hand back (first two
   citations a day are warnings).
 - Descriptions: a desk sheet whose OCR has passport fields or a country is described as
@@ -327,7 +378,8 @@ stop; 161058 Uvilia: 71 ticks).
   `decide`: a citation/flyer is never dropped on a landing strip / tray stow edge, a citation never on the entrant,
   a flyer only after the passport went back (G2) -> TOD's best other target, else wait. `passport_sides`: a strip
   paper TOD names citation/flyer (p >= 0.5) is not the passport unless passport_under >= 0.85.
-- Stamp recheck: after `man.UNDECIDED_RECHECK` (3) E? ticks in a row (`Entrant.note_step`), request 1 adds
+- (superseded loop15: STAMP_INK_Q is now asked via `probe_context.ask_ink`; no E? counter, no stamp hiding)
+  Stamp recheck: after `man.UNDECIDED_RECHECK` (3) E? ticks in a row (`Entrant.note_step`), request 1 adds
   `passport_stamp_ink` (approved / denied / none; the yes/no mark question sat at 0.20-0.54 on the inked Uvilia
   passport in the 163640 dry run while this choice read DENIED 0.53-0.84). Ink side p >= 0.75 -> `facts['mark_side']`: stamped from the screen alone (F, or F2 for APPROVED ink with a DENIED verdict),
   stamps hidden otherwise, the entrant offered for the hand-back. One extra question, only on those ticks.
