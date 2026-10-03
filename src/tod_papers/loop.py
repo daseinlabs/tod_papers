@@ -1149,7 +1149,7 @@ class Entrant:
                 and (self.city is None or ci["p"] >= self.city["p"] or ci["value"] == self.city["value"])):
             self.city = {"value": ci["value"], "p": ci["p"], "tick": tick}
         y, m = state.get("exp_year"), state.get("exp_month")
-        if y and y["value"] != "unreadable" and y["p"] >= CARRY_COUNTRY_P and (self.exp is None or y["p"] >= self.exp["p"]):
+        if y and y["value"] != "unreadable" and y["p"] >= 0.5 and (self.exp is None or y["p"] >= self.exp["p"]):
             mm = m["value"] if m and m["value"] != "unreadable" and m["p"] >= 0.5 else None
             self.exp = {"year": y["value"], "month": mm, "p": y["p"], "tick": tick}
         for k in man.CHECK_KEYS:   # Day 2/3 checks, carried like the country (the page is hidden once under a stamp)
@@ -1310,8 +1310,12 @@ def _raise_priority() -> None:
     process got OCR times of 10-25 s per tick (offline 1.5-2 s); AboveNormal brought them to 2.5-6.6 s."""
     try:
         import ctypes
+        from ctypes import wintypes
         k = ctypes.windll.kernel32
-        k.SetPriorityClass(k.GetCurrentProcess(), 0x8000)   # ABOVE_NORMAL_PRIORITY_CLASS
+        k.GetCurrentProcess.restype = wintypes.HANDLE      # pseudo-handle -1: must not be truncated to 32 bits
+        k.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        if not k.SetPriorityClass(k.GetCurrentProcess(), 0x8000):   # ABOVE_NORMAL_PRIORITY_CLASS
+            print(f"[loop] SetPriorityClass failed (error {k.GetLastError()})")
     except Exception as e:
         print(f"[loop] priority not raised: {e}")
 

@@ -237,8 +237,8 @@ DOC_KINDS = {"passport": "the entrant's passport (a small booklet or its open da
              "other": "something else, or not a paper"}
 # photo_matches_person is no longer asked (answers sat at p 0.4-0.68 all session; budget of 16 questions). The
 # expiry check is TOD's reading of the EXP. year and month, compared with today's date by the rule (section 5).
-INSPECT_KEYS = ("issuing_country", "exp_year", "exp_month", "issuing_city")
-CHECK_KEYS = ("entry_ticket_dated_today",)
+INSPECT_KEYS = ("issuing_country", "exp_year", "exp_month", "issuing_city", "photo_matches_person")
+CHECK_KEYS = ("entry_ticket_dated_today", "photo_matches_person")
 EXP_YEARS = ("1979", "1980", "1981", "1982", "1983", "1984", "1985", "1986", "1987")
 DENY_P = 0.75              # p a check answer needs before it can deny an entrant
 CARRY_CHECK_MARGIN = 0.15   # a yes/no check is carried for the entrant when |p - 0.5| >= this
@@ -342,6 +342,15 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
         # (run 024712 t0: expiry 'no' p=0.96 with the page not readable)
         # run 033308 t49: a one-step "is EXP. after today?" answer said 'expired' (p=0.76) for a valid passport;
         # TOD now only READS the year and month, the loop compares them with today
+        # run 042018 (Sazar Parvak, Day 2): the photo was someone else (game error Passport/Face) and was approved.
+        # Only a confident 'different' (p >= DENY_P) denies; an unsure answer never blocks.
+        "photo_matches_person": {
+            "type": "choice",
+            "instructions": "Compare the small photo on the open passport data page with the face of the person "
+                            "standing at the booth window: face shape, hair, beard, glasses, head cover.",
+            "criteria": {"match": "both are visible and show the same person",
+                         "different": "both are visible and clearly show two different people",
+                         "cannot_compare": "the passport photo or the person is not visible"}},
         "exp_year": {
             "type": "choice",
             "instructions": "On the open passport data page, find the date after 'EXP.' (format YYYY.MM.DD). "
@@ -486,7 +495,7 @@ def check_answer(a: dict | None):
 def known_exp(state: dict, facts: dict | None):
     """(year, month or None, p) of TOD's EXP. reading (this frame, else carried for the entrant), or None."""
     y, m = state.get("exp_year"), state.get("exp_month")
-    if y and y["value"] != "unreadable" and y["p"] >= 0.6:
+    if y and y["value"] != "unreadable" and y["p"] >= 0.5:   # run 042019 t36: 1984 at 0.57 stalled the entrant
         mm = m["value"] if m and m["value"] != "unreadable" and m["p"] >= 0.5 else None
         return y["value"], mm, y["p"]
     c = (facts or {}).get("exp_carried")
@@ -538,12 +547,14 @@ def needed_stamp(state: dict, day: str, facts: dict | None) -> str | None:
         return None
     if day not in ("2", "3"):
         return "approved" if kc[0] == "ARSTOTZKA" else "denied"
-    keys = ["expiry_after_today", "issuing_city_valid"]
+    keys = ["expiry_after_today", "issuing_city_valid", "photo_matches_person"]
     if day == "3" and kc[0] != "ARSTOTZKA":
         keys.append("entry_ticket_dated_today")
     vals = [check_value(state, {**(facts or {}), "day": day}, k) for k in keys]
     if vals[1] is None:
         vals[1] = True   # city not read confidently: only a confident mismatch denies (an unread city must not stall)
+    if vals[2] is None:
+        vals[2] = True   # photo: only a confident 'different' denies
     if False in vals:
         return "denied"
     if None in vals:
