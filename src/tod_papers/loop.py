@@ -349,7 +349,8 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
     today = man.DAY_DATES.get(day, man.DAY_DATES["1"])
     q = {"screen": choice("Which kind of screen is currently shown?", dict(SCREENS)), "day": DAY_Q}
     q.update(man.state_questions(today, inspect))
-    for i, d in enumerate((facts or {}).get("docs") or []):
+    # TOD takes at most 16 questions per request (run 015649 t41-58: HTTP 422 with 5 doc questions + 14 state)
+    for i, d in enumerate(((facts or {}).get("docs") or [])[:max(0, TOD_MAX_Q - len(q))]):
         q[f"doc{i}"] = man.doc_question(d)
     small = _small_for_send(frame, args)
     text = man.STATE_TEXT + "\n\n" + man.desk_text_block(facts)
@@ -448,6 +449,7 @@ def desk_facts(boxes: list, W: int, H: int, sinfo: dict | None = None) -> dict:
 
 
 MAX_DOC_Q = 5   # per-document identity questions in request 1
+TOD_MAX_Q = 16  # TOD API limit per request
 
 
 def strip_facts(state: dict, df: dict, sinfo: dict | None) -> dict:
