@@ -13,3 +13,7 @@ deploy/.zone
 deploy/.zone.spot
 deploy/.name
 private/
+
+# ground-truth reader: Il2CppDumper binary + dump output (never commit)
+.tools/
+.venv-gt/

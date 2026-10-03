@@ -1,0 +1,6 @@
+# Ground-truth memory reader (src/tod_papers/gt.py, tools/gt_probe.py) -- Python 3.13, Windows x64
+#   py -3.13 -m venv .venv-gt
+#   .venv-gt\Scripts\pip install -r requirements-gt.txt
+# Runtime needs only pymem.  capstone/numpy are used only to re-derive offsets
+# from an Il2CppDumper dump after a game update (see docs/ground_truth.md).
+Pymem==1.14.0
