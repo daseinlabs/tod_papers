@@ -1557,7 +1557,7 @@ def _clean_state(state: dict) -> dict:
 
 TRAY_FLIP_LIMIT = man.TRAY_FLIP_LIMIT
 NONBOOTH_STOP = 60   # step-7 ticks in a row (cutscenes, day_end, menus) before the run stops
-REPEAT_DRAG_N = 4   # same drag source + same target, state summary unchanged, N ticks running -> exclude the source
+REPEAT_DRAG_N = 4   # same drag source box (same place) N ticks running -> exclude the source
 HORN_HIDE_P = 0.7
 HANDBACK_STAY = 4   # ticks a person may stay at the window after a hand-back before it is discounted
 HANDBACK_DOCS_STAY = 14   # ... or, with papers still visible, before 'waiting for the rest of the documents' ends
@@ -2444,7 +2444,10 @@ def run(args) -> int:
             last_state, last_facts = state, facts
             if action == "drag" and sb is not None and tb is not None and not veto and executed.startswith("drag"):
                 dk = (src_desc, tb.caption or desc.get(tgt, ""), ssum)
-                same = (drag_key is not None and dk[1:] == drag_key[1:3] and _same_element(drag_key[3], sb))
+                # the same source box at the same place again = the drags are not moving it; the target and the
+                # state summary may flicker (loop10 run 161058 t131-153: tray-hidden passport -> DENIED/APPROVED
+                # strips 23x, step D/E? alternating, never banned)
+                same = drag_key is not None and _same_element(drag_key[3], sb)
                 drag_key, drag_n = dk + (sb,), (drag_n + 1 if same else 1)
                 if drag_n >= REPEAT_DRAG_N:
                     f = stuck.ban(tick, "drag", sb, src_desc, drag_n)

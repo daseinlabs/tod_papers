@@ -295,6 +295,7 @@ def _noul(instr: str, yes: str, no: str) -> dict:
 
 
 NO_DOCS_KEYS = ("rulebook_page", "interrogate_prompt_visible")   # step N sub-states, asked only around step N
+NO_DOCS_DATES = (DAY_DATES["3"],)   # days 1-3: only Jorji (Day 3) presents no documents
 NO_DOCS_P = 0.6   # p(no_documents_presented) for step N; also drops the passport-inspection questions
 RULEBOOK_PAGES = {"not_open": "the rulebook is not lying open on the desk (closed in its slot, or not visible)",
                   "contents": "it is open on the CONTENTS page (list of sections)",
@@ -420,7 +421,9 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS, 
                          "no_ticket": "the entrant's papers are on the desk/counter and there is NO entry ticket "
                                       "among them",
                          "not_readable": "an entry ticket may be there but its date cannot be read in this picture"}}
-    if prev is None or yes(prev, "person_at_window") or yes(prev, "no_documents_presented"):
+    # step N only on the days with a scripted entrant who presents nothing (Day 3 entrant 8, docs/game.md); loop10
+    # run 161058 Day 1: TOD said no documents (0.64-0.75) for empty windows and arriving entrants -> 22 N ticks
+    if today in NO_DOCS_DATES and (prev is None or yes(prev, "person_at_window")):
         q["no_documents_presented"] = _noul(
             "Look at the person at the booth window and the counter shelf in front of them. Has the person handed "
             "over no documents at all: the counter in front of them is empty and nothing of theirs lies on the "
@@ -1024,7 +1027,8 @@ def no_passport(state: dict, facts: dict | None = None) -> bool:
     """Step N: TOD (request 1) says the person at the window has handed over no documents (p >= NO_DOCS_P), and
     TOD's other answers agree: nothing on the counter shelf, no paper TOD named the passport (run 092642 t9:
     no_documents 0.66 with counter 0.64 and the passport on the counter -> step B, not N)."""
-    if not yes(state, "no_documents_presented", NO_DOCS_P) or yes(state, "document_on_counter_shelf"):
+    if (not yes(state, "no_documents_presented", NO_DOCS_P) or not yes(state, "person_at_window")
+            or yes(state, "document_on_counter_shelf")):
         return False
     return not any(d["id"] == "passport" and d["p"] >= 0.5 for d in (facts or {}).get("docs_named") or [])
 
