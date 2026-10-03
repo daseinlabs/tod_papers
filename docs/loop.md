@@ -77,12 +77,38 @@ rapidocr/opencv come from there) plus `pywin32 dxcam mss comtypes`. Recipe in `r
      offered INSTEAD of `desk` when an open passport lies on the desk (not under a stamp head, not already
      on the spot, IoU < 0.8) and request 1b could not read it (country unreadable / p < 0.6 and none
      carried, or Day 2/3 no EXP. date read and none carried) -- `loop.passport_needs_clear_space`. The tray
-     tab's "drag left onto the desk" redirect accepts either target.
+     tab's "drag left onto the desk" redirect accepts either target. While it is offered the state block
+     says "Passport data page readable: no (issuing country read as ..., p=...; EXP. date not read)" and that
+     the verdict cannot be decided until the page is readable; manual C/D say the same. Request 2 offline on
+     092642 t2/t11 and 150111 t2 (live: passport dropped on a stamp strip, country unreadable): target now
+     `clear desk space` at p 0.95-0.96.
    Each falls back to `anchors.json` (native 570x320 coords scaled to the client) if it cannot be derived;
    the tick json has `regions` and `target_source` = {name: derived|fallback}. Regions are drop targets
    only (never a source). The old generic "empty space" target is gone; the screen-centre option exists
    only as a click source on non-booth screens (cutscenes without a button).
-5. `annotate` (som.py) as before (regions are never pruned).
+   **Request-1 question budget (2026-10-03, audit section 4).** Booth request 1 asks only what this tick can
+   consume (`loop.select_state_questions`, chosen from the previous tick's answers via `loop.probe_context`,
+   never used as an answer): `passport_under_<side>` only when the pixel check (`layout.passport_under`, part
+   of `screen_family`) sees a paper in that strip; `passport_shows_stamp_mark` only after a stamp press for
+   this entrant (`manual.stamped` ignores it otherwise); `bulletin_or_rulebook_covering_desk` only when a
+   passport and a rulebook/bulletin lay on the desk; the passport readings (`issuing_country`, photo, Day 3
+   ticket) only when a paper was on the counter/desk. First tick of a run: everything. Cap `REQ1_MAX_Q`=14.
+   Dropped keys are logged as `q_dropped`. Runs 092642 (D1 t0-30, D2 t95-130) + 150111 replayed offline:
+   median 12 -> 9 questions per request 1.
+   **Identity cache.** A paper is not re-asked while its box is unchanged: same place, same printed-text
+   caption (`extract.TEXT_CAPS` on its OCR lines), IoU > 0.9 with the box seen last tick (`DOC_CACHE`, max 15
+   ticks; an answer below p 0.5 max 3). The Day 2/3 1b readings (EXP./ISS./spelling/ticket) are reused when
+   the same OCR candidates stand over the same unmoved desk papers as last tick (`INSP_CACHE`, max 8 ticks,
+   `insp_reused_from` in the tick json). With every paper cached and no new readings, request 1b is not sent
+   (replay: 35 -> 45 of 93 booth ticks without 1b).
+5. `annotate` (som.py) as before (regions are never pruned). **Option hygiene (request 2):** one source per
+   physical paper -- page corner, panel and icon on the same single-sheet paper (and overlapping boxes TOD
+   names the same identity, `loop.paper_groups`) collapse to the largest box (replay: passport offered 2+
+   times on 29 -> 0 of 93 ticks; multi-page papers keep their page corner, a click). Booth detector filler
+   (unnamed icon/panel/text on no named paper with no caption/text or only a 'possibly ...' CLIP guess) is
+   not offered; the rest is capped at `REQ2_MAX_OPTS`=12 sources+targets (`loop.cap_options`). The plain
+   `desk` target is not offered when every offered drag source is a paper already lying on the desk, off the
+   strips, and the passport's country (Day 2/3: and EXP.) is already read (`loop.desk_target_redundant`).
 6. **Request 2 -- action** (SoM frame). Text = `manual.build()`: the whole manual (~1.2k words: screen
    layout, click-only vs drag-only elements, drop targets, the entrant cycle A-G, APPROVED/DENIED rules for
    days 1-3, bulletin/rulebook/page corners, other screens, mistakes seen in run 20261002_003519) + a
@@ -97,7 +123,8 @@ rapidocr/opencv come from there) plus `pywin32 dxcam mss comtypes`. Recipe in `r
    compatible element, p(action)*p(src'). TOD's raw pick and the note are logged (`tod_pick`,
    `input_convention`) and shown in the overlay.
 8. Execute, verify by frame diff, log (`tick_NNNN.{png,json}`, `viz_NNNN.png`, `raw_NNNN.png`,
-   `summary.md` with state + manual step per tick). `manual_step_for_state` in the json is
+   `summary.md` with state + manual step per tick). The JSON is written in the tick; the PNGs and the overlay
+   render go to a log thread (`_LOG_POOL`, ~0.5-0.75 s off the tick), flushed before `summary.md`. `manual_step_for_state` in the json is
    `manual.situation(state)` -- a diagnostic of which manual line applies; it is never sent to TOD.
 
 Offline: `python -m tod_papers.loop --frames a.png b.png --out DIR` runs request 1 + extract + request 2 per

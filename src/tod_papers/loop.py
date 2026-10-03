@@ -481,14 +481,16 @@ def select_state_questions(q: dict, ctx: dict | None, strip_px: list | None) -> 
 
 def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", inspect: tuple = man.INSPECT_KEYS,
                 facts: dict | None = None, with_docs: bool = True, family: tuple | None = None,
-                prev: dict | None = None):
+                prev: dict | None = None, ctx: dict | None = None):
     """REQUEST 1: plain (unmarked) frame + short text + screen, day, the manual's state questions
-    (manual.state_questions, incl. the passport-under-each-stamp and passport-readable questions) and one
+    (manual.state_questions, incl. the passport-under-each-stamp questions) and, with_docs only (offline), one
     identity question per paper the layout found on the desk/counter (its position + the OCR text inside it).
-    Every judgement about the screen is a TOD answer here; the loop only does geometry and bookkeeping."""
+    Only the questions whose answers this tick can consume are asked (select_state_questions; ctx =
+    probe_context of the previous tick). Every judgement about the screen is a TOD answer here; the loop only does
+    geometry and bookkeeping."""
     today = man.DAY_DATES.get(day, man.DAY_DATES["1"])
     q = {"screen": choice("Which kind of screen is currently shown?", dict(SCREENS)), "day": DAY_Q}
-    fam, tray_px = family or ("booth", True)
+    fam, tray_px, strip_px = (tuple(family) + (None,))[:3] if family else ("booth", True, None)
     if fam != "booth":
         # menus, day-end, bulletins, cutscenes: the manual consumes only the screen kind and the date
         small = _small_for_send(frame, args)
@@ -497,26 +499,25 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
         del q["day"]   # the day only changes on the day-end / bulletin screens, where it is asked
     q.update(man.state_questions(today, inspect, prev))
     q.pop("passport_open_readable", None)   # the inspection gate also opens on open-on-desk / the paper identity
-    if not tray_px:
-        for k in man.STRIP_KEYS:
-            q.pop(k, None)
-    # TOD takes at most 16 questions per request (run 015649 t41-58: HTTP 422 with 5 doc questions + 14 state)
-    docs = (facts or {}).get("docs") or []
-    if (facts or {}).get("tray_open_px") is False:
+    if not tray_px or (facts or {}).get("tray_open_px") is False:
         for k in man.STRIP_KEYS:   # no stamp bar on the pixels: nothing can lie under a stamp head
             q.pop(k, None)
-    # lowest-value state questions give way to 2 paper identities, then a hard cap at TOD's limit
+    dropped = select_state_questions(q, ctx, strip_px if tray_px else None)
+    if facts is not None:
+        facts["q_dropped"] = dropped
+    docs = (facts or {}).get("docs") or []
+    # lowest-value state questions give way to 2 paper identities, then the request-1 budget
     for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable"):
-        if len(q) + (min(2, len(docs)) if with_docs else 0) > TOD_MAX_Q:
+        if len(q) + (min(2, len(docs)) if with_docs else 0) > REQ1_MAX_Q:
             q.pop(k, None)
-    for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable", "exp_month", "photo_matches_person"):
-        if len(q) > TOD_MAX_Q:
+    for k in ("bulletin_or_rulebook_covering_desk", "passport_open_readable", "photo_matches_person"):
+        if len(q) > REQ1_MAX_Q:
             q.pop(k, None)
-    room = max(0, TOD_MAX_Q - len(q)) if with_docs else 0
+    room = max(0, REQ1_MAX_Q - len(q)) if with_docs else 0
     for i, d in enumerate(docs if with_docs else ()):
-        c = DOC_CACHE.get(_doc_key(d))
-        if c and (facts or {}).get("tick", 0) - c["tick"] <= DOC_CACHE_TICKS:
-            d["cached"] = c   # same paper, same place, same text as a recent tick: reuse TOD's answer
+        c = doc_cache_get(d, (facts or {}).get("tick", 0))
+        if c:
+            d["cached"] = c   # same paper, same place, same caption as last tick: reuse TOD's answer
         elif room > 0:
             q[f"doc{i}"] = man.doc_question(d)
             room -= 1
@@ -526,18 +527,41 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
     return tod.ask(q, text=text, image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
 
 
+INSP_KEYS_1B = ("exp_date", "ticket_date", "issuing_city_tok", "issuing_city_spelling")
+INSP_CACHE: dict = {}   # last fresh 1b passport readings: {"q", "ans", "tick", "seen", "boxes"}
+INSP_CACHE_TICKS = 8    # a reading is re-asked at the latest this many ticks after TOD gave it
+
+
+def _desk_boxes(df: dict) -> list:
+    return [d["native"] for d in df.get("docs") or [] if d["where"] == "desk"]
+
+
+def _same_boxes(a: list, b: list) -> bool:
+    return len(a) == len(b) and all(any(_iou(x, y) > DOC_CACHE_IOU for y in b) for x in a)
+
+
 def doc_probe(tod: TodClient, frame: np.ndarray, args, facts: dict, day: str = "1", docs: bool = True):
     """REQUEST 1b (after extraction): one identity question per paper box not in DOC_CACHE (unmarked frame + the
     OCR text inside each) and, on Day 2/3, the passport readings as choices over the OCR'd strings on the desk
     (EXP. date among the OCR dates, ISS. city among the OCR city words, spelling contrast; manual.
-    inspection_doc_questions; the candidates go to facts['insp_cand']). Returns the TOD result or None."""
+    inspection_doc_questions; the candidates go to facts['insp_cand']). The readings are not re-asked while the
+    same questions (same OCR candidates) stand over the same, unmoved desk papers as last tick: TOD's previous
+    answers go to facts['insp_reuse'] (INSP_CACHE, at most INSP_CACHE_TICKS old). Returns the TOD result or None."""
     q = {}
+    tick = facts.get("tick", 0)
     if day in ("2", "3"):
         iq, facts["insp_cand"] = man.inspection_doc_questions(facts.get("desk_text") or [], day)
-        q.update(iq)
+        facts["insp_q"] = iq
+        c = INSP_CACHE
+        if (iq and c.get("q") == iq and c.get("seen", -9) >= tick - 1 and tick - c["tick"] <= INSP_CACHE_TICKS
+                and _same_boxes(_desk_boxes(facts), c.get("boxes") or [])):
+            facts["insp_reuse"] = {k: dict(v, reused_from=c["tick"]) for k, v in c["ans"].items()}
+            c["seen"] = tick
+        else:
+            q.update(iq)
     for i, d in enumerate((facts.get("docs") or []) if docs else []):
-        c = DOC_CACHE.get(_doc_key(d))
-        if c and facts.get("tick", 0) - c["tick"] <= DOC_CACHE_TICKS:
+        c = doc_cache_get(d, tick)
+        if c:
             d["cached"] = c
         elif len(q) < TOD_MAX_Q:
             q[f"doc{i}"] = man.doc_question(d)
@@ -553,6 +577,19 @@ def doc_probe(tod: TodClient, frame: np.ndarray, args, facts: dict, day: str = "
                    image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
 
 
+def merge_doc_answers(state: dict, df: dict, tick: int) -> None:
+    """After request 1b: reused passport readings into the state (fresh answers win), fresh ones into INSP_CACHE,
+    then the readings -> exp_read / issuing_city / ticket (manual.read_inspection_answers)."""
+    for k, v in (df.get("insp_reuse") or {}).items():
+        state.setdefault(k, v)
+    fresh = {k: state[k] for k in INSP_KEYS_1B if k in state and "reused_from" not in state[k]}
+    if fresh and df.get("insp_q"):
+        INSP_CACHE.clear()
+        INSP_CACHE.update(q=df["insp_q"], ans=fresh, tick=tick, seen=tick, boxes=_desk_boxes(df))
+    if df.get("insp_cand"):
+        man.read_inspection_answers(state, df["insp_cand"])
+
+
 def add_tod_facts(facts: dict, state: dict, df: dict, sinfo: dict | None) -> None:
     """facts += TOD's document identities, what lies under each stamp head, and the passport_under sides."""
     facts["static"] = sinfo
@@ -560,19 +597,52 @@ def add_tod_facts(facts: dict, state: dict, df: dict, sinfo: dict | None) -> Non
     for i, d in enumerate(df.get("docs") or []):
         a = state.get(f"doc{i}")
         if a:
-            DOC_CACHE[_doc_key(d)] = {"id": a["value"], "p": a["p"], "tick": facts.get("tick", 0)}
+            doc_cache_put(d, a, facts.get("tick", 0))
     derive_open_on_desk(state, facts)
     facts["strip"] = strip_facts(state, df, sinfo)
     facts["passport_under"] = passport_sides(facts["strip"])
     facts["tray_open_px"] = bool((sinfo or {}).get("tray_open"))
 
 
-DOC_CACHE: dict = {}   # (where, native box, OCR text) -> {"id", "p", "tick"}: an unchanged paper is not re-asked
-DOC_CACHE_TICKS = 15
+# an unchanged paper is not re-asked: same place (counter/desk), same printed-text caption (extract.TEXT_CAPS on its
+# OCR lines), box IoU > DOC_CACHE_IOU with the box seen last tick. Under the old exact-text key OCR jitter on an
+# unmoved paper re-asked it most ticks (audit section 4: ~3 doc questions per request)
+DOC_CACHE: list = []   # [{"where", "cap", "box", "id", "p", "tick" (asked), "seen" (last matched)}]
+DOC_CACHE_TICKS = 15    # an identity is re-asked at the latest this many ticks after TOD gave it
+DOC_CACHE_IOU = 0.9
+DOC_CACHE_MIN_P = 0.5   # an identity below this p is reused for DOC_CACHE_UNSURE_TICKS only
+DOC_CACHE_UNSURE_TICKS = 3
 
 
-def _doc_key(d: dict) -> tuple:
-    return d["where"], tuple(d["native"]), tuple(d.get("text") or ())
+def _iou(a, b) -> float:
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / u if u > 0 else 0.0
+
+
+def _doc_cap(d: dict) -> str:
+    t = " ".join(d.get("text") or ())
+    return next((cap for rx, cap in ex.TEXT_CAPS if rx.search(t)), "")
+
+
+def doc_cache_get(d: dict, tick: int) -> dict | None:
+    cap = _doc_cap(d)
+    for c in DOC_CACHE:
+        if (c["where"] == d["where"] and c["cap"] == cap and tick - 1 <= c["seen"] <= tick
+                and tick - c["tick"] <= (DOC_CACHE_TICKS if c["p"] >= DOC_CACHE_MIN_P else DOC_CACHE_UNSURE_TICKS)
+                and _iou(c["box"], d["native"]) > DOC_CACHE_IOU):
+            c["seen"], c["box"] = tick, list(d["native"])
+            return {"id": c["id"], "p": c["p"], "tick": c["tick"]}
+    return None
+
+
+def doc_cache_put(d: dict, a: dict, tick: int) -> None:
+    DOC_CACHE[:] = [c for c in DOC_CACHE if tick - c["seen"] <= 1
+                    and not (c["where"] == d["where"] and _iou(c["box"], d["native"]) > DOC_CACHE_IOU)]
+    DOC_CACHE.append({"where": d["where"], "cap": _doc_cap(d), "box": list(d["native"]), "id": a["value"],
+                      "p": a["p"], "tick": tick, "seen": tick})
 
 
 def name_docs(state: dict, df: dict) -> list[dict]:
@@ -1170,6 +1240,85 @@ PAUSE_MIN_FRAC = 0.05     # changed fraction (vs the grabbed frame) that counts 
 STAMP_REOFFER_TICKS = 6   # ticks after a recorded stamp press during which the stamps are not offered again
 
 
+MULTIPAGE_IDS = ("rulebook", "bulletin", "transcript")   # papers whose page corner turns a page (a click)
+REQ2_MAX_OPTS = 12   # request-2 options (source + target); request 2 costs ~0.1 s per option (audit section 3)
+NO_DESK_DRAG = ("tray_tab_open", "shutter_lever")   # drag sources whose drop is never the desk
+
+
+def paper_groups(named: list) -> list[int]:
+    """docs_named index -> index of the first paper it is the same physical paper as: same TOD identity and the
+    boxes overlap (IoU >= 0.3, or one box's centre inside the other) -- e.g. a passport split into visa page +
+    data page by the layout, both named PASSPORT."""
+    grp = list(range(len(named)))
+    for j, d in enumerate(named):
+        for i in range(j):
+            e = named[i]
+            if e["id"] != d["id"] or e["where"] != d["where"] or grp[i] != i:
+                continue
+            a, b = e["box"], d["box"]
+            inside = lambda p, q: q[0] <= (p[0] + p[2]) / 2 <= q[2] and q[1] <= (p[1] + p[3]) / 2 <= q[3]
+            if _iou(a, b) >= 0.3 or inside(a, b) or inside(b, a):
+                grp[j] = i
+                break
+    return grp
+
+
+def desk_target_redundant(idmap: dict, src_ids: dict, doc_ids, frame, state: dict, day: str,
+                          facts: dict | None) -> str | None:
+    """Id of the plain 'desk' drop target when no offered drag source could use it this tick: every paper that can
+    be dragged already lies on the desk (not under a stamp head), the tray tab offered is the open one (it goes to
+    the stow edge), and no other drag source (counter paper, paper slots below the counter, closed tray tab) is
+    offered. Coordinator count: 26 passport re-drops onto the desk it already lay on (runs 015649/022439). Kept in
+    step N, step E? and whenever the passport lies under a stamp head (it may have to go back to the desk)."""
+    f = facts or {}
+    desk = [k for k, b in idmap.items() if b.kind == "region" and b.caption == REGION_CAPS["desk"]]
+    if not desk or f.get("no_passport") or f.get("e_undecided") or f.get("passport_under"):
+        return None
+    # passport not read yet (country, and on Day 2/3 the EXP. date): moving it on the desk re-exposes the page
+    # (runs 092642 t10/t105/t116, 150111 t20: desk -> desk moves while the country read 'unreadable')
+    if man.known_country(state, f) is None or (day in ("2", "3") and man.known_exp(state, f) is None):
+        return None
+    dn = f.get("docs_named") or []
+    for k in src_ids:
+        b = idmap[int(k)]
+        if b.kind == "background" or _cls(b, True, int(k) in doc_ids) != "drag":
+            continue
+        if getattr(b, "name", "") in NO_DESK_DRAG:
+            continue
+        on = [d for d in dn if d["box"][0] <= b.center[0] <= d["box"][2] and d["box"][1] <= b.center[1] <= d["box"][3]]
+        if not (int(k) in doc_ids and on and all(d["where"] == "desk" for d in on)):
+            return None   # a counter paper, a slot, the closed tray tab, an unnamed paper: the desk is a real target
+        for d in on:
+            a, _, c, e = d["native"]
+            for x1, x2 in layout.STRIP_X.values():
+                if min(c, x2) - max(a, x1) >= 0.4 * (x2 - x1) and d["native"][1] <= layout.STRIP_Y[1] \
+                        and e >= layout.STRIP_Y[0]:
+                    return None   # the paper lies on a stamp strip: the desk is where it is moved off it
+    return str(desk[0])
+
+
+def cap_options(src_ids: dict, tgt_ids: dict, idmap: dict, doc_ids, booth: bool) -> dict:
+    """Booth request-2 sources without detector filler: unnamed icon/panel/text boxes on no paper TOD named that
+    carry no caption and no text, or only a 'possibly ...' CLIP guess, are not offered; then down to REQ2_MAX_OPTS
+    (sources + targets) by dropping the remaining unnamed detector boxes, largest last. Named layout controls, papers, stamps and every target stay. (Runs 092642/150111: 74 'possibly ...' icon
+    and 19 uncaptioned panel options, never picked.)"""
+    if not booth:
+        return src_ids
+    over = len(src_ids) + len(tgt_ids) - REQ2_MAX_OPTS
+
+    def rank(k):
+        b = idmap[int(k)]
+        if getattr(b, "name", "") or int(k) in doc_ids or b.kind not in ("icon", "panel", "text"):
+            return None
+        cap = b.caption or ""
+        return (0 if not cap and not b.text else 1 if cap.startswith("possibly") else 2, b.area)
+
+    filler = sorted((k for k in src_ids if rank(k) is not None), key=rank)
+    # content-free boxes (no caption, no text) and CLIP guesses on no paper go on the booth anyway; the rest by the cap
+    drop = {k for k in filler if rank(k)[0] <= 1} | set(filler[:max(0, over)])
+    return {k: v for k, v in src_ids.items() if k not in drop}
+
+
 def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str, args,
             stuck: "StuckTracker | None" = None, tick: int = 0, facts: dict | None = None) -> dict:
     """Everything between (extract + request 1) and request 2: drop-target
@@ -1305,10 +1454,12 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     desc = {str(i): describe(b, W, H) for i, b in idmap.items()}
     doc_ids = set()   # element ids TOD (request 1) named as a paper -> drag-only, whatever the detector label says
     doc_of: dict = {}   # element id -> index of the paper it lies on
+    dn_all = (facts or {}).get("docs_named") or []
+    same_paper = paper_groups(dn_all)
     for i, b in idmap.items():   # name each paper by TOD's request-1 identity answer (geometry: centre inside)
         if b.kind in ("region", "background"):
             continue
-        for j, d in enumerate((facts or {}).get("docs_named") or []):
+        for j, d in enumerate(dn_all):
             x1, y1, x2, y2 = d["box"]
             if x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 and getattr(b, "name", "") not in layout.BY_NAME:
                 rest = desc[str(i)].split(" — ", 1)[-1]   # drop the detector kind; TOD's identity names it
@@ -1317,8 +1468,10 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
                     pass   # step N: rulebook pages and rule lines are clicked (page corner, inspect-mode rule)
                 elif d["id"] != "other" or b.kind == "text":   # a texted 'other' paper is still a paper (run
                     doc_ids.add(i)                          # 090830 t22-43: the Pink Vice flyer clicked 8x)   # run 114927 t30-86: the counter passport was labelled 'rubber stamp' (click-only)
-                    if b.kind != "page_corner":
-                        doc_of[i] = j
+                    # a single-sheet paper's page corner is only another drag handle on it (passport: 29 of 93
+                    # booth ticks offered panel + corner); multi-page papers keep their corner (a click turns a page)
+                    if b.kind != "page_corner" or d["id"] not in MULTIPAGE_IDS:
+                        doc_of[i] = same_paper[j]
                 break
     banned_ids, ban_lines = {}, []
     if stuck is not None:
@@ -1335,9 +1488,11 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
             ban_lines.append(f"{verb} '{short(f.desc, 60)}' did nothing (tried {f.count}x); excluded for "
                              f"{f.banned_until - tick} more tick(s)")
     # one drag source per paper (61% of booth ticks offered the same passport 2+ times): the largest box on it
+    # (page corner, panel, icon and overlapping same-identity paper boxes count as one paper, paper_groups)
     dup_ids = set()
     for j in set(doc_of.values()):
-        els = sorted((i for i, jj in doc_of.items() if jj == j), key=lambda i: -idmap[i].area)
+        els = sorted((i for i, jj in doc_of.items() if jj == j),
+                     key=lambda i: (idmap[i].kind == "page_corner", -idmap[i].area))
         dup_ids.update(str(i) for i in els[1:])
     # regions are drop targets only; the background is a click source only
     src_ids = {k: v for k, v in desc.items() if k not in banned_ids and idmap[int(k)].kind != "region"
@@ -1345,6 +1500,11 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     tgt_ids = {k: v for k, v in desc.items() if idmap[int(k)].kind != "background"} or dict(desc)
     if booth:   # in the booth every drag ends on a drop-target region (manual section 3); nothing else is a target
         tgt_ids = {k: v for k, v in tgt_ids.items() if idmap[int(k)].kind == "region"} or tgt_ids
+    if booth:
+        drop_desk = desk_target_redundant(idmap, src_ids, doc_ids, frame, state, day, facts)
+        if drop_desk:
+            tgt_ids = {k: v for k, v in tgt_ids.items() if k != drop_desk} or tgt_ids
+        src_ids = cap_options(src_ids, tgt_ids, idmap, doc_ids, booth)
     region_ids = {k: idmap[int(k)].caption for k in desc if idmap[int(k)].kind == "region"}
     region_info = {}
     for k, cap in region_ids.items():
@@ -1368,6 +1528,19 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
 
 
 _PROBE_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="state-probe")
+_LOG_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tick-log")
+
+
+def _write_tick_images(stem: str, annotated, raw, raw_path: str, overlay, ov_args: tuple, ov_kw: dict) -> None:
+    """Log thread: annotated + raw PNG and the overlay render of one tick (never read by the loop itself)."""
+    try:
+        cv2.imwrite(stem + ".png", annotated)
+        if raw is not None:
+            cv2.imwrite(raw_path, raw)
+        if overlay is not None:
+            overlay.render(annotated, *ov_args, **ov_kw)
+    except Exception as e:
+        print(f"[loop] tick log failed: {e}")
 _DOC_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="doc-probe")
 
 
@@ -1650,6 +1823,8 @@ def offline(args) -> int:
         df = desk_facts(boxes, frame.shape[1], frame.shape[0], sinfo)
         if not seq:
             DOC_CACHE.clear()   # offline frames are unrelated pictures
+            INSP_CACHE.clear()
+        df["tick"] = otick
         s_stuck.decay(otick)
         oday = args.day or "unknown"   # offline only: the day the frames come from (live runs read it via request 1)
         asked = ("issuing_country",) if oday == "1" else man.INSPECT_KEYS
@@ -1660,7 +1835,7 @@ def offline(args) -> int:
             dres, _ = _timed(doc_probe, tod, frame, args, df, oday, False)
             if dres is not None:
                 state.update(parse_state(dres))
-            man.read_inspection_answers(state, df["insp_cand"])
+            merge_doc_answers(state, df, otick)
         gate_inspection(state, asked, df)
         s_prev = state
         ent = s_ent if seq else Entrant()
@@ -1831,6 +2006,7 @@ def run(args) -> int:
     except (OSError, ValueError, KeyError):
         pass
     last_state: dict = {}
+    last_facts: dict = {}   # previous tick's facts: chooses which request-1 questions can matter
     fg_misses = 0
     overlay = None
     if args.viz:
@@ -1947,16 +2123,18 @@ def run(args) -> int:
                        anim_wait_s=round(waited, 2), anim_frac=round(af, 5), stable=stable)
             if not stable:
                 print(f"[tick {tick:03d}] screen still animating after {waited:.1f}s (frac {af:.4f}); proceeding anyway")
-            if args.pause_think and screen_family(frame)[0] == "booth":
+            fam = screen_family(frame)
+            rec["screen_family"] = list(fam)
+            if args.pause_think and fam[0] == "booth":
                 pause_game(rec, frame)
 
             # ---- REQUEST 1 (state, unmarked frame) in parallel with extraction; then 1b (new papers only) -----
             # Day 1 decides on the country only; expiry/photo are asked from Day 2 (frees 2 of TOD's 16 questions)
             asked = ("issuing_country",) if day == "1" else man.INSPECT_KEYS
-            fam = screen_family(frame)
-            rec["screen_family"] = list(fam)
-            fut = _PROBE_POOL.submit(_timed, state_probe, tod, frame, args, day, asked, {"tick": tick}, False, fam,
-                                     last_state or None)
+            pctx = probe_context(last_facts, last_state) if last_state else None
+            pfacts = {"tick": tick}
+            fut = _PROBE_POOL.submit(_timed, state_probe, tod, frame, args, day, asked, pfacts, False, fam,
+                                     last_state or None, pctx)
             t0 = time.perf_counter()
             boxes, vis, sinfo = get_boxes(frame, args.extractor)
             rec["extract_ms"] = round((time.perf_counter() - t0) * 1e3, 1)
@@ -1976,9 +2154,11 @@ def run(args) -> int:
                 dres, rec["doc_ms"] = dfut.result() if dfut is not None else (None, 0.0)
                 if dres is not None:
                     state.update(parse_state(dres))
-                if df.get("insp_cand"):
-                    man.read_inspection_answers(state, df["insp_cand"])
+                merge_doc_answers(state, df, tick)
                 rec["docs_cached"] = sum(1 for d in df.get("docs") or [] if d.get("cached"))
+                rec["q_dropped"] = pfacts.get("q_dropped") or []
+                if df.get("insp_reuse"):
+                    rec["insp_reused_from"] = next(iter(df["insp_reuse"].values()))["reused_from"]
             except TodCreditExhausted as e:  # 402: every later call fails too -> stop once, do not skip ticks
                 stop_reason = "TOD credit exhausted (402)"
                 print(f"[tick {tick:03d}] {e}")
@@ -2261,7 +2441,7 @@ def run(args) -> int:
                 history.append(f"t{tick} | {ssum} | drag | {el} -> {tl} | {eff}")
             else:
                 history.append(f"t{tick} | {ssum} | wait | - | -")
-            last_state = state
+            last_state, last_facts = state, facts
             if action == "drag" and sb is not None and tb is not None and not veto and executed.startswith("drag"):
                 dk = (src_desc, tb.caption or desc.get(tgt, ""), ssum)
                 same = (drag_key is not None and dk[1:] == drag_key[1:3] and _same_element(drag_key[3], sb))
@@ -2321,20 +2501,18 @@ def run(args) -> int:
                                    f"({'; '.join(short(_desc_key(sd), 40) for _, _, sd, _ in hit['actions'])})")
 
             # ---- log -----------------------------------------------------------------
+            # the JSON is written now; the PNGs and the overlay render (~0.5-0.75 s) go to the log thread, which the
+            # next tick does not wait for (the arrays are this tick's and are not changed afterwards)
             stem = os.path.join(run_dir, f"tick_{tick:04d}")
-            cv2.imwrite(stem + ".png", annotated)
-            if args.save_raw:
-                cv2.imwrite(os.path.join(run_dir, f"raw_{tick:04d}.png"), frame)
             with open(stem + ".json", "w", encoding="utf-8") as fh:
                 json.dump(rec, fh, indent=1)
-            if overlay is not None:
-                try:
-                    overlay.render(annotated, idmap, res, os.path.join(run_dir, f"viz_{tick:04d}.png"),
-                                   descriptions=desc, executed=executed, effect=effect, state_line=sline,
-                                   chosen=(action, src, tgt), note=D["note"])
-                except Exception as e:
-                    print(f"[loop] overlay failed: {e}")
+            _LOG_POOL.submit(_write_tick_images, stem, annotated, frame if args.save_raw else None,
+                             os.path.join(run_dir, f"raw_{tick:04d}.png"), overlay,
+                             (idmap, res, os.path.join(run_dir, f"viz_{tick:04d}.png")),
+                             dict(descriptions=desc, executed=executed, effect=effect, state_line=sline,
+                                  chosen=(action, src, tgt), note=D["note"]))
     finally:
+        _LOG_POOL.submit(lambda: None).result()   # pending tick images are on disk before the summary
         try:
             resume_game(None)
         except Exception as e:

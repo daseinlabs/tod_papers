@@ -116,11 +116,15 @@ B. A person is at the window and their passport lies on the counter shelf under 
    also hands over an ENTRY TICKET (small slip): drag it to the desk as well so its date can be read.
 C. An open passport lies on the desk and the stamp tray is closed: read the passport (on Day 1 only the
    issuing country at the bottom matters; from Day 2 also the EXP. date and photo), then open the stamp tray by dragging the tab at the right edge of the
-   desk to the left (drop it on the "desk" target).
+   desk to the left (drop it on the "desk" target). If the state block says the passport's data page is NOT
+   readable (half hidden or clipped), the verdict cannot be decided yet: first drag the passport onto the
+   "clear desk space" target so its whole page shows.
 D. The stamp tray is open but the passport is NOT lying under a stamp head (it is off to the side, or it
    has slid up behind the tray so only an edge shows): stamps only mark a document lying directly beneath
    the stamp heads, in the dark strip under the tray. First decide APPROVED or DENIED (section 5), then
-   drag the PASSPORT (not the entry ticket) to the stamp landing strip under THAT stamp. Both strips are valid landing places:
+   drag the PASSPORT (not the entry ticket) to the stamp landing strip under THAT stamp. The verdict cannot be
+   decided while the passport's data page is not readable: if the state block says "Passport data page
+   readable: no", the next move is the passport onto the "clear desk space" target, NOT onto a stamp strip. Both strips are valid landing places:
    the APPROVED strip and the DENIED strip each work; put the passport under the stamp you intend to use.
    Do not drag the stamps; they are clicked. Do not drop the passport onto the tray bar itself: it slides
    behind the tray where no stamp reaches it.
@@ -810,6 +814,15 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
                 if d["id"] in ("rulebook", "bulletin") and d["where"] == "desk" and d["p"] >= 0.6
                 and not (d["id"] == "rulebook" and no_passport(state, facts)) else "")   # step N reads it on the desk
         lines.append(f"- Paper on the {where} ({d['pos']}): {d['id'].upper()} (p={d['p']:.2f}){tail}")
+    if (facts.get("desk_target") or {}).get("target") == "desk_clear":
+        # loop.passport_needs_clear_space: an open passport on the desk whose data page request 1/1b could not read
+        c = state.get("issuing_country") or {}
+        why = [f"issuing country read as {c.get('value', 'unknown')} (p={c.get('p', 0):.2f})"]
+        if day in ("2", "3") and not known_exp(state, facts):
+            why.append("EXP. date not read")
+        lines.append("- Passport data page readable: no (" + "; ".join(why) + "). The verdict cannot be decided "
+                     "until the page is readable: drag the passport onto the 'clear desk space' target, not onto a "
+                     "stamp strip")
     if yes(state, "passport_open_readable") and not yes(state, "stamp_tray_open"):
         lines.append("- The passport is already open on the desk and the stamp tray is closed: dragging the passport "
                      "to the desk again changes nothing; the next step is C (drag the stamp tray tab to the desk)")
@@ -857,6 +870,9 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
             lines.append(f"- Click the stamp the passport is lying under ({pu[0].upper()}); if you want "
                          f"{other.upper()} instead, first drag the passport to the strip under the {other.upper()} "
                          f"stamp. Clicking {other.upper()} now would stamp nothing.")
+        elif not pu and (facts.get("desk_target") or {}).get("target") == "desk_clear":
+            lines.append("- The passport lies under neither stamp and its page is not readable yet: the stamps are "
+                         "not offered; move the passport onto the 'clear desk space' target first")
         elif not pu:
             lines.append("- The passport lies under neither stamp: the stamps are not offered (a press would mark "
                          "nothing); drag the passport to the landing strip under the stamp you want first")
