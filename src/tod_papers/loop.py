@@ -1784,6 +1784,7 @@ class Entrant:
     log: list = field(default_factory=list)          # [(tick, why)] every reset (for the run report)
     waiting_docs: bool = False   # passport handed back, person still there, papers still visible (Day 3 ticket)
     undecided_n: int = 0         # manual step E? ticks in a row (passport under a strip, verdict unknown)
+    b3_n: int = 0                # manual step B3 ticks for this entrant (ticket to the desk; capped in manual)
     mark_side: dict | None = None   # {"value": 'approved'|'denied', "p", "tick"}: stamp ink read on the recheck
 
     def reset(self, tick: int, why: str) -> None:
@@ -1791,7 +1792,7 @@ class Entrant:
         self.hb_drop, self.missed_stamps, self.checks, self.city, self.exp = None, [], {}, None, None
         self.tray_seen = []   # run 005956 t18/t21: entrant 2's tray toggles blocked entrant 3's first tray opening
         self.waiting_docs = False
-        self.undecided_n, self.mark_side = 0, None
+        self.undecided_n, self.mark_side, self.b3_n = 0, None, 0
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
 
@@ -1886,12 +1887,15 @@ class Entrant:
         return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
                 "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
                 "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp,
-                "waiting_docs": self.waiting_docs, "undecided_n": self.undecided_n, "mark_side": self.mark_side}
+                "waiting_docs": self.waiting_docs, "undecided_n": self.undecided_n, "mark_side": self.mark_side,
+                "b3_n": self.b3_n}
 
     def note_step(self, step: str, facts: dict) -> None:
         """Count manual step E? ticks in a row; facts['undecided_n'] lets the next request 1 re-ask the stamp mark."""
         self.undecided_n = self.undecided_n + 1 if step == "E?" else 0
         facts["undecided_n"] = self.undecided_n
+        self.b3_n += step == "B3"
+        facts["b3_n"] = self.b3_n
 
     def tray_flips(self) -> int:
         """Open<->closed changes of the stamp tray over the last 8 ticks with no stamp click in between.

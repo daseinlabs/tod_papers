@@ -1155,6 +1155,14 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     k_step = clutter_step(state, f)
     if k_step:
         return k_step
+    # loop13 run 182519 t89-92 (Maslov, gt APPROVED): B moved only the passport, the ticket stayed on the counter,
+    # TOD answered no_ticket 0.91 and he was DENIED. Day 3 foreigner: the counter paper goes to the desk before stamping
+    # (at most 3 B3 ticks per entrant: a slip stowed on the counter shelf must not loop it).
+    tk = check_value(state, {**f, "day": day}, "entry_ticket_dated_today") if day == "3" else True
+    if (day == "3" and kc and kc[0] not in ("ARSTOTZKA", "unreadable") and tk is not True
+            and yes(state, "document_on_counter_shelf") and yes(state, "document_open_on_desk")
+            and f.get("b3_n", 0) < 3):
+        return "B3", "drag the other paper on the counter (entry ticket) -> desk so its VALID ON date can be read"
     if yes(state, "stamp_tray_open") or f.get("tray_open_px"):
         wrong = [s_ for s_, v in (f.get("strip") or {}).items() if v.get("doc") and v["doc"] != "passport"]
         if wrong and not f.get("passport_under"):
