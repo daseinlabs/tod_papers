@@ -27,8 +27,10 @@ Design notes
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 from ctypes import wintypes
+import threading
 import time
 from typing import Optional, Tuple
 
@@ -513,6 +515,108 @@ def print_window(hwnd: int) -> np.ndarray:
     win32gui.ReleaseDC(hwnd, hwnd_dc)
     return out
 
+
+# --------------------------------------------------------------------------
+# Invisible harness pause: freeze the whole game process (no in-game menu)
+# --------------------------------------------------------------------------
+# NtSuspendProcess / NtResumeProcess (ntdll) suspend every thread of the target, so Unity's player loop,
+# the game clock and rendering all stop and DWM keeps showing the last presented frame. After 5 s
+# without a message pump Windows marks the window hung (IsHungAppWindow) and may swap in a whitened
+# "(Not Responding)" ghost, so while suspended a keep-alive thread thaws the game for `breathe_ms`
+# every `keepalive_s` (measured: 40 ms every 3 s, never hung over 15 s). Never send input while
+# suspended: it queues and lands in one burst on resume. Whatever is still suspended is resumed at exit.
+
+PROCESS_SUSPEND_RESUME = 0x0800
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ntdll = ctypes.WinDLL("ntdll")
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_k32.OpenProcess.restype = wintypes.HANDLE
+_k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+_k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+_ntdll.NtSuspendProcess.argtypes = (wintypes.HANDLE,)
+_ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+_ntdll.NtSuspendProcess.restype = _ntdll.NtResumeProcess.restype = ctypes.c_long
+_susp_lock = threading.Lock()
+_suspended: dict[int, threading.Event] = {}   # pid -> stop event of its keep-alive thread
+
+
+def window_pid(hwnd: int) -> int:
+    return win32process.GetWindowThreadProcessId(hwnd)[1]
+
+
+def _nt_call(fn, pid: int) -> None:
+    h = _k32.OpenProcess(PROCESS_SUSPEND_RESUME | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        raise OSError(f"OpenProcess({pid}) failed: winerror {ctypes.get_last_error()}")
+    try:
+        st = fn(h)
+        if st != 0:
+            raise OSError(f"NT call on pid {pid} failed: NTSTATUS 0x{st & 0xFFFFFFFF:08X}")
+    finally:
+        _k32.CloseHandle(h)
+
+
+def _keepalive(pid: int, stop: threading.Event, every: float, breathe: float) -> None:
+    while not stop.wait(every):
+        with _susp_lock:
+            if stop.is_set():
+                return
+            try:
+                _nt_call(_ntdll.NtResumeProcess, pid)
+                time.sleep(breathe)
+                _nt_call(_ntdll.NtSuspendProcess, pid)
+            except OSError:
+                return   # the process exited
+
+
+def suspend_game(hwnd: int | None = None, pid: int | None = None,
+                 keepalive_s: float | None = 3.0, breathe_ms: float = 40.0) -> int:
+    """Freeze the game process (by window or pid); a no-op if this module already froze it.
+    keepalive_s=None disables the keep-alive (the window turns 'not responding' after 5 s).
+    Returns the pid. Pair with resume_game()."""
+    if pid is None:
+        if hwnd is None:
+            raise ValueError("suspend_game needs hwnd or pid")
+        pid = window_pid(hwnd)
+    with _susp_lock:
+        if pid in _suspended:
+            return pid
+        _nt_call(_ntdll.NtSuspendProcess, pid)
+        stop = threading.Event()
+        _suspended[pid] = stop
+    if keepalive_s:
+        threading.Thread(target=_keepalive, args=(pid, stop, keepalive_s, breathe_ms / 1e3),
+                         daemon=True, name=f"suspend-keepalive-{pid}").start()
+    return pid
+
+
+def resume_game(pid: int | None = None) -> list[int]:
+    """Resume what suspend_game() froze (one pid, or all when pid is None). Returns the pids resumed."""
+    done = []
+    with _susp_lock:
+        for p in ([pid] if pid is not None else list(_suspended)):
+            stop = _suspended.pop(p, None)
+            if stop is None:
+                continue
+            stop.set()
+            try:
+                _nt_call(_ntdll.NtResumeProcess, p)
+            except OSError:
+                pass   # the process may have exited
+            done.append(p)
+    return done
+
+
+def is_suspended(pid: int) -> bool:
+    return pid in _suspended
+
+
+def window_hung(hwnd: int) -> bool:
+    """True once Windows treats the window as not responding (no message pumped for 5 s)."""
+    return bool(ctypes.windll.user32.IsHungAppWindow(hwnd))
+
+
+atexit.register(resume_game)
 
 if __name__ == "__main__":
     print("DPI status:", DPI_STATUS)
