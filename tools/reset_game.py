@@ -196,6 +196,10 @@ def main(argv=None) -> int:
         log(f"terminated {pids or 'nothing (game not running)'}")
         time.sleep(2.0)   # let Steam register the exit (and finish its cloud sync)
         backup_and_clear(ts, args.keep_saves)
+        ld = os.path.join(ROOT, "runs", "LAST_DAY.json")   # a new game: the loop's carried day reading is void
+        if os.path.exists(ld) and not args.keep_saves:
+            os.remove(ld)
+            log("removed runs/LAST_DAY.json")
         log(f"launching {STEAM_URL}")
         os.startfile(STEAM_URL)
     try:
