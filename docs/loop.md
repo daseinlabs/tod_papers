@@ -229,6 +229,13 @@ Day 1 (or unknown day) the state block leaves them out. Both landing strips are 
 under the stamp TOD intends to use. Recovery rule D2: passport no longer visible -> close the tray (drag its
 tab right) to reveal it.
 
+**Photo check disabled (loop11, 2026-10-03).** `photo_matches_person` is no longer asked (removed from
+`manual.INSPECT_KEYS` / `CHECK_KEYS`) and no longer votes in `needed_stamp` (the Day 3 ticket is now `vals[2]`).
+Measured reason (private eval, 54 gt-labelled Day 2 entrants, 7 Passport/Face mismatches): AUC 0.31-0.51 across 5
+question designs (3-way, binary, 4-attribute, which-differs, where-to-look), and at DENY_P 0.75 it caught 0/7
+mismatches while false-denying 4/47 valid entrants (live: Nyyssonen, 164732). A photo mismatch is now approved,
+about 1 citation per Day 2, inside the 2 free warnings. The manual's Day 2 rule no longer mentions the photo.
+
 ## Desk OCR, stamp detection, hand-back (2026-10-02, loop6)
 
 - **Order per tick changed**: `extract` runs first, then request 1 (it needs the OCR). Costs ~1-3 s per tick.

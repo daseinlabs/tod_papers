@@ -37,10 +37,10 @@ DAY_DATES = {"1": "1982.11.23", "2": "1982.11.24", "3": "1982.11.25"}
 
 DAY_RULES = {
     "1": "Day 1 (1982.11.23): only the passport is required. The ONLY rule today: APPROVED if the passport's "
-         "issuing country is ARSTOTZKA, otherwise DENIED. Expiry date and photo are NOT checked on Day 1 "
-         "(those checks start on Day 2).",
+         "issuing country is ARSTOTZKA, otherwise DENIED. Expiry date is NOT checked on Day 1 "
+         "(that check starts on Day 2).",
     "2": "Day 2 (1982.11.24): passport only. Foreigners may now enter too. APPROVED if the passport is not "
-         "expired (expiry after 1982.11.24), the photo matches the person and the ISS. city belongs to the passport's "
+         "expired (expiry after 1982.11.24) and the ISS. city belongs to the passport's "
          "country; otherwise DENIED.",
     "3": "Day 3 (1982.11.25): Arstotzkan citizens need only a valid passport. Foreigners need a valid passport "
          "AND an entry ticket dated 1982.11.25; a missing ticket or a ticket with any other date -> DENIED.",
@@ -116,7 +116,7 @@ B. A person is at the window and their passport lies on the counter shelf under 
    passport down to the desk ("desk" target) to open it. Clicking it does nothing. From Day 3 a foreigner
    also hands over an ENTRY TICKET (small slip): drag it to the desk as well so its date can be read.
 C. An open passport lies on the desk and the stamp tray is closed: read the passport (on Day 1 only the
-   issuing country at the bottom matters; from Day 2 also the EXP. date and photo), then open the stamp tray by dragging the tab at the right edge of the
+   issuing country at the bottom matters; from Day 2 also the EXP. date and ISS. city), then open the stamp tray by dragging the tab at the right edge of the
    desk to the left (drop it on the "desk" target). If the state block says the passport's data page is NOT
    readable (half hidden or clipped), the verdict cannot be decided yet: first drag the passport onto the
    "clear desk space" target so its whole page shows.
@@ -203,9 +203,9 @@ while someone is still at the window does nothing.
 5. DECIDING: APPROVED OR DENIED
 - Day 1, 1982.11.23: the ONLY rule is the issuing country (printed in large letters at the bottom of the
   passport, e.g. ARSTOTZKA). Issuing country ARSTOTZKA -> APPROVED. Any other country -> DENIED.
-  Expiry date and photo are NOT Day 1 rules; do not deny anyone on Day 1 for expiry or photo.
-- Day 2, 1982.11.24 (expiry and photo checks start today): foreigners may enter too. APPROVED if not
-  expired (expiry after 1982.11.24), the photo matches the person and the ISS. (issuing) city belongs to the
+  Expiry date is NOT a Day 1 rule; do not deny anyone on Day 1 for expiry.
+- Day 2, 1982.11.24 (expiry and city checks start today): foreigners may enter too. APPROVED if not
+  expired (expiry after 1982.11.24) and the ISS. (issuing) city belongs to the
   passport's country; otherwise DENIED. Valid issuing cities (rulebook Regional Map): ARSTOTZKA: Orvech
   Vonor, East Grestin, Paradizna; ANTEGRIA: St. Marmero, Glorian, Outer Grouse; IMPOR: Enkyo, Haihan,
   Tsunkeido; KOLECHIA: Yurko City, Vedor, West Grestin; OBRISTAN: Skal, Lorndaz, Mergerous; REPUBLIA: True
@@ -282,8 +282,9 @@ DOC_KINDS = {"passport": "the entrant's passport (a small booklet, or its open p
 # expiry check is TOD's reading of the EXP. year and month, compared with today's date by the rule (section 5).
 # loop8: EXP. date and ISS. city are no longer request-1 questions; they are request-1b choices over the desk OCR
 # (inspection_doc_questions below; eval day2_readings notes: expiry 3/30 -> 28/30, city 26/30 -> 30/30).
-INSPECT_KEYS = ("issuing_country", "photo_matches_person")
-CHECK_KEYS = ("entry_ticket_dated_today", "photo_matches_person")
+# loop11: photo_matches_person retired entirely (photo_eval notes: no wording separates match/mismatch).
+INSPECT_KEYS = ("issuing_country",)
+CHECK_KEYS = ("entry_ticket_dated_today",)
 DENY_P = 0.75              # p a check answer needs before it can deny an entrant
 CARRY_CHECK_MARGIN = 0.15   # a yes/no check is carried for the entrant when |p - 0.5| >= this
 ISSUING_CITIES = {   # game rule (rulebook Regional Map): the passport's ISS. city must belong to its country
@@ -778,16 +779,16 @@ def needed_stamp(state: dict, day: str, facts: dict | None) -> str | None:
         return None
     if day not in ("2", "3"):
         return "approved" if kc[0] == "ARSTOTZKA" else "denied"
-    keys = ["expiry_after_today", "issuing_city_valid", "photo_matches_person"]
+    # photo check retired (eval: 54 Day-2 entrants, AUC 0.31-0.51 over 5 wordings; at DENY_P it caught 0/7
+    # mismatches and false-denied 4/47 valid entrants). A mismatch is approved: ~1 citation per Day 2, inside the 2 free.
+    keys = ["expiry_after_today", "issuing_city_valid"]
     if day == "3" and kc[0] != "ARSTOTZKA":
         keys.append("entry_ticket_dated_today")
     vals = [check_value(state, {**(facts or {}), "day": day}, k) for k in keys]
     if vals[1] is None:
         vals[1] = True   # city not read confidently: only a confident mismatch denies (an unread city must not stall)
-    if vals[2] is None:
-        vals[2] = True   # photo: only a confident 'different' denies
-    if len(vals) > 3 and vals[3] is None:
-        vals[3] = True   # Day 3 ticket: only a confident 'other date' denies (an unread ticket must not stall)
+    if len(vals) > 2 and vals[2] is None:
+        vals[2] = True   # Day 3 ticket: only a confident 'other date' denies (an unread ticket must not stall)
     if False in vals:
         return "denied"
     if None in vals:
@@ -962,7 +963,7 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     if day == "3" and "entry_ticket_dated_today" in state:
         lines.append(f"- An entry ticket dated today ({today}) is visible: {_yn(state, 'entry_ticket_dated_today')}")
     elif open_ok:  # Day 1 (or not yet known): expiry/photo are asked and logged but are not Day 1 rules
-        lines.append("- (Day 1: expiry and photo are not checked; only the issuing country decides)")
+        lines.append("- (Day 1: expiry is not checked; only the issuing country decides)")
     d = DAY_RULES.get(day)
     lines.append(f"- Day: {day} -- {d}" if d else "- Day: not yet known (treat as day 1 until a later date shows)")
     return "\n".join(lines)
