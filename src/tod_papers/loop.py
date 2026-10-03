@@ -407,7 +407,7 @@ def parse_state(res) -> dict:
 _STATE_ABBR = {"person_at_window": "person", "document_on_counter_shelf": "counter",
                "document_open_on_desk": "open", "stamp_tray_open": "tray", "passport_open_readable": "readable", "passport_under_denied": "pD", "passport_under_approved": "pA",
                "passport_shows_stamp_mark": "mark", "bulletin_or_rulebook_covering_desk": "cover", "inspect_mode_on": "insp",
-               "expiry_after_today": "exp_ok", "photo_matches_person": "photo", "entry_ticket_dated_today": "ticket"}
+               "entry_ticket_dated_today": "ticket"}
 
 
 def state_line(state: dict) -> str:
@@ -420,6 +420,9 @@ def state_line(state: dict) -> str:
             bits.append(f"{ab}={state[k]['p']:.2f}")
     if "issuing_country" in state:
         bits.append(f"iss={state['issuing_country']['value']}:{state['issuing_country']['p']:.2f}")
+    for k, ab in (("expiry_after_today", "exp"), ("photo_matches_person", "photo")):
+        if k in state:
+            bits.append(f"{ab}={state[k]['value']}:{state[k]['p']:.2f}")
     if "issuing_city" in state:
         bits.append(f"city={state['issuing_city']['value']}:{state['issuing_city']['p']:.2f}")
     if "day" in state:
@@ -1070,13 +1073,13 @@ class Entrant:
                 and (self.country is None or c["p"] >= self.country["p"] or c["value"] == self.country["value"])):
             self.country = {"value": c["value"], "p": c["p"], "tick": tick}
         ci = state.get("issuing_city")
-        if (ci and ci["p"] >= CARRY_COUNTRY_P and ci["value"] != "unreadable"
+        if (ci and ci["p"] >= (man.DENY_P if ci["value"] == "other" else CARRY_COUNTRY_P) and ci["value"] != "unreadable"
                 and (self.city is None or ci["p"] >= self.city["p"] or ci["value"] == self.city["value"])):
             self.city = {"value": ci["value"], "p": ci["p"], "tick": tick}
         for k in man.CHECK_KEYS:   # Day 2/3 checks, carried like the country (the page is hidden once under a stamp)
-            a = state.get(k)
-            if a and abs(a["p"] - 0.5) >= man.CARRY_CHECK_MARGIN:
-                self.checks[k] = {"value": a["p"] >= 0.5, "p": a["p"], "tick": tick}
+            v = man.check_answer(state.get(k))
+            if v is not None:
+                self.checks[k] = {"value": v, "p": state[k]["p"], "tick": tick}
 
     def after_action(self, tick: int, state: dict, action: str, sb, tb, frame, changed) -> None:
         if not changed or sb is None:
