@@ -1249,7 +1249,7 @@ class Entrant:
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
 
-    def observe(self, tick: int, state: dict, papers: bool = False) -> None:
+    def observe(self, tick: int, state: dict, papers: bool = False, day: str = "1") -> None:
         """Start-of-tick update from request 1 (`papers`: the layout found a paper on the desk or counter)."""
         person = man.yes(state, "person_at_window")
         if self.hb_drop is not None and tick - self.hb_drop <= 3 and not person:
@@ -1258,7 +1258,7 @@ class Entrant:
             self.reset(tick, f"hand-back drop at tick {self.hb_drop} + person gone")
         elif self.hb_drop is not None and tick - self.hb_drop > 3:
             self.hb_drop = None   # the person stayed: the drop was not a hand-back
-        elif (self.handed_back is not None and person and tick - self.handed_back > HANDBACK_STAY
+        elif (day == "3" and self.handed_back is not None and person and tick - self.handed_back > HANDBACK_STAY
               and tick - self.handed_back <= HANDBACK_DOCS_STAY
               and (papers or man.yes(state, "document_open_on_desk") or man.yes(state, "document_on_counter_shelf"))):
             # run 070911 t79-111: the passport went back, the entrant waited for the entry ticket still on the desk;
@@ -1290,7 +1290,7 @@ class Entrant:
             if v is not None:
                 self.checks[k] = {"value": v, "p": state[k]["p"], "tick": tick}
 
-    def after_action(self, tick: int, state: dict, action: str, sb, tb, frame, changed) -> None:
+    def after_action(self, tick: int, state: dict, action: str, sb, tb, frame, changed, src_desc: str = "") -> None:
         if not changed or sb is None:
             return
         if action == "click":
@@ -1313,7 +1313,12 @@ class Entrant:
               and tb.caption == REGION_CAPS["hand_back"]   # the drag passed the click/drag convention
               and sb.caption not in (TRAY_HANDLE_CAP, "tab at screen edge", "lever handle")
               and getattr(sb, "name", "") not in layout.BY_NAME):   # a paper, not a booth fixture (114927 t36)
-            if self.stamp_clicks or man.yes(state, "passport_shows_stamp_mark"):
+            # the dropped paper must be the passport: TOD named it so, or it is an unnamed paper on the desk (run
+            # 084642 t137: a counter paper TOD named 'rulebook' was dropped on the entrant right after the stamp, the
+            # loop took it for the hand-back and the stamped passport stayed on the desk for 15 ticks)
+            named = src_desc.split(" (TOD", 1)[0] if " (TOD" in src_desc else None
+            is_pp = named == "passport" or (named is None and sb.caption != "document on counter")
+            if (self.stamp_clicks or man.yes(state, "passport_shows_stamp_mark")) and is_pp:
                 # a stamped passport dropped on the person and the frame changed: this entrant is done. Reset
                 # now (the next entrant must not inherit the country/stamps) but keep handed_back so the
                 # manual says "wait for them to leave, then click the horn".
@@ -1686,7 +1691,7 @@ def run(args) -> int:
             if dv.get("value") in DAY_RULES and dv.get("p", 0) >= 0.5 and (
                     day not in DAY_ORDER or DAY_ORDER[dv["value"]] >= DAY_ORDER[day]):
                 day = dv["value"]   # days only move forward (run 015649 t46-52: Day 2 booth frames read '1' at 0.45)
-            ent.observe(tick, state, papers=bool(df.get("docs")))   # run 081222 t5: only the ticket was left
+            ent.observe(tick, state, papers=bool(df.get("docs")), day=day)   # run 081222 t5: only the ticket was left
             if len(ent.log) != n_resets:   # new entrant: stall / pick / refusal counters are entrant-scoped
                 n_resets = len(ent.log)
                 refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0
@@ -1933,7 +1938,8 @@ def run(args) -> int:
                     stop_reason = f"stalled: stamp press refused {refused_n} times"
             ent.last_under = facts.get("passport_under") or []
             rec["passport_under"] = ent.last_under
-            ent.after_action(tick, state, action, sb, tb, frame, changed)
+            ent.after_action(tick, state, action, sb, tb, frame, changed,
+                             src_desc=desc.get(str(src), "") if src is not None else "")
             if len(ent.log) != n_resets:
                 n_resets = len(ent.log)
                 refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0
