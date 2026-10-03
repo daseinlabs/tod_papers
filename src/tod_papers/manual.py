@@ -103,8 +103,9 @@ Dragging a stamp does nothing. Clicking a document does nothing. Clicking empty 
   here to open and read them, or to move a bulletin/rulebook out of the way.
 - "right edge of the desk (drag the tray tab here to put the stamp tray away)": offered while the tray is
   out. Dragging the tray tab here closes the tray.
-- "counter shelf left of the desk -- drop the rulebook, bulletin or a flyer here to put it away": an open rulebook or
-  bulletin dropped here closes and leaves the desk. Neither is needed on Days 1-3.
+- "counter shelf left of the desk -- drop the rulebook, bulletin, a flyer or a citation slip here to put it away": an
+  open rulebook or bulletin dropped here closes and leaves the desk; a citation slip or flyer dropped here is out of
+  the way. None of them is needed on Days 1-3. Offered whenever such a paper is on the desk.
 
 4. PROCESSING ONE ENTRANT -- FIND THE FIRST LINE THAT MATCHES WHAT IS CURRENTLY TRUE
 A. Nobody is at the window and no document is on the counter or desk: click the loudspeaker on the booth
@@ -135,7 +136,16 @@ D2. RECOVERY: the entrant's passport is no longer visible anywhere on the desk o
    dragging its tab (left end of the open stamp bar) back to the RIGHT (drop it on the "right edge of the
    desk" target). The hidden passport
    reappears; then continue with C.
-E0. A paper that is NOT the passport (the rulebook, the bulletin, a transcript) lies under a stamp (the state
+K. DESK CLUTTER: the state block names an M.O.A. CITATION slip or a flyer (the pink "The Pink Vice" card) lying in
+   the working area -- on a stamp landing strip, under the open stamp tray bar, or on the passport. Neither is the
+   entrant's document to check: never stamp it, never hand a citation to the entrant, never hand a flyer back
+   instead of the passport. Order: (1) the state block says it lies UNDER THE OPEN STAMP TRAY BAR: close the tray
+   first (drag the tray tab, left end of the open stamp bar, onto the "right edge of the desk" target);
+   (2) DRAG the slip or flyer (clicking does nothing) onto the "counter shelf left of the desk" target;
+   (3) continue with the matching step (C opens the tray again). A flyer may also go back to the entrant together
+   with the rest of their papers after the stamped passport was handed back (G2).
+E0. A paper that is NOT the passport (the rulebook, the bulletin, a transcript; a citation slip or flyer: step K)
+   lies under a stamp (the state
    block says "the RULEBOOK ... lies under the DENIED stamp, not the passport"): stamping it is useless and
    will be refused. Drag the rulebook or bulletin onto the "counter shelf left of the desk" target (other
    papers to the "desk" target), then drag the PASSPORT (from the
@@ -208,10 +218,11 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
 - The bulletin (Ministry of Admission sheet) and the rulebook can lie open on the desk. If one covers the
   passport or the place you need to work, drag it aside to the left part of the desk ("desk" target). They
   are not needed to process day-1 entrants.
-- An M.O.A. CITATION slip (printed after a mistake) is the inspector's, not the entrant's: never hand it to the
-  entrant; drag it to the "counter shelf left of the desk" target if it is in the way.
-- A loose flyer or note an entrant leaves (e.g. the pink "The Pink Vice" card) is not needed: if it lies on the
-  passport or under a stamp, DRAG it (clicking it does nothing) onto the "counter shelf left of the desk" target.
+- An M.O.A. CITATION slip (printed after a mistake) is the inspector's, not the entrant's: never stamp it, never
+  hand it to the entrant. Where it lies out of the way, leave it; in the working area see step K.
+- A flyer an entrant puts down with their papers (the pink "The Pink Vice" card) has no rule value and is not a
+  document to check: never stamp it. In the working area see step K; otherwise leave it, or hand it back WITH the
+  entrant's other papers after the stamped passport.
 - Multi-page papers (the bulletin shows "3/4" at its bottom) turn pages when you click their bottom-right
   corner. Do not drag a page corner.
 
@@ -438,6 +449,30 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS, 
     return {k: v for k, v in q.items() if k not in INSPECT_KEYS or k in inspect}
 
 
+# loop10 restart (runs 162909/163640, Uvilia): the stamp-press memory was lost with the loop restart, the mark question
+# is only asked after a recorded press, so a stamped passport under a strip stayed 'undecided' (E?) for 60+ ticks.
+# After UNDECIDED_RECHECK E? ticks in a row request 1 asks which ink the passport carries (loop.probe_context);
+# a confident answer makes the passport stamped from the screen alone (stamped(), facts['mark_side']).
+UNDECIDED_RECHECK = 3
+MARK_SIDE_P = 0.75   # p the ink-side choice needs to count (163640 dry run: the yes/no mark question sat at
+# 0.20-0.54 on the inked Uvilia passport while this choice read DENIED 0.53-0.84 on ticks 8-15, >= 0.80 on 11, 12, 15)
+STAMP_INK_Q = {"type": "choice",
+               "instructions": "Look at the entrant's passport wherever it lies (on the desk or in the dark strip under "
+                               "the stamp tray). Is a stamp ink mark printed on its page? The two big stamps sitting on "
+                               "the grey tray bar are NOT marks.",
+               "criteria": {"approved": "a green APPROVED ink mark is printed on the passport page",
+                            "denied": "a red DENIED ink mark is printed on the passport page",
+                            "none": "no stamp ink on the passport, or no passport page is visible"}}
+
+
+def mark_side_answer(state: dict) -> dict | None:
+    """{'value': 'approved'|'denied', 'p'} when the recheck choice (STAMP_INK_Q) is confident."""
+    a = state.get("passport_stamp_ink")
+    if a and a["value"] in ("approved", "denied") and a["p"] >= MARK_SIDE_P:
+        return {"value": a["value"], "p": a["p"]}
+    return None
+
+
 # --------------------------------------------------------------------------
 # request 2 text
 # --------------------------------------------------------------------------
@@ -527,6 +562,8 @@ def stamped(state: dict, facts: dict | None) -> list[str]:
     out = []
     if yes(state, "passport_shows_stamp_mark") and (facts.get("stamp_clicks") or facts.get("missed_stamps")):
         # a mark needs a stamp press for this entrant (run 054238 t62-137: mark p=0.77 on an unstamped passport)
+        out.append("mark")
+    elif facts.get("mark_side"):   # recheck after UNDECIDED_RECHECK E? ticks: the ink side read from the screen
         out.append("mark")
     if facts.get("stamp_clicks"):
         out.append("history")
@@ -790,6 +827,11 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     if scr:
         lines.append(f"- Screen: {scr['value']} (p={scr['p']:.2f})")
     for k in STATE_KEYS:
+        if k == "passport_shows_stamp_mark" and facts.get("mark_side") and not facts.get("stamp_clicks"):
+            ms = facts["mark_side"]
+            lines.append(f"- {_LABEL[k]}: yes -- {ms['value'].upper()} ink read on the passport at tick {ms['tick']} "
+                         f"(p={ms['p']:.2f}); the passport is stamped {ms['value'].upper()}")
+            continue
         if k == "passport_shows_stamp_mark" and "mark" not in stamped(state, facts):
             if facts.get("stamp_clicks"):   # run 070005 t25-31: said 'no stamp pressed' after 3 recorded presses
                 t_, side_ = facts["stamp_clicks"][-1]
@@ -816,6 +858,9 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         tail = (" -- not needed on Days 1-3; to clear the desk drop it on the 'counter shelf left of the desk' target"
                 if d["id"] in ("rulebook", "bulletin") and d["where"] == "desk" and d["p"] >= 0.6
                 and not (d["id"] == "rulebook" and no_passport(state, facts)) else "")   # step N reads it on the desk
+        cl = next((c for c in facts.get("clutter") or [] if c["native"] == d.get("native")), None)
+        if cl:
+            tail = clutter_phrase(cl, yes(state, "stamp_tray_open") or bool(facts.get("tray_open_px")))
         lines.append(f"- Paper on the {where} ({d['pos']}): {d['id'].upper()} (p={d['p']:.2f}){tail}")
     if (facts.get("desk_target") or {}).get("target") == "desk_clear":
         # loop.passport_needs_clear_space: an open passport on the desk whose data page request 1/1b could not read
@@ -851,7 +896,7 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         if wrong:
             lines.append(f"- A paper that is NOT the passport lies under the {' and '.join(w.upper() for w in wrong)} "
                          "stamp: stamping it is useless (the stamp press will be refused). Drag that paper off the "
-                         "strip (the rulebook/bulletin onto the 'counter shelf left of the desk' target, other papers to the "
+                         "strip (the rulebook, bulletin, a citation slip or flyer onto the 'counter shelf left of the desk' target, other papers to the "
                          "'desk' target), then drag the PASSPORT to the strip under the stamp you need")
         ws = wrong_stamp(state, day, facts)
         need = needed_stamp(state, day, facts)
@@ -1026,6 +1071,37 @@ def build(state: dict, history, day: str, ban_lines: list[str] | None = None, fa
 # --------------------------------------------------------------------------
 
 
+CLUTTER_NAMES = {"citation": "an M.O.A. CITATION slip", "flyer": "a flyer (The Pink Vice card)"}
+
+
+def clutter_phrase(c: dict, tray_open: bool) -> str:
+    """State-block tail for a citation slip / flyer (loop.clutter_facts: where it lies, whether it is in the way)."""
+    who = (" -- the inspector's CITATION slip, NOT the entrant's document: never stamp it, never hand it to the entrant"
+           if c["id"] == "citation" else
+           " -- the entrant's FLYER, not a document to check: never stamp it, never hand it back instead of the passport")
+    if not c["in_way"]:
+        return who + "; it lies out of the way (leave it)"
+    if c["under_bar"] and tray_open:
+        return (who + ". It lies UNDER THE OPEN STAMP TRAY BAR: close the tray first (drag the tray tab onto the "
+                "'right edge of the desk' target), then drag it onto the 'counter shelf left of the desk' target (step K)")
+    where = (f"ON THE {' and '.join(x.upper() for x in c['strips'])} landing strip"
+             + ("s" if len(c["strips"]) > 1 else "") if c["strips"]
+             else "on the passport" if c["on_passport"] else "where the stamp strips are")
+    return who + f". It lies {where}: drag it onto the 'counter shelf left of the desk' target (step K)"
+
+
+def clutter_step(state: dict, f: dict):
+    """Manual step K: a citation slip / flyer in the working area while the passport is not under a stamp head."""
+    cl = [c for c in f.get("clutter") or [] if c["in_way"]]
+    if not cl or f.get("passport_under"):
+        return None
+    tray = yes(state, "stamp_tray_open") or bool(f.get("tray_open_px"))
+    under = [c for c in cl if c["under_bar"]]
+    if under and tray:
+        return "K1", f"close the tray (tab -> right edge) to uncover the {under[0]['id']}"
+    return "K", f"drag the {cl[0]['id']} -> counter shelf left of the desk"
+
+
 def no_passport(state: dict, facts: dict | None = None) -> bool:
     """Step N: TOD (request 1) says the person at the window has handed over no documents (p >= NO_DOCS_P), and
     TOD's other answers agree: nothing on the counter shelf, no paper TOD named the passport (run 092642 t9:
@@ -1066,13 +1142,17 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     if day in ("2", "3"):
         ok = needed_stamp(state, day, facts) == "approved"
     if stamped(state, facts):
-        sides = [s for _, s in (facts or {}).get("stamp_clicks") or []]
+        sides = [s for _, s in (facts or {}).get("stamp_clicks") or []] or (
+            [(facts or {})["mark_side"]["value"]] if (facts or {}).get("mark_side") else [])
         if sides and sides[-1] == "approved" and kc and not ok:
             return "F2", "click DENIED (overrules APPROVED)"
         return "F", "drag stamped passport -> entrant (hand back)"
     if yes(state, "bulletin_or_rulebook_covering_desk") and yes(state, "document_open_on_desk"):
         return "6", "drag bulletin/rulebook -> desk (aside)"
     f = facts or {}
+    k_step = clutter_step(state, f)
+    if k_step:
+        return k_step
     if yes(state, "stamp_tray_open") or f.get("tray_open_px"):
         wrong = [s_ for s_, v in (f.get("strip") or {}).items() if v.get("doc") and v["doc"] != "passport"]
         if wrong and not f.get("passport_under"):

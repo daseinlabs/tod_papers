@@ -305,3 +305,22 @@ resumed, resume_frac). A tick that ends early (skip/stop) and the loop exit resu
 Checked with ground truth (eval only): the clock held 06:36 for 3 s under the menu and ran on after the resume.
 Reason: a day is 4-6 real minutes (~3 game-min per real second) and entrants after 18:00 are unpaid; at ~6.7 s per
 tick the runs ended Day 2 with savings 0 / 10 / 15 / -5 (game over).
+
+## Desk clutter (step K) and the stamp-mark recheck (loop10b, 2026-10-03)
+Citation slips and the Pink Vice flyer are a TOD-handled situation, not a stall (164732 t92-121: 32 ticks, cycle
+stop; 161058 Uvilia: 71 ticks).
+- `clutter_facts` (geometry only, on TOD's request-1 identity citation/flyer p >= 0.5): lies on a landing strip,
+  under the open tray bar (>= 30% of its box between the bar top and the strip), on the passport, or elsewhere;
+  `in_way` = strip / bar area / passport. No new question: the identity questions already name the papers.
+- State block: each such paper gets a tail saying whose it is, where it lies, and the move (stow shelf; tray first
+  when it is under the open bar). Manual step K: close tray (if under the bar) -> drag slip/flyer to "counter shelf
+  left of the desk" -> continue. `situation` returns K1/K before the tray steps while the passport is under no stamp.
+- Options: an in-the-way citation stays a (drag-only) source; out-of-the-way citations are still hidden (104848).
+  The stow target caption now names citation slips; in G2 it stays offered while a citation is in the way.
+  `decide`: a citation/flyer is never dropped on a landing strip / tray stow edge, a citation never on the entrant,
+  a flyer only after the passport went back (G2) -> TOD's best other target, else wait. `passport_sides`: a strip
+  paper TOD names citation/flyer (p >= 0.5) is not the passport unless passport_under >= 0.85.
+- Stamp recheck: after `man.UNDECIDED_RECHECK` (3) E? ticks in a row (`Entrant.note_step`), request 1 adds
+  `passport_stamp_ink` (approved / denied / none; the yes/no mark question sat at 0.20-0.54 on the inked Uvilia
+  passport in the 163640 dry run while this choice read DENIED 0.53-0.84). Ink side p >= 0.75 -> `facts['mark_side']`: stamped from the screen alone (F, or F2 for APPROVED ink with a DENIED verdict),
+  stamps hidden otherwise, the entrant offered for the hand-back. One extra question, only on those ticks.
