@@ -883,6 +883,41 @@ def desk_target(frame: np.ndarray, facts: dict | None, state: dict):
     return box, info
 
 
+def strip_drop_point(sb: Box, tb: Box, facts: dict | None, frame: np.ndarray, state: dict):
+    """Cursor end point (frame px) for a passport dragged onto a stamp landing strip: the VISA page (upper half of
+    the open passport) must lie under the stamp head, so the grab offset to the visa-page centre is kept (loop10
+    runs 161058 t94-95 / 163640: the grab point -- often on the data page -- was dropped on the strip, the visa page
+    ended under the stamp bar and both stamps inked the DATA page: no decision recorded, EXP. covered). A closed
+    passport from the counter opens centred on the cursor. Returns None when the source is not the passport."""
+    if tb.caption not in (REGION_CAPS["stamp_landing_denied"], REGION_CAPS["stamp_landing_approved"]):
+        return None
+    src = _passport_doc(facts)
+    if src is None:
+        return None
+    H, W = frame.shape[:2]
+    sx, sy = W / layout.NATIVE_W, H / layout.NATIVE_H
+    gx, gy = sb.center[0] / sx, sb.center[1] / sy
+    vis = list(src["native"])
+    if not (vis[0] - 4 <= gx <= vis[2] + 4 and vis[1] - 4 <= gy <= vis[3] + 4):
+        return None
+    tray = bool(((facts or {}).get("static") or {}).get("tray_open", man.yes(state, "stamp_tray_open")))
+    size = layout.open_passport_size(vis if src["where"] == "desk" else None)
+    w0 = layout.OPEN_PASSPORT[0]
+    if src["where"] == "desk" and 0.8 * w0 <= vis[2] - vis[0] <= 1.2 * w0:   # one clean open passport box
+        full = layout.full_passport_box(vis, size, tray)
+        vcx, vcy = (full[0] + full[2]) / 2, full[1] + (full[3] - full[1]) * layout.PASSPORT_DATA_FRAC / 2
+        ox, oy = gx - vcx, gy - vcy
+    elif src["where"] == "counter":
+        ox, oy = 0.0, size[1] / 4   # opens centred on the cursor: the visa centre is a quarter height above it
+    else:
+        return None
+    tx, ty = tb.center[0] / sx + ox, tb.center[1] / sy + oy
+    m = 3 * layout.DESK_MARGIN   # the cursor must end on the desk
+    tx = min(max(tx, layout.DESK[0] + m), layout.DESK[2] - m)
+    ty = min(max(ty, layout.DESK[1] + m), layout.DESK[3] - m)
+    return int(tx * sx), int(ty * sy)
+
+
 def passport_needs_clear_space(state: dict, facts: dict | None, day: str, info: dict) -> bool:
     """'clear desk space' target: an open passport lies on the desk (not under a stamp head, not already on the
     clear spot) and request 1b could not read it -- country 'unreadable' / p < 0.6 (none carried), or on Day 2/3
@@ -2373,6 +2408,10 @@ def run(args) -> int:
                         io_win.click(hwnd, cx, cy, settle=args.settle)
             elif action == "drag" and sb is not None and tb is not None and tb is not sb:
                 (ax, ay), (bx, by) = sb.center, tb.center
+                _sp = strip_drop_point(sb, tb, facts, frame, state)
+                if _sp is not None:
+                    (bx, by) = _sp
+                    rec["strip_drop"] = [bx, by]
                 check_inside(hwnd, ax, ay)
                 check_inside(hwnd, bx, by)
                 executed = f"drag #{src} ({ax},{ay}) -> #{tgt} ({bx},{by})"
