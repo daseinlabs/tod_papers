@@ -533,7 +533,7 @@ def get_boxes(frame: np.ndarray, extractor: str):
 
 _STATIC_REGION = {   # loop region name -> layout element (native box)
     "stamp_landing_denied": "landing_denied", "stamp_landing_approved": "landing_approved",
-    "tray_stow": "tray_stow", "hand_back": "hand_back", "desk": "desk",
+    "tray_stow": "tray_stow", "hand_back": "hand_back", "desk": "desk", "stow_papers": "stow_papers",
 }
 
 
@@ -543,7 +543,7 @@ def static_regions(frame: np.ndarray, tray_is_open: bool):
     at the window (hand back) and the desk. Returns (regions, {name: 'static'})."""
     H, W = frame.shape[:2]
     names = (["stamp_landing_denied", "stamp_landing_approved", "tray_stow"] if tray_is_open else [])
-    names += ["hand_back", "desk"]
+    names += ["hand_back", "desk", "stow_papers"]
     out = []
     for name in names:
         x1, y1, x2, y2 = layout.scale_box(layout.BY_NAME[_STATIC_REGION[name]].box, W, H)
@@ -565,6 +565,7 @@ REGION_CAPS = {
     "hand_back": "the entrant at the booth window -- drop documents ON THE PERSON to hand them back",
     "desk": "desk (drop documents here to read them)",
     "tray_stow": "right edge of the desk (drag the tray tab here to put the stamp tray away)",
+    "stow_papers": "rulebook slot below the counter -- drop the rulebook here to put it away",
 }
 
 

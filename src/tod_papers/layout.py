@@ -98,6 +98,10 @@ LAYOUT: list[Element] = [
     Element("counter_shelf", "region", "counter shelf under the window -- drop documents here (onto the "
             "hand-back slot) to hand them back", "target", (10, 212, 172, 266), "booth"),
     Element("desk", "region", "desk (drop documents here to read them)", "target", (196, 230, 340, 304), "booth"),
+    # rulebook slot below the counter: an open rulebook dropped here goes back into its slot (run 024712/030xxx:
+    # the rulebook lay open over the desk and was only ever moved around on the desk)
+    Element("stow_papers", "region", "rulebook slot below the counter -- drop the rulebook here to put it away",
+            "target", (106, 272, 146, 316), "booth"),
     # the person behind the glass (head + chest); documents dropped here are handed back (run 092612: dropped on
     # the counter shelf they just lay there). Measured on runs 083908 raw_0000 / 090556 raw_0022.
     Element("hand_back", "region", "the entrant at the booth window -- drop documents ON THE PERSON to hand them "
