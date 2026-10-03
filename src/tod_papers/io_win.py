@@ -285,6 +285,18 @@ def click(hwnd: int, cx: int, cy: int, settle: float = 0.03) -> None:
     time.sleep(settle)
 
 
+def key(vk: int, hold: float = 0.06) -> None:
+    """Press and release one key (virtual-key code; scan code included so games reading scan codes see it).
+    Used only by the harness pause (loop.py --pause-think: VK_ESCAPE opens/closes the game's own pause menu)."""
+    scan = ctypes.windll.user32.MapVirtualKeyW(vk, 0)
+    ctypes.windll.user32.keybd_event(vk, scan, 0, 0)
+    time.sleep(hold)
+    ctypes.windll.user32.keybd_event(vk, scan, 0x0002, 0)   # KEYEVENTF_KEYUP
+
+
+VK_ESCAPE = 0x1B
+
+
 def drag(
     hwnd: int,
     ax: int,

@@ -970,6 +970,10 @@ def encode_image(img: np.ndarray, fmt: str = "png", quality: int = 90) -> str:
     return f"data:{mime};base64," + base64.b64encode(buf.tobytes()).decode()
 
 
+PAUSE_MIN_FRAC = 0.05     # changed fraction (vs the grabbed frame) that counts as "pause menu on screen"
+STAMP_REOFFER_TICKS = 6   # ticks after a recorded stamp press during which the stamps are not offered again
+
+
 def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str, args,
             stuck: "StuckTracker | None" = None, tick: int = 0, facts: dict | None = None) -> dict:
     """Everything between (extract + request 1) and request 2: drop-target
@@ -986,7 +990,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         regions, region_src = static_regions(frame, bool(sinfo.get("tray_open", man.yes(state, "stamp_tray_open"))))
     else:
         regions, region_src = derive_regions(boxes, frame, state) if booth else ([], {})
-    if booth and facts is not None and not man.stamped(state, facts):
+    if booth and facts is not None and not man.stamped(state, facts) and not facts.get("waiting_docs"):
         # an unstamped passport is not handed back (run 054238 t62-137: 20+ unstamped hand-backs on a false mark
         # reading); the entrant target is offered once a stamp press is on record for this entrant
         regions = [r for r in regions if r.caption != REGION_CAPS["hand_back"]]
@@ -1020,7 +1024,11 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if undecided:
         # E?: the page has to be read, not the tray closed (run 044332 t44: closing it started a C/E? loop)
         boxes = [b for b in boxes if not (getattr(b, "name", "") == "tray_tab_open" or b.caption == TRAY_HANDLE_CAP)]
-    if wrong or undecided:
+    sc = (facts or {}).get("stamp_clicks") or []
+    # already stamped for this entrant (a press on record): a second press is useless (run 070005 t25-31: 7 more
+    # DENIED presses on a stamped passport); re-offered after STAMP_REOFFER_TICKS in case the press did not mark
+    restamp_block = bool(sc) and tick is not None and tick - sc[-1][0] < STAMP_REOFFER_TICKS
+    if wrong or undecided or restamp_block:
         hide_stamp = lambda b: _stamp_side(b, frame) is not None
     elif booth and facts is not None and "strip" in facts:
         # a stamp is offered only when request 1 puts the passport under it -- the same test as the refusal veto
@@ -1100,7 +1108,7 @@ def _timed(fn, *a):
 
 
 def _clean_state(state: dict) -> dict:
-    return {k: {"value": v["value"], "p": v["p"], "probs": {a: round(b, 4) for a, b in v["probs"].items()}}
+    return {k: {"value": v["value"], "p": v["p"], "probs": {a: round(b, 4) for a, b in (v.get("probs") or {}).items()}}
             for k, v in state.items()}
 
 
@@ -1108,6 +1116,7 @@ TRAY_FLIP_LIMIT = man.TRAY_FLIP_LIMIT
 REPEAT_DRAG_N = 4   # same drag source + same target, state summary unchanged, N ticks running -> exclude the source
 HORN_HIDE_P = 0.7
 HANDBACK_STAY = 4   # ticks a person may stay at the window after a hand-back before it is discounted
+HANDBACK_DOCS_STAY = 14   # ... or, with papers still visible, before 'waiting for the rest of the documents' ends
 REPEAT_WINDOW, REPEAT_STOP = 12, 10   # same executed input 10 of the last 12 ticks -> stall stop (run 114927)    # person_at_window P(yes) above which the horn is not offered
 
 
@@ -1212,11 +1221,13 @@ class Entrant:
     exp: dict | None = None                      # {"year", "month", "p", "tick"} EXP. reading (Day 2+)
     checks: dict = field(default_factory=dict)   # {check key: {"value", "p", "tick"}} confident yes/no readings
     log: list = field(default_factory=list)          # [(tick, why)] every reset (for the run report)
+    waiting_docs: bool = False   # passport handed back, person still there, papers still visible (Day 3 ticket)
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
         self.hb_drop, self.missed_stamps, self.checks, self.city, self.exp = None, [], {}, None, None
         self.tray_seen = []   # run 005956 t18/t21: entrant 2's tray toggles blocked entrant 3's first tray opening
+        self.waiting_docs = False
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
 
@@ -1229,6 +1240,12 @@ class Entrant:
             self.reset(tick, f"hand-back drop at tick {self.hb_drop} + person gone")
         elif self.hb_drop is not None and tick - self.hb_drop > 3:
             self.hb_drop = None   # the person stayed: the drop was not a hand-back
+        elif (self.handed_back is not None and person and tick - self.handed_back > HANDBACK_STAY
+              and tick - self.handed_back <= HANDBACK_DOCS_STAY
+              and (man.yes(state, "document_open_on_desk") or man.yes(state, "document_on_counter_shelf"))):
+            # run 070911 t79-111: the passport went back, the entrant waited for the entry ticket still on the desk;
+            # the reset below made the ticket 'a new passport' for 30 ticks. Keep the hand-back, ask for the rest.
+            self.waiting_docs = True
         elif self.handed_back is not None and person and tick - self.handed_back > HANDBACK_STAY:
             # the person is still at the window long after the 'hand-back': it was not one (run 114927 t36: the
             # transcript printer was dragged onto the person; the state block then said 'finished' for 60 ticks)
@@ -1292,7 +1309,8 @@ class Entrant:
     def facts(self, tick: int, df: dict) -> dict:
         return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
                 "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
-                "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp}
+                "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp,
+                "waiting_docs": self.waiting_docs}
 
     def tray_flips(self) -> int:
         """Open<->closed changes of the stamp tray over the last 8 ticks with no stamp click in between.
@@ -1498,12 +1516,59 @@ def run(args) -> int:
         if not args.dry_run and is_foreground(hwnd):
             io_win.move(hwnd, *park)
 
+    # --pause-think (harness timing, not a TOD decision): the game's own pause menu (Esc) is opened after the
+    # frame is grabbed and closed again before TOD's input is executed, so the game clock does not run while
+    # extraction and the TOD requests are in flight. TOD only ever sees the frame grabbed BEFORE the pause.
+    pause = {"on": False, "t": 0.0, "pre": None}
+
+    def pause_game(rec: dict, pre: np.ndarray) -> None:
+        if args.dry_run or not args.pause_think or pause["on"] or not try_foreground(hwnd):
+            return
+        io_win.key(io_win.VK_ESCAPE)
+        t0 = time.perf_counter()
+        frac = 0.0
+        while time.perf_counter() - t0 < 1.0:   # the menu has to be visible, else this tick runs unpaused
+            time.sleep(0.08)
+            frac = changed_frac(change_map(pre, grab.grab()))
+            if frac >= PAUSE_MIN_FRAC:
+                break
+        pause.update(on=frac >= PAUSE_MIN_FRAC, t=time.perf_counter(), pre=pre)
+        rec["pause"] = {"opened": pause["on"], "menu_frac": round(frac, 4),
+                        "ms": round((time.perf_counter() - t0) * 1e3)}
+        print(f"[pause] Esc -> pause menu {'shown' if pause['on'] else 'NOT seen'} (changed {frac:.3f})")
+        if not pause["on"]:   # whatever Esc did, undo it so no menu is left for the next frame
+            io_win.key(io_win.VK_ESCAPE)
+            time.sleep(0.3)
+
+    def resume_game(rec: dict | None) -> None:
+        if not pause["on"]:
+            return
+        held = time.perf_counter() - pause["t"]
+        frac = 1.0
+        for attempt in range(2):
+            try_foreground(hwnd)
+            io_win.key(io_win.VK_ESCAPE)
+            t0 = time.perf_counter()
+            while time.perf_counter() - t0 < 1.2:   # back to the booth: the frame matches the pre-pause one again
+                time.sleep(0.08)
+                frac = changed_frac(change_map(pause["pre"], grab.grab()))
+                if frac < PAUSE_MIN_FRAC:
+                    break
+            if frac < PAUSE_MIN_FRAC:
+                break
+        pause["on"] = False
+        if rec is not None:
+            rec.setdefault("pause", {}).update(resumed=frac < PAUSE_MIN_FRAC, held_s=round(held, 2),
+                                               resume_frac=round(frac, 4), resume_attempts=attempt + 1)
+        print(f"[pause] Esc -> resumed after {held:.1f} s (frame back: {frac < PAUSE_MIN_FRAC}, {frac:.3f})")
+
     try:
         for tick in range(args.max_ticks):
             rec: dict = {"tick": tick, "time": time.time()}
             row: dict = {"tick": tick}
             rows.append(row)
             stuck.decay(tick)
+            resume_game(None)   # a tick that ended early (skip / stop paths) left the menu open
             # capture needs the game unoccluded (Desktop Duplication grabs the screen region)
             # if another window holds the foreground, wait (no input, no tick spent) instead of aborting
             fg_misses = 0
@@ -1533,6 +1598,8 @@ def run(args) -> int:
                        anim_wait_s=round(waited, 2), anim_frac=round(af, 5), stable=stable)
             if not stable:
                 print(f"[tick {tick:03d}] screen still animating after {waited:.1f}s (frac {af:.4f}); proceeding anyway")
+            if args.pause_think and screen_family(frame)[0] == "booth":
+                pause_game(rec, frame)
 
             # ---- REQUEST 1 (state, unmarked frame) in parallel with extraction; then 1b (new papers only) -----
             # Day 1 decides on the country only; expiry/photo are asked from Day 2 (frees 2 of TOD's 16 questions)
@@ -1732,6 +1799,7 @@ def run(args) -> int:
                 veto = "refused: " + man.under_phrase(facts, side)
                 print(f"           {veto}")
             # ---- execute ---------------------------------------------------------
+            resume_game(rec)
             if veto:
                 executed = "vetoed: " + veto
             elif action == "click" and sb is not None:
@@ -1867,6 +1935,10 @@ def run(args) -> int:
                 except Exception as e:
                     print(f"[loop] overlay failed: {e}")
     finally:
+        try:
+            resume_game(None)
+        except Exception as e:
+            print(f"[pause] resume at exit failed: {e}")
         grab.close()
         write_summary(run_dir, rows, {
             "ticks": len(rows), "gt at end (eval only)": _gt_snapshot(), "TOD calls": tod.total_calls, "cost": f"${tod.total_cost:.4f}",
@@ -1930,6 +2002,8 @@ def main(argv=None, result: dict | None = None) -> int:
     ap.add_argument("--unreachable-stop", type=int, default=3, help="stop after N consecutive ticks whose TOD "
                     "request failed with retries exhausted on a network error (0 = off)")
     ap.add_argument("--refuse-stop", type=int, default=5, help="stop after N refused stamp presses (0 = off)")
+    ap.add_argument("--pause-think", action="store_true", help="harness timing: open the game's pause menu (Esc) "
+                    "after the frame grab, close it before the input; TOD only sees the pre-pause frame (off by default)")
     args = ap.parse_args(argv)
     if args.frames:
         return offline(args)

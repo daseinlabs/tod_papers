@@ -112,7 +112,8 @@ A. Nobody is at the window and no document is on the counter or desk: click the 
    while a person stands at the window it does nothing (it is then not even offered). The person then walks up to the window by themselves; if someone is
    already walking up, wait.
 B. A person is at the window and their passport lies on the counter shelf under the window: drag the
-   passport down to the desk ("desk" target) to open it. Clicking it does nothing.
+   passport down to the desk ("desk" target) to open it. Clicking it does nothing. From Day 3 a foreigner
+   also hands over an ENTRY TICKET (small slip): drag it to the desk as well so its date can be read.
 C. An open passport lies on the desk and the stamp tray is closed: read the passport (on Day 1 only the
    issuing country at the bottom matters; from Day 2 also the EXP. date and photo), then open the stamp tray by dragging the tab at the right edge of the
    desk to the left (drop it on the "desk" target).
@@ -163,6 +164,8 @@ F2. WRONG STAMP: the state block says which stamp was clicked. If the passport w
    back. If it was stamped DENIED but should have been APPROVED, it cannot be fixed (DENIED always wins and
    an APPROVED stamp on top does not count): hand it back as it is. The first two mistakes of each day are
    only warnings.
+G2. The state block says the entrant is STILL at the window waiting for the rest of their documents: drag
+   each paper of theirs still on the desk or the counter shelf (entry ticket ...) onto the entrant.
 G. After the documents were handed back (the state block says so) the person leaves by themselves; wait
    while they walk away. When the window is empty and nothing is on the counter: go back to A and click the
    loudspeaker to call the next person.
@@ -352,11 +355,16 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS) 
                          "cannot_compare": "the passport photo or the person is not visible"}},
     }
     if today == DAY_DATES["3"]:   # Day 3: foreigners also need an entry ticket dated today
-        q["entry_ticket_dated_today"] = _noul(
-            f"Today is {today}. Is an ENTRY TICKET (a small slip of paper with a date, 'ENTRY TICKET') visible "
-            f"anywhere on the desk or the counter, and is the date printed on it {today}?",
-            f"yes - an entry ticket dated {today} is visible",
-            "no - no entry ticket visible, or its date is a different day")
+        # run 070911 t74-79 (Mattias Brooks, gt APPROVED): the ticket lay on the counter shelf, the old yes/no
+        # question said 'no' (0.84) and he was DENIED. Now a 3-way choice; only a confident 'other_date' denies.
+        q["entry_ticket_dated_today"] = {
+            "type": "choice",
+            "instructions": f"Today is {today}. Find the ENTRY TICKET (a small slip with the words ENTRY TICKET and "
+                            f"'VALID ON' followed by a date) on the desk or the counter shelf. Which date is printed "
+                            f"after 'VALID ON'?",
+            "criteria": {"dated_today": f"an entry ticket is visible and its date reads VALID ON {today}",
+                         "other_date": f"an entry ticket is visible and its date is clearly NOT {today}",
+                         "not_readable": "no entry ticket is visible, or its date cannot be read in this picture"}}
     return {k: v for k, v in q.items() if k not in INSPECT_KEYS or k in inspect}
 
 
@@ -468,7 +476,8 @@ def known_city(state: dict, facts: dict | None):
     return None
 
 
-CHECK_YES = {"valid": True, "match": True, "expired": False, "different": False}
+CHECK_YES = {"valid": True, "match": True, "expired": False, "different": False,
+             "dated_today": True, "other_date": False}
 
 
 def check_answer(a: dict | None):
@@ -647,6 +656,8 @@ def needed_stamp(state: dict, day: str, facts: dict | None) -> str | None:
         vals[1] = True   # city not read confidently: only a confident mismatch denies (an unread city must not stall)
     if vals[2] is None:
         vals[2] = True   # photo: only a confident 'different' denies
+    if len(vals) > 3 and vals[3] is None:
+        vals[3] = True   # Day 3 ticket: only a confident 'other date' denies (an unread ticket must not stall)
     if False in vals:
         return "denied"
     if None in vals:
@@ -687,7 +698,12 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         lines.append(f"- Screen: {scr['value']} (p={scr['p']:.2f})")
     for k in STATE_KEYS:
         if k == "passport_shows_stamp_mark" and "mark" not in stamped(state, facts):
-            lines.append(f"- {_LABEL[k]}: no (no stamp has been pressed for this entrant yet)")
+            if facts.get("stamp_clicks"):   # run 070005 t25-31: said 'no stamp pressed' after 3 recorded presses
+                t_, side_ = facts["stamp_clicks"][-1]
+                lines.append(f"- {_LABEL[k]}: the passport was stamped {side_.upper()} at tick {t_} (the ink may be "
+                             f"hidden under the tray in this frame)")
+            else:
+                lines.append(f"- {_LABEL[k]}: no (no stamp has been pressed for this entrant yet)")
             continue
         lines.append(f"- {_LABEL[k]}: {_yn(state, k)}")
     for d in facts.get("docs_named") or []:
@@ -734,6 +750,9 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         elif undecided_stamp(state, day, facts):
             lines.append("- The decision is not known yet (a check of section 5 could not be read): the stamps are not "
                          "offered. Drag the passport to the 'desk' target so its data page can be read")
+        elif stamped(state, facts):
+            lines.append("- The passport is already stamped: do not press a stamp again; hand the passport back "
+                         "(drag it onto the entrant at the window)")
         elif len(pu) == 1:
             other = "approved" if pu[0] == "denied" else "denied"
             lines.append(f"- Click the stamp the passport is lying under ({pu[0].upper()}); if you want "
@@ -742,7 +761,11 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         elif not pu:
             lines.append("- The passport lies under neither stamp: the stamps are not offered (a press would mark "
                          "nothing); drag the passport to the landing strip under the stamp you want first")
-    if facts.get("handed_back") is not None:
+    if facts.get("handed_back") is not None and facts.get("waiting_docs"):
+        lines.append(f"- The passport was handed back at tick {facts['handed_back']}, but the entrant is STILL at the "
+                     "window: they wait for the rest of their documents (e.g. the entry ticket). Drag every paper "
+                     "of theirs still lying on the desk or the counter shelf onto the entrant (step G2)")
+    elif facts.get("handed_back") is not None:
         lines.append(f"- Documents were handed back at tick {facts['handed_back']}: this entrant is finished and "
                      "leaves by themselves; call the next person once the window is empty")
     open_ok = yes(state, "passport_open_readable")
@@ -888,6 +911,8 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     if yes(state, "inspect_mode_on"):
         return "H", "click the inspect-mode button (leave inspect mode)"
     if (facts or {}).get("handed_back") is not None:
+        if (facts or {}).get("waiting_docs") and yes(state, "person_at_window"):
+            return "G2", "drag the remaining document (entry ticket) -> entrant"
         return ("G", "wait for the entrant to leave") if yes(state, "person_at_window") else ("A", "click loudspeaker")
     kc = known_country(state, facts)
     if kc and kc[0] == "unreadable":

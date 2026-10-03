@@ -125,7 +125,11 @@ def extract(frame_bgr: np.ndarray) -> list[Box]:
     remote server again."""
     global _local_warm
     try:
-        return extract_remote(frame_bgr)
+        try:
+            return extract_remote(frame_bgr)
+        except requests.ConnectionError as e:   # stale keep-alive socket (run 070005 t7: RemoteDisconnected ->
+            print(f"[extract_remote] retrying once ({type(e).__name__})")   # 47 s cold local fallback)
+            return extract_remote(frame_bgr)
     except (requests.RequestException, ValueError, KeyError) as e:
         err = f"{type(e).__name__}: {str(e)[:200]}"
         FALLBACK_LOG.append((time.time(), err))
