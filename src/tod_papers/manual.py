@@ -172,6 +172,7 @@ def _noul(instr: str, yes: str, no: str) -> dict:
 
 NO_DOCS_KEYS = ("rulebook_page", "interrogate_prompt_visible")   # step N sub-states, asked only around step N
 NO_DOCS_DATES = (DAY_DATES["3"],)   # days 1-3: only Jorji (Day 3) presents no documents
+NO_DOCS_TICKS = 3   # loop24: consecutive 'no documents' ticks before step N (entrants put papers down a tick late)
 NO_DOCS_P = 0.6   # p(no_documents_presented) for step N; also drops the passport-inspection questions
 RULEBOOK_PAGES = {"not_open": "the rulebook is not lying open on the desk (closed in its slot, or not visible)",
                   "contents": "it is open on the CONTENTS page (list of sections)",
@@ -1319,6 +1320,11 @@ def no_passport(state: dict, facts: dict | None = None) -> bool:
         # with a stamp press / passport drop on record has presented documents.
         return False
     slip = bool(game_slip(facts))
+    if not slip and f.get("nodocs_ticks", NO_DOCS_TICKS) < NO_DOCS_TICKS:
+        # loop24 (run 040242 t41, Ava Pardal): 'no documents' 0.82 on the tick she arrived, before her papers reached
+        # the counter -> N1 dragged the rulebook out over her flyer -> 5 refused put-away drags. Step N needs the
+        # answer on NO_DOCS_TICKS consecutive ticks (or the game's slip)
+        return False
     if (not yes(state, "no_documents_presented", 0.5 if slip else NO_DOCS_P) or not yes(state, "person_at_window")
             or yes(state, "document_on_counter_shelf")):
         return False

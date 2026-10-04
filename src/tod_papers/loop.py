@@ -2100,6 +2100,7 @@ class Entrant:
     discarded: dict | None = None   # {"tick", "verdict"} what the last reset tick dropped (logs)
     stowed: list = field(default_factory=list)   # [(tick, 'flyer'|'citation')] executed step-K drops on the stow shelf
     pp_drop: int | None = None   # tick of the last drag of a paper TOD named the passport onto the person
+    nodocs_ticks: int = 0   # loop24: consecutive ticks TOD said 'no documents' with a person at the window
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
@@ -2118,6 +2119,8 @@ class Entrant:
         flyer or an unread one -- on the desk or counter). The hand-back is TOD's PASSPORT_RETURNED_Q answer on this
         frame (audit B20), not a tick window."""
         person = man.yes(state, "person_at_window")
+        self.nodocs_ticks = self.nodocs_ticks + 1 if (person and man.yes(state, "no_documents_presented", man.NO_DOCS_P)
+                                                      ) else 0
         ra = man.returned_answer(state)
         if ra == "returned" and person and self.handed_back is None and (
                 self.hb_drop is not None or self.stamp_clicks or self.mark_side):
@@ -2228,7 +2231,7 @@ class Entrant:
         return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
                 "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
                 "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp,
-                "waiting_docs": self.waiting_docs, "mark_side": self.mark_side, "hb_drop": self.hb_drop, "pp_drop": self.pp_drop,
+                "waiting_docs": self.waiting_docs, "mark_side": self.mark_side, "hb_drop": self.hb_drop, "pp_drop": self.pp_drop, "nodocs_ticks": self.nodocs_ticks,
                 "verdict_carried": self.verdict, "stowed": list(self.stowed)}
 
     def verdict_mem(self) -> dict:
