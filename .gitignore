@@ -1,19 +1,39 @@
+# secrets
 .env
+.env.*
+
+# python / venvs
 __pycache__/
 *.pyc
 .venv/
+.venv*/
+
+# models and weights (fetched by deploy/fetch_models.py)
 models/
 weights/
-captures/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# run output, captures, images
 runs/
+captures/
 *.png
 *.jpg
 !assets/**
+# template crops the loop loads at runtime
+!src/tod_papers/*.png
+
+# local deploy state
 deploy/.zone
-deploy/.zone.spot
+deploy/.zone.*
 deploy/.name
+deploy/.name.*
+
+# internal notes (never public)
 private/
+
 
 # ground-truth reader: Il2CppDumper binary + dump output (never commit)
 .tools/
-.venv-gt/
