@@ -1810,6 +1810,15 @@ NODOCS_HEAD_RE = re.compile(r"entrant\s*must\s*have|must\s*have\s*a\s*$", re.I) 
 INTERROGATE_RE = re.compile(r"interrog", re.I)
 
 
+def _rule_text_boxes(boxes: list) -> list:
+    """loop30: text-bearing boxes that may be a rulebook line (kind text / icon / panel -- the remote extractor
+    labels OCR lines 'icon' or 'panel'), not a layout element. Smallest first: the single line beats the page box
+    'RULES Entrant must have a passport All documents ...'; kind 'text' first at equal size."""
+    out = [b for b in boxes if b.text and b.kind in ("text", "icon", "panel")
+           and getattr(b, "name", "") not in layout.BY_NAME]
+    return sorted(out, key=lambda b: (b.area, b.kind != "text"))
+
+
 def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H: int) -> tuple[list, dict]:
     """loop28 (run 070003 t143-158, Jorji): in inspect mode step N offers exactly one click -- N4 the rule line
     'Entrant must have a passport' (its two OCR rows 'Entrant must have a' / 'passport' merged into one option),
@@ -1818,8 +1827,8 @@ def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H:
     info: dict = {"step": nstep}
     if nstep == "N4":
         rbs = [d["box"] for d in (facts or {}).get("docs_named") or [] if d["id"] == "rulebook"]
-        txt = [b for b in boxes if b.kind == "text" and b.text and getattr(b, "name", "") not in layout.BY_NAME
-               and (not rbs or any(x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 for x1, y1, x2, y2 in rbs))]
+        txt = [b for b in _rule_text_boxes(boxes)
+               if not rbs or any(x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 for x1, y1, x2, y2 in rbs)]
         full = [b for b in txt if NODOCS_RULE_RE.search(b.text)]
         if full:
             info["rule"] = full[0].text
@@ -1981,9 +1990,11 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if nopp and facts is not None:
         # loop28 (run 074339 t138-160): is the 'Entrant must have a passport' line on screen (OCR of this frame)?
         # The left rulebook page can lie under the booth edge -> N3a / N4a (situation)
+        # loop30 (run 094146 t128-180, Jorji): the remote extractor gave the rule line kind 'icon' / 'panel', not
+        # 'text' -> 'not visible' -> N3a held in prepare, the inspect button was never offered (52 ticks of rulebook
+        # clicks). Any text-bearing box (_rule_text_boxes) counts.
         facts["nodocs_rule_visible"] = any(
-            b.kind == "text" and b.text and getattr(b, "name", "") not in layout.BY_NAME
-            and (NODOCS_RULE_RE.search(b.text) or NODOCS_HEAD_RE.search(b.text)) for b in boxes)
+            NODOCS_RULE_RE.search(b.text) or NODOCS_HEAD_RE.search(b.text) for b in _rule_text_boxes(boxes))
     nstep = man.situation(state, day if day in DAY_RULES else "1", facts)[0] if nopp else ""
     rb_placed = nstep >= "N3" and nstep != "N3a"   # N3a: the rulebook is dragged further onto the desk
     if nstep == "N1" and facts is not None and "docs" in ((facts or {}).get("static") or {}):
