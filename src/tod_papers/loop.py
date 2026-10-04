@@ -16,7 +16,7 @@ Each tick:  wait-until-stable grab
 TOD makes every decision: what is on screen, the verdict, what kind of input (click/drag/wait),
 which numbered element, which drop target. One image per request. The loop adds geometry
 (drop-target regions, drop points), bookkeeping (entrant memory of TOD's own answers) and
-guards that refuse or exclude (stamp press refused unless TOD put the passport under that
+guards that refuse or exclude (stamp press refused unless TOD's verdict this tick names it and TOD put the passport under that
 stamp; no-effect / cycle exclusions). Region sources (static/derived/derived_frame/dropped)
 are written to every tick json.
 
@@ -1281,10 +1281,11 @@ ACTION_CHOICES = {
 }
 
 
-def build_questions(src_ids: dict, tgt_ids: dict, booth: bool = True) -> dict:
-    """Request 2: the input kind (TOD's `action`, audit B26), the element and, in the booth, the drop target."""
+def build_questions(src_ids: dict, tgt_ids: dict, booth: bool = True, vline: str = "") -> dict:
+    """Request 2: the input kind (TOD's `action`, audit B26), the element and, in the booth, the drop target.
+    `vline`: TOD's own verdict of this tick (verdict_line), directly above the action question."""
     q = {
-        "action": choice("Following the manual and what is currently true on screen, which mouse input does the next "
+        "action": choice(vline + "Following the manual and what is currently true on screen, which mouse input does the next "
                          "step use? " + ACTION_RULE, dict(ACTION_CHOICES)),
         "source": choice(
             "Following the manual and what is currently true on screen: which numbered element is clicked "
@@ -1362,7 +1363,71 @@ def encode_image(img: np.ndarray, fmt: str = "png", quality: int = 90) -> str:
 
 CITATION_RE = re.compile(r"CITATION|WARNING|PENALTY|ISSUED|Protocol|Violat|M\.?[O0]\.?[AR]\.", re.I)
 LAST_DAY_FILE = os.path.join(ROOT, "runs", "LAST_DAY.json")   # the day TOD last read, for a restart within the hour
-PAUSE_MIN_FRAC = 0.05     # changed fraction (vs the grabbed frame) that counts as "pause menu on screen"
+
+
+class ThinkSuspend:
+    """--pause-think (harness timing, not a TOD decision; loop18): after the frame grab the whole game process is
+    frozen (io_win.suspend_game: NtSuspendProcess, thawed 40 ms every 3 s so Windows never marks it 'Not
+    Responding'); extraction and the TOD requests run; the game is resumed BEFORE TOD's input is executed. No game
+    menu is opened, no key is sent and no input is chosen here. Every suspend/resume is logged in the tick JSON
+    (`rec['suspend']`: suspend/resume call ms, held s, keep-alive thaws). `io` is io_win (a fake in the tests)."""
+
+    def __init__(self, io, hwnd: int, enabled: bool, keepalive_s: float = 3.0, breathe_ms: float = 40.0):
+        self.io, self.hwnd, self.enabled = io, hwnd, enabled
+        self.keepalive_s, self.breathe_ms = keepalive_s, breathe_ms
+        self.pid: int | None = None
+        self.t = 0.0
+
+    def hold(self, rec: dict) -> None:
+        if not self.enabled or self.pid is not None:
+            return
+        t0 = time.perf_counter()
+        try:
+            self.pid = self.io.suspend_game(hwnd=self.hwnd, keepalive_s=self.keepalive_s, breathe_ms=self.breathe_ms)
+        except OSError as e:   # the tick runs unpaused; never fatal
+            rec["suspend"] = {"suspended": False, "error": str(e)}
+            print(f"[pause] suspend failed: {e}")
+            return
+        self.t = time.perf_counter()
+        rec["suspend"] = {"suspended": True, "pid": self.pid, "suspend_ms": round((self.t - t0) * 1e3, 2),
+                          "keepalive_s": self.keepalive_s, "breathe_ms": self.breathe_ms}
+
+    def release(self, rec: dict | None) -> None:
+        if self.pid is None:
+            return
+        pid, held = self.pid, time.perf_counter() - self.t
+        thaws = self.io.thaw_count(pid)
+        t0 = time.perf_counter()
+        self.io.resume_game(pid)
+        r_ms = (time.perf_counter() - t0) * 1e3
+        self.pid = None
+        if rec is not None:
+            rec.setdefault("suspend", {}).update(resumed=True, resume_ms=round(r_ms, 2), held_s=round(held, 3),
+                                                 thaws=thaws)
+        print(f"[pause] game held {held:.2f} s (thaws {thaws}), resumed in {r_ms:.1f} ms")
+
+
+def press_gate(side: str, state: dict, facts: dict) -> str | None:
+    """A stamp press executes only when TOD's verdict answer of THIS tick (request 1b, p >= VERDICT_P) names that
+    stamp, and TOD's request-1 answer says the passport lies under that stamp. Returns the refusal (history callout)
+    or None. Code never picks the verdict and never hides a stamp: TOD is told why, and may change its verdict on
+    the next tick (the verdict is asked every tick the passport is readable). Runs 221232 t27 (Emre, cannot_decide),
+    222257 (Henry), 222926 t28 (Narovska, approved 0.70, DENIED pressed)."""
+    v = state.get("verdict")
+    if not v:
+        return f"refused: no verdict of yours this tick (pressing {side.upper()} needs your verdict {side.upper()})"
+    if v["value"] != side or v["p"] < man.VERDICT_P:
+        return f"refused: your verdict this tick was {v['value']} ({v['p']:.2f})"
+    if side not in (facts.get("passport_under") or []):
+        # run 114927 t37-94: 9 DENIED presses on the RULEBOOK lying under the strip
+        return "refused: " + man.under_phrase(facts, side)
+    return None
+
+
+def verdict_line(state: dict) -> str:
+    """TOD's own verdict of this tick, put directly above the action question of request 2 ('' when not asked)."""
+    v = state.get("verdict")
+    return f"Your verdict this tick: {v['value'].upper()} (p={v['p']:.2f}). " if v else ""
 
 
 MULTIPAGE_IDS = ("rulebook", "bulletin", "transcript")   # papers whose page corner turns a page (a click)
@@ -1670,7 +1735,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     for name, v in region_src.items():
         if v == "dropped":   # vision extractor: could not be derived from this frame -> not offered (logged)
             region_info[name] = {"id": None, "box": None, "target_source": "dropped"}
-    questions = build_questions(src_ids, tgt_ids, booth)
+    questions = build_questions(src_ids, tgt_ids, booth, verdict_line(state) if booth else "")
     # citation slips / flyers (TOD's identity) among the sources: their drop is checked in decide (never a stamp strip,
     # never the entrant -- a flyer only together with the entrant's papers after the passport went back)
     clutter_src = {k for k in src_ids if desc[k].split(" (TOD", 1)[0] in CLUTTER_IDS and int(k) in doc_ids}
@@ -1818,6 +1883,8 @@ class Entrant:
     waiting_docs: bool = False   # TOD: passport returned, person still there, papers of theirs still visible (G2)
     mark_side: dict | None = None   # {"value": 'approved'|'denied', "p", "tick"}: TOD's stamp-ink reading
     verdict: dict | None = None     # {"value": approved|denied|cannot_decide_yet, "p", "tick"}: TOD's verdict answer
+    reset_tick: int = -1            # tick of the last reset: that tick's verdict / readings are not stored
+    discarded: dict | None = None   # {"tick", "verdict"} what the last reset tick dropped (logs)
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
@@ -1825,6 +1892,7 @@ class Entrant:
         self.tray_seen = []   # run 005956 t18/t21: entrant 2's tray toggles blocked entrant 3's first tray opening
         self.waiting_docs = False
         self.mark_side, self.verdict = None, None
+        self.reset_tick = tick
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
 
@@ -1861,6 +1929,12 @@ class Entrant:
             # entrant who arrived at 18:00)
             self.reset(tick, "open passport on the desk while waiting for papers: a new entrant")
         self.tray_seen = (self.tray_seen + [(tick, man.yes(state, "stamp_tray_open"))])[-9:]
+        if self.reset_tick == tick:
+            # loop17 L3 t32-47 (222926): Narovska's 'approved' 0.60, asked with her readings on the reset tick, was
+            # stored for Jarvinen. A reset tick's answers belong to neither entrant: the verdict leaves this tick's
+            # state too (no press can pass the gate on it), the readings are taken again next tick.
+            self.discarded = {"tick": tick, "verdict": state.pop("verdict", None)}
+            return
         c = state.get("issuing_country")
         if (c and c["p"] >= CARRY_COUNTRY_P and c["value"] != "unreadable"
                 and (self.country is None or c["p"] >= self.country["p"] or c["value"] == self.country["value"])):
@@ -2120,6 +2194,12 @@ def offline(args) -> int:
             r["strip_plan"] = ({k_: _sp[k_] for k_ in ("side", "grab", "drop", "grab_native", "planned", "visa",
                                                        "foot", "inside", "trimmed")} if _sp else None)
         r["paper_on_passport"] = facts.get("paper_on_passport")
+        _sb = P["idmap"].get(int(D["src"])) if D["src"].isdigit() else None
+        _side = _stamp_side(_sb, frame) if (D["action"] == "click" and _sb is not None) else None
+        r["stamp_press"] = _side
+        r["press_gate"] = (press_gate(_side, state, facts) or "allowed") if _side else None
+        if _side:
+            print(f"[offline] t{otick} {_side.upper()} press -> {r['press_gate']}")
         results.append(r)
         stem = os.path.join(out_dir, os.path.basename(os.path.dirname(os.path.abspath(path))) + "_"
                             + os.path.splitext(os.path.basename(path))[0])
@@ -2250,51 +2330,8 @@ def run(args) -> int:
         if not args.dry_run and is_foreground(hwnd):
             io_win.move(hwnd, *park)
 
-    # --pause-think (harness timing, not a TOD decision): the game's own pause menu (Esc) is opened after the
-    # frame is grabbed and closed again before TOD's input is executed, so the game clock does not run while
-    # extraction and the TOD requests are in flight. TOD only ever sees the frame grabbed BEFORE the pause.
-    pause = {"on": False, "t": 0.0, "pre": None}
-
-    def pause_game(rec: dict, pre: np.ndarray) -> None:
-        if args.dry_run or not args.pause_think or pause["on"] or not try_foreground(hwnd):
-            return
-        io_win.key(io_win.VK_ESCAPE)
-        t0 = time.perf_counter()
-        frac = 0.0
-        while time.perf_counter() - t0 < 1.0:   # the menu has to be visible, else this tick runs unpaused
-            time.sleep(0.08)
-            frac = changed_frac(change_map(pre, grab.grab()))
-            if frac >= PAUSE_MIN_FRAC:
-                break
-        pause.update(on=frac >= PAUSE_MIN_FRAC, t=time.perf_counter(), pre=pre)
-        rec["pause"] = {"opened": pause["on"], "menu_frac": round(frac, 4),
-                        "ms": round((time.perf_counter() - t0) * 1e3)}
-        print(f"[pause] Esc -> pause menu {'shown' if pause['on'] else 'NOT seen'} (changed {frac:.3f})")
-        if not pause["on"]:   # whatever Esc did, undo it so no menu is left for the next frame
-            io_win.key(io_win.VK_ESCAPE)
-            time.sleep(0.3)
-
-    def resume_game(rec: dict | None) -> None:
-        if not pause["on"]:
-            return
-        held = time.perf_counter() - pause["t"]
-        frac = 1.0
-        for attempt in range(2):
-            try_foreground(hwnd)
-            io_win.key(io_win.VK_ESCAPE)
-            t0 = time.perf_counter()
-            while time.perf_counter() - t0 < 1.2:   # back to the booth: the frame matches the pre-pause one again
-                time.sleep(0.08)
-                frac = changed_frac(change_map(pause["pre"], grab.grab()))
-                if frac < PAUSE_MIN_FRAC:
-                    break
-            if frac < PAUSE_MIN_FRAC:
-                break
-        pause["on"] = False
-        if rec is not None:
-            rec.setdefault("pause", {}).update(resumed=frac < PAUSE_MIN_FRAC, held_s=round(held, 2),
-                                               resume_frac=round(frac, 4), resume_attempts=attempt + 1)
-        print(f"[pause] Esc -> resumed after {held:.1f} s (frame back: {frac < PAUSE_MIN_FRAC}, {frac:.3f})")
+    # --pause-think: the game process is held (ThinkSuspend) from the frame grab until just before the input
+    think = ThinkSuspend(io_win, hwnd, enabled=bool(args.pause_think) and not args.dry_run)
 
     try:
         for tick in range(args.max_ticks):
@@ -2302,7 +2339,7 @@ def run(args) -> int:
             row: dict = {"tick": tick}
             rows.append(row)
             stuck.decay(tick)
-            resume_game(None)   # a tick that ended early (skip / stop paths) left the menu open
+            think.release(None)   # a tick that ended early (skip / stop paths) left the game held
             if args.stop_file and os.path.exists(args.stop_file):   # clean external stop (the game is not left paused)
                 os.remove(args.stop_file)
                 stop_reason = f"stop file {args.stop_file}"
@@ -2339,8 +2376,8 @@ def run(args) -> int:
                 print(f"[tick {tick:03d}] screen still animating after {waited:.1f}s (frac {af:.4f}); proceeding anyway")
             fam = screen_family(frame)
             rec["screen_family"] = list(fam)
-            if args.pause_think and fam[0] == "booth":
-                pause_game(rec, frame)
+            if fam[0] == "booth":
+                think.hold(rec)   # --pause-think: freeze the game clock while extraction + TOD run
 
             # ---- REQUEST 1 (state, unmarked frame) in parallel with extraction; then 1b (new papers only) -----
             # Day 1 decides on the country only; expiry/photo are asked from Day 2 (frees 2 of TOD's 16 questions)
@@ -2555,13 +2592,12 @@ def run(args) -> int:
                     and RISKY_RE.search(src_desc) and p_src <= 0.9:
                 veto = f"declined '{short(src_desc, 50)}' on {screen} (destructive-looking, p={p_src:.2f} <= 0.9)"
             side = _stamp_side(sb, frame) if (action == "click" and sb is not None) else None
-            if side and side not in (facts.get("passport_under") or []):
-                # run 114927 t37-94: 9 DENIED presses on the RULEBOOK lying under the strip. A stamp press is executed
-                # only when TOD's request-1 answer says the paper under THAT stamp is the passport.
-                veto = "refused: " + man.under_phrase(facts, side)
+            gate = press_gate(side, state, facts) if side else None
+            if gate:
+                veto = gate
                 print(f"           {veto}")
-            # ---- execute ---------------------------------------------------------
-            resume_game(rec)
+            # ---- execute (the game is resumed first; no input is ever sent to a held game) ----------------
+            think.release(rec)
             if veto:
                 executed = "vetoed: " + veto
             elif action == "click" and sb is not None:
@@ -2741,7 +2777,7 @@ def run(args) -> int:
     finally:
         _LOG_POOL.submit(lambda: None).result()   # pending tick images are on disk before the summary
         try:
-            resume_game(None)
+            think.release(None)
         except Exception as e:
             print(f"[pause] resume at exit failed: {e}")
         grab.close()
@@ -2812,8 +2848,9 @@ def main(argv=None, result: dict | None = None) -> int:
     ap.add_argument("--refuse-stop", type=int, default=5, help="stop after N refused stamp presses (0 = off)")
     ap.add_argument("--stop-file", default=os.path.join("runs", "STOP_LOOP"), help="stop cleanly at the next tick "
                     "when this file exists (it is deleted); use instead of killing the process under --pause-think")
-    ap.add_argument("--pause-think", action="store_true", help="harness timing: open the game's pause menu (Esc) "
-                    "after the frame grab, close it before the input; TOD only sees the pre-pause frame (off by default)")
+    ap.add_argument("--pause-think", action="store_true", help="harness timing: suspend the game process "
+                    "(io_win.suspend_game, invisible) from the frame grab until just before TOD's input is executed; "
+                    "the game clock is held while TOD thinks (off by default)")
     args = ap.parse_args(argv)
     if args.frames:
         return offline(args)

@@ -56,8 +56,15 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
    element (paper, tray tab) is executed as chosen; a drag on a press-only element is a click (input conventions
    below). A citation/flyer dropped onto a strip / the tray edge / (citation) the entrant is
    REFUSED (no input, logged), never redirected.
-7. **Guards that remain** (they refuse or exclude, never pick): stamp press refused unless TOD's strip answer puts
-   the passport under that stamp; delete/trash veto on menus; stuck / repeat-drag / cycle exclusions; stop rules.
+7. **Guards that remain** (they refuse or exclude, never pick): stamp press (`press_gate`, loop18) refused unless
+   TOD's verdict answer of THIS tick (p >= 0.5) names that stamp -- `cannot_decide_yet`, the other stamp or no
+   verdict this tick -> refused, history callout "refused: your verdict this tick was X (p)" -- and unless TOD's
+   strip answer puts the passport under that stamp. Code never chooses the verdict and never hides a stamp; the
+   verdict is asked every tick the passport is readable, so TOD can change its mind. Request 2's action question
+   starts with TOD's own line "Your verdict this tick: X (p)"; the landing strips stay "stamp landing strip (under
+   the APPROVED/DENIED stamp head)" with nothing about the verdict. On an entrant-memory reset tick that tick's
+   verdict and readings are discarded (not stored, verdict removed from the state: loop17 L3, Narovska's approved
+   0.60 carried to Jarvinen); delete/trash veto on menus; stuck / repeat-drag / cycle exclusions; stop rules.
 8. **Entrant memory**: carries TOD's own readings and answers (country, EXP., city, ticket, ink, verdict) and
    every executed stamp press (`stamp_clicks` [(tick, side)], recorded when the press input was sent on a stamp
    the passport lay under, whether or not the pixel check saw a change). The history block (last 30 actions,
@@ -388,21 +395,23 @@ about 1 citation per Day 2, inside the 2 free warnings. The manual's Day 2 rule 
 - Dry run on the 30 gt-labelled Day 2 frames (16 entrants): expiry 28 right / 0 wrong / 2 undecided (was 3/30),
   city 29 / 0 / 1 (the undecided frame had no country reading; live carries it). Photo unchanged.
 
-## `--pause-think` (harness timing feature, off by default; loop8, 2026-10-03)
+## `--pause-think` (harness timing feature, off by default; loop18 invisible suspend, 2026-10-03)
 
-Not a TOD decision and not game input chosen by anyone: a harness pause so the game clock does not run while the
-loop is waiting for extraction and TOD. Per booth tick:
-1. grab the frame (game running) -> this is the only frame extraction and TOD ever see;
-2. press Esc -> the game's own pause menu; the loop waits until the screen differs from the grabbed frame by
-   >= 5% (`PAUSE_MIN_FRAC`, measured 0.73) and otherwise presses Esc again and runs that tick unpaused;
-3. extraction + request 1 / 1b / 2 as usual;
-4. press Esc -> resume; the loop waits until the frame matches the grabbed one again (< 5% changed, measured 0.000;
-   one retry), then executes TOD's input and the post-wait verification.
-Every pause/resume is printed (`[pause] ...`) and logged in the tick json (`pause`: opened, menu_frac, held_s,
-resumed, resume_frac). A tick that ends early (skip/stop) and the loop exit resume the game first.
-Checked with ground truth (eval only): the clock held 06:36 for 3 s under the menu and ran on after the resume.
-Reason: a day is 4-6 real minutes (~3 game-min per real second) and entrants after 18:00 are unpaid; at ~6.7 s per
-tick the runs ended Day 2 with savings 0 / 10 / 15 / -5 (game over).
+The game clock is held while TOD thinks. No input is chosen by the harness: no key, no menu, no click -- the
+game process is frozen and thawed, nothing else. Per booth tick:
+1. grab the frame (game running) -> the only frame extraction and TOD see;
+2. `io_win.suspend_game(hwnd)` (NtSuspendProcess on the game pid; a keep-alive thread thaws it 40 ms every 3 s so
+   Windows never marks it "Not Responding" -- measured in `pause_and_speed notes` section B,
+   `tools/pause_probe.py`);
+3. extraction + request 1 / 1b / 2;
+4. `io_win.resume_game(pid)`, then TOD's input is executed and the post-wait verification runs (input is never
+   sent to a held game: it would queue and land in one burst).
+Logged per tick in `tick_NNNN.json` `suspend`: pid, suspend_ms, resume_ms, held_s, thaws (keep-alive count),
+keepalive_s, breathe_ms (or `error` when the suspend failed: that tick runs unpaused). A tick that ends early
+(skip/stop) and the loop exit resume first; io_win also resumes at process exit. `ThinkSuspend` in loop.py.
+The Esc pause-menu path (loop8) is removed.
+Reason: Day 3 has 8 entrants and loop17 needed ~45 unpaused ticks of ~20 game-min each -- the day ran out at
+18:00 (L1 t47; 1 / 0 / 0 entrants processed before 18:00 in L1-L3); held, a tick costs only the post-wait and animation time.
 
 ## Desk clutter (step K) and the stamp-mark recheck (loop10b, 2026-10-03)
 Citation slips and the Pink Vice flyer are a TOD-handled situation, not a stall (164732 t92-121: 32 ticks, cycle

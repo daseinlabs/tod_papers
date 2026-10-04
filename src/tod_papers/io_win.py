@@ -289,7 +289,8 @@ def click(hwnd: int, cx: int, cy: int, settle: float = 0.03) -> None:
 
 def key(vk: int, hold: float = 0.06) -> None:
     """Press and release one key (virtual-key code; scan code included so games reading scan codes see it).
-    Used only by the harness pause (loop.py --pause-think: VK_ESCAPE opens/closes the game's own pause menu)."""
+    Not used by loop.py (its --pause-think is suspend_game/resume_game below); tools/pause_probe.py uses Esc to
+    compare against the game's own pause menu."""
     scan = ctypes.windll.user32.MapVirtualKeyW(vk, 0)
     ctypes.windll.user32.keybd_event(vk, scan, 0, 0)
     time.sleep(hold)
@@ -538,6 +539,7 @@ _ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
 _ntdll.NtSuspendProcess.restype = _ntdll.NtResumeProcess.restype = ctypes.c_long
 _susp_lock = threading.Lock()
 _suspended: dict[int, threading.Event] = {}   # pid -> stop event of its keep-alive thread
+_thaws: dict[int, int] = {}                   # pid -> keep-alive thaws since suspend_game (logged by loop.py)
 
 
 def window_pid(hwnd: int) -> int:
@@ -565,6 +567,7 @@ def _keepalive(pid: int, stop: threading.Event, every: float, breathe: float) ->
                 _nt_call(_ntdll.NtResumeProcess, pid)
                 time.sleep(breathe)
                 _nt_call(_ntdll.NtSuspendProcess, pid)
+                _thaws[pid] = _thaws.get(pid, 0) + 1
             except OSError:
                 return   # the process exited
 
@@ -584,6 +587,7 @@ def suspend_game(hwnd: int | None = None, pid: int | None = None,
         _nt_call(_ntdll.NtSuspendProcess, pid)
         stop = threading.Event()
         _suspended[pid] = stop
+        _thaws[pid] = 0
     if keepalive_s:
         threading.Thread(target=_keepalive, args=(pid, stop, keepalive_s, breathe_ms / 1e3),
                          daemon=True, name=f"suspend-keepalive-{pid}").start()
@@ -605,6 +609,11 @@ def resume_game(pid: int | None = None) -> list[int]:
                 pass   # the process may have exited
             done.append(p)
     return done
+
+
+def thaw_count(pid: int) -> int:
+    """Keep-alive thaws (breathe_ms each) since the last suspend_game(pid)."""
+    return _thaws.get(pid, 0)
 
 
 def is_suspended(pid: int) -> bool:
