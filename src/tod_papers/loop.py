@@ -1789,6 +1789,7 @@ def _clean_state(state: dict) -> dict:
 TRAY_FLIP_LIMIT = man.TRAY_FLIP_LIMIT
 TRAY_BAN_TICKS = 4   # a toggle-looping closing tab stays excluded this long (A5)
 NONBOOTH_STOP = 60   # step-7 ticks in a row (cutscenes, day_end, menus) before the run stops
+STOP_SCREEN_P = 0.5  # --stop-on-screen counts a tick only when TOD's screen answer has at least this p
 REPEAT_DRAG_N = 4   # same drag source box (same place) N ticks running -> exclude the source
 HORN_HIDE_P = 0.7
 REPEAT_WINDOW, REPEAT_STOP = 12, 10   # same executed input 10 of the last 12 ticks -> stall stop (run 114927)    # person_at_window P(yes) above which the horn is not offered
@@ -2478,7 +2479,9 @@ def run(args) -> int:
 
             # ---- harness stop conditions (no input is sent on a stopping tick) -------
             if stop_screens:
-                stop_run = stop_run + 1 if screen in stop_screens else 0
+                # only a confident screen answer counts (L1 225202 t8-9: the Day 3 date card read day_end at p 0.29-0.30)
+                sure = float(state["screen"].get("p") or 0.0) >= STOP_SCREEN_P
+                stop_run = stop_run + 1 if (screen in stop_screens and sure) else 0
                 if stop_run >= args.stop_consecutive:
                     stop_reason = f"screen in {sorted(stop_screens)} for {stop_run} consecutive ticks"
             key = (screen, man.state_summary(state, facts))
