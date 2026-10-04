@@ -362,6 +362,8 @@ the 3-tick streak and the game's slip. N3a's desk target is `rulebook_desk_plan`
 the OPEN rulebook (226x158 native, both pages; obstacles = stamp bar / tabs / inspect button only, the dropped book
 lies on top of papers); a book cut by the booth edge is assumed to extend left; the drag keeps its grab point and
 moves by the planned offset (dry 074339 t138: visible 180..314 -> open box 182..408 x 158..316).
+N1 drops the rulebook from its slot at the centre of the same open-rulebook spot (run 084217 t128: the passport
+target 501,199 opened it off the right edge; N2 clicked a missing page corner 10x).
 A changed ISS. city reading drops the stored verdict (and that tick's), and a city not spelled as in the rulebook
 list gets "city 'x' is not in the rulebook for C" in the state block.
 Offline `--sequential` carries entrant memory, history, exclusions and the cycle guard across consecutive

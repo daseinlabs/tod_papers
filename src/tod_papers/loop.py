@@ -1947,6 +1947,23 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
             and (NODOCS_RULE_RE.search(b.text) or NODOCS_HEAD_RE.search(b.text)) for b in boxes)
     nstep = man.situation(state, day if day in DAY_RULES else "1", facts)[0] if nopp else ""
     rb_placed = nstep >= "N3" and nstep != "N3a"   # N3a: the rulebook is dragged further onto the desk
+    if nstep == "N1" and facts is not None and "docs" in ((facts or {}).get("static") or {}):
+        # loop29 (run 084217 t128, Jorji): N1 dropped the rulebook on the passport's desk target (native 501,199);
+        # it opens centred on the cursor (226 wide) -> its right page and the contents tabs lay off the frame, N2
+        # clicked a page corner that was not there 10x. The N1 target is the centre of a clear-desk spot sized to
+        # the OPEN rulebook (obstacles: stamp bar / tabs / inspect button).
+        sinfo_ = facts["static"]
+        sp_ = layout.clear_desk_spot([], bool(sinfo_.get("tray_open", man.yes(state, "stamp_tray_open"))),
+                                     RULEBOOK_OPEN, bool(sinfo_.get("inspect_button")))
+        cx_, cy_ = sp_["center"]
+        sx_, sy_ = W / layout.NATIVE_W, H / layout.NATIVE_H
+        hw_ = DESK_TARGET_HALF
+        regions = [r for r in regions if r.caption not in (REGION_CAPS["desk"], REGION_CAPS["desk_clear"])] + [
+            Box(int((cx_ - hw_) * sx_), int((cy_ - hw_) * sy_), int((cx_ + hw_) * sx_), int((cy_ + hw_) * sy_),
+                "", "region", 0.0, caption=REGION_CAPS["desk"])]
+        region_src["desk"] = "derived_frame"
+        facts["rulebook_n1_spot"] = sp_["box"]
+        print(f"           N1 rulebook spot: open box {sp_['box']} (drop at its centre {cx_},{cy_})")
     if nstep == "N3a":
         boxes = [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"]
         rp = rulebook_desk_plan(facts, state)
