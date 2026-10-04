@@ -3143,6 +3143,20 @@ def run(args) -> int:
                          if _g.get("ok") else "-")
             rec.update(frame_shape=list(frame.shape), frame_hash=frame_hash(frame),
                        anim_wait_s=round(waited, 2), anim_frac=round(af, 5), stable=stable)
+            # --stop-on-gt-day-end N (demo harness): game memory decides the STOP only, before any TOD request on
+            # this tick; gt is never put in any TOD text. --stop-on-screen day_end cannot be used: it would already
+            # stop at Day 1's night (request 1's day_end does not say which day; run 182519 t86 Day 3 date card was
+            # top-answered day_end at p 0.30).
+            if (args.stop_on_gt_day_end and _g.get("ok") and isinstance(_g.get("day"), int)
+                    and _g["day"] >= args.stop_on_gt_day_end and _g.get("screen") == "NightScreen"):
+                stop_reason = f"gt: day {_g['day']} NightScreen (--stop-on-gt-day-end {args.stop_on_gt_day_end})"
+                print(f"[loop] STOP: {stop_reason}")
+                rec.update(executed="none (gt day-end stop)", stop_reason=stop_reason)
+                row.update(action="none", effect="stop: " + stop_reason)
+                cv2.imwrite(os.path.join(run_dir, f"raw_{tick:04d}.png"), frame)
+                with open(os.path.join(run_dir, f"tick_{tick:04d}.json"), "w", encoding="utf-8") as fh:
+                    json.dump(rec, fh, indent=1, default=_jdefault)
+                break
             if not stable:
                 print(f"[tick {tick:03d}] screen still animating after {waited:.1f}s (frac {af:.4f}); proceeding anyway")
             fam = screen_family(frame)
@@ -3635,6 +3649,10 @@ def main(argv=None, result: dict | None = None) -> int:
     ap.add_argument("--stop-on-screen", default="", help="comma list of request-1 screens; stop (without acting) "
                     "once one of them is seen --stop-consecutive ticks in a row (used by tools/reset_game.py)")
     ap.add_argument("--stop-consecutive", type=int, default=2)
+    ap.add_argument("--stop-on-gt-day-end", type=int, default=0, metavar="N",
+                    help="demo harness: stop (without acting, before any TOD request) on the first tick where game "
+                         "memory (gt) says day >= N and screen NightScreen. gt decides the stop only; it is never "
+                         "in TOD's text (0 = off; used by tools/demo_run.py with N=3)")
     ap.add_argument("--fg-patience", type=int, default=60, help="foreground checks (2 s apart) to wait for the game "
                     "window before a safety abort; no input is sent while waiting")
     ap.add_argument("--stall-stop", type=int, default=0, help="stop when screen + state summary stay identical "
