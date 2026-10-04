@@ -779,6 +779,17 @@ def _merge(texts: list[Box], icons: list[Box], panels: list[Box], frame_area: in
             done = {id(t) for _, ql in parts for t in ql}
             absorbed_ids -= {id(t) for t in absorbed[id(pn)] if id(t) not in done}
             continue
+        parts = _split_sheets(pn, lab, native, s) if lab and pn.area < COLLAPSE_MAX_FRAC * frame_area else None
+        if parts:
+            # one contour around two sheets of different paper (the entry ticket lying across the open passport)
+            # holding only one paper's lines: each sheet its own panel, the lines on the sheet they lie on
+            for q, ql in parts:
+                if ql:
+                    absorbed[id(q)] = ql
+                    keep_panels.append(q)
+            done = {id(t) for _, ql in parts for t in ql}
+            absorbed_ids -= {id(t) for t in absorbed[id(pn)] if id(t) not in done}
+            continue
         if lab:
             pn.text = " ".join(t.text for t in sorted(lab, key=lambda b: (b.y1, b.x1)))[:120]
         keep_panels.append(pn)
@@ -837,33 +848,53 @@ def _mixed_paper_text(lines: list[Box]) -> bool:
     return len({k for k in (_line_kind(t.text) for t in lines) if k}) >= 2
 
 
+def _split_sheets(pn: Box, lines: list[Box], native: np.ndarray | None,
+                  s: int) -> list[tuple[Box, list[Box]]] | None:
+    """pn's contour spans >= 2 flat-colour paper sheets (layout._sheets): [(sub-panel, its lines)] per sheet, each
+    line going to the smallest sheet its centre lies on; None if pn is one sheet. A sheet whose box centre lies on
+    another sheet (the open passport with the entry ticket across it, run 201459 t40-56) is boxed around its own
+    lines instead: the loop reads a document's text from the boxes CENTRED in it, and the union panel's centre fell
+    on the ticket, so the passport's visible lines were read as the ticket's and the passport had no text."""
+    if native is None:
+        return None
+    from .layout import _sheets
+    nb = [pn.x1 // s, pn.y1 // s, -(-pn.x2 // s), -(-pn.y2 // s)]
+    valid = native.max(2) > 60
+    sheets = [sh for sh in _sheets(native, nb, valid) if sh != nb]
+    if len(sheets) < 2:
+        return None
+    out: list[tuple[Box, list[Box]]] = []
+    for sh in sheets:
+        fb = Box(sh[0] * s, sh[1] * s, sh[2] * s, sh[3] * s, "", "panel", pn.conf)
+        mine = [t for t in lines if fb.x1 <= t.center[0] <= fb.x2 and fb.y1 <= t.center[1] <= fb.y2
+                and min((q for q in sheets if q[0] * s <= t.center[0] <= q[2] * s
+                         and q[1] * s <= t.center[1] <= q[3] * s),
+                        key=lambda q: (q[2] - q[0]) * (q[3] - q[1])) == sh]
+        if mine:
+            fb.text = " ".join(t.text for t in sorted(mine, key=lambda b: (b.y1, b.x1)))[:120]
+            cx, cy = fb.center
+            if any(q is not sh and q[0] * s <= cx <= q[2] * s and q[1] * s <= cy <= q[3] * s for q in sheets):
+                pad = 3 * s
+                fb = Box(max(fb.x1, min(t.x1 for t in mine) - pad), max(fb.y1, min(t.y1 for t in mine) - pad),
+                         min(fb.x2, max(t.x2 for t in mine) + pad), min(fb.y2, max(t.y2 for t in mine) + pad),
+                         fb.text, "panel", pn.conf)
+        if _mixed_paper_text(mine):   # a sheet still holding another paper's lines (one mostly hidden)
+            out += _split_mixed(fb, mine, None, s, False)
+        else:
+            out.append((fb, mine))
+    return out
+
+
 def _split_mixed(pn: Box, lines: list[Box], native: np.ndarray | None, s: int,
                  big: bool) -> list[tuple[Box, list[Box]]]:
     """Panel pn spans several papers. Returns [(sub-panel, its lines)]: one per paper sheet found by flat paper
     colour inside pn (layout._sheets, the same split the static document finder uses), each keeping only the
     lines centred on it. Without a colour split, a paper-sized panel is split by line kind (bbox of each kind's
     lines, unclassified lines joining the nearest kind); a panel bigger than any paper is dropped ([])."""
-    sheets: list[list[int]] = []
-    if native is not None:
-        from .layout import _sheets
-        nb = [pn.x1 // s, pn.y1 // s, -(-pn.x2 // s), -(-pn.y2 // s)]
-        valid = native.max(2) > 60
-        sheets = [sh for sh in _sheets(native, nb, valid) if sh != nb]
-    out: list[tuple[Box, list[Box]]] = []
-    if len(sheets) >= 2:
-        for sh in sheets:
-            fb = Box(sh[0] * s, sh[1] * s, sh[2] * s, sh[3] * s, "", "panel", pn.conf)
-            mine = [t for t in lines if fb.x1 <= t.center[0] <= fb.x2 and fb.y1 <= t.center[1] <= fb.y2
-                    and min((q for q in sheets if q[0] * s <= t.center[0] <= q[2] * s
-                             and q[1] * s <= t.center[1] <= q[3] * s),
-                            key=lambda q: (q[2] - q[0]) * (q[3] - q[1])) == sh]
-            if mine:
-                fb.text = " ".join(t.text for t in sorted(mine, key=lambda b: (b.y1, b.x1)))[:120]
-            if _mixed_paper_text(mine):   # a sheet still holding another paper's lines (one mostly hidden)
-                out += _split_mixed(fb, mine, None, s, False)
-            else:
-                out.append((fb, mine))
+    out = _split_sheets(pn, lines, native, s)
+    if out is not None:
         return out
+    out = []
     if big:
         return []
     groups: dict[str, list[Box]] = {}

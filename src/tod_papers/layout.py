@@ -468,10 +468,16 @@ def _merge_strip(boxes: list[list[int]], top: int, gap: int = 36, n: np.ndarray 
     return rest + out
 
 
-def _split_by_paper(n: np.ndarray, b: list[int], drop_pages: bool = False) -> list[list[int]]:
+def _split_by_paper(n: np.ndarray, b: list[int], drop_pages: bool = False,
+                    siblings: list[list[int]] | None = None) -> list[list[int]]:
     """A component can be two overlapping documents (entry visa on the rulebook):
     the paper colours inside it (quantised to 24 levels) are separate sheets when
-    one colour fills the component and another is a large sub-rectangle of it."""
+    one colour fills the component and another is a large sub-rectangle of it.
+    siblings: the other sheets _sheets already found in the same component. A sub-rectangle lying inside one of
+    them is that sheet's visible part over b (run 201459 t40-56: the entry ticket lying across the open passport):
+    it is not a new document (it was a duplicate box of the ticket, and the passport became 3 pieces that TOD named
+    entry_ticket), but b is still trimmed to its visible side next to it, so the ticket's lines are not read as
+    b's (text is attributed to a document by its centre lying in the box)."""
     x1, y1, x2, y2 = b
     c = n[y1:y2, x1:x2]
     pm = _paperish(c)
@@ -495,15 +501,19 @@ def _split_by_paper(n: np.ndarray, b: list[int], drop_pages: bool = False) -> li
     if not full:
         return [b]   # e.g. the two pages of one open passport: keep the component
     out = [b]
+    over = []      # sibling sheets' parts lying over b (trim b around them, never their own box)
     for s in subs:
         sa = (s[2] - s[0]) * (s[3] - s[1])
         if s in full or sa < 0.12 * area or sa > 0.7 * area:
             continue
         if drop_pages and abs(s[0] - b[0]) <= 4 and abs(s[2] - b[2]) <= 4:
             continue   # the other page of the same open booklet (a sheet _sheets already separated), not a paper
+        if siblings and any(_inside4(s, o) >= 0.6 for o in siblings):
+            over.append(s)   # a sibling sheet's part lying over b: that sheet is already its own document
+            continue
         if all(_iou4(s, o) < 0.6 for o in out):
             out.append(s)
-    if len(out) > 1:
+    if len(out) > 1 or over:
         # the sheet underneath must not keep the top sheet's area: text is attributed to a document by its centre
         # lying in the box, so a container box would read the top sheet's lines as its own (a citation slip
         # dropped on the passport made the passport 'say' M.O.A. CITATION). Keep the container's largest visible
@@ -512,7 +522,7 @@ def _split_by_paper(n: np.ndarray, b: list[int], drop_pages: bool = False) -> li
         own = (key == vals[i]) & pm
         # (not for a sub-sheet sharing the container's left and right edges: that is the other page of the same
         # open passport, which Day 1 has always reported as container + data page)
-        inner = [s for s in out[1:] if not (abs(s[0] - out[0][0]) <= 4 and abs(s[2] - out[0][2]) <= 4)]
+        inner = [s for s in out[1:] + over if not (abs(s[0] - out[0][0]) <= 4 and abs(s[2] - out[0][2]) <= 4)]
         out[0] = _trim_around(out[0], inner, own, x1, y1)
     return out
 
@@ -654,7 +664,8 @@ def find_documents(n: np.ndarray, is_tray_open: bool | None = None) -> list[dict
         and (o[2] - o[0]) * (o[3] - o[1]) > (b[2] - b[0]) * (b[3] - b[1]) for j, o in enumerate(comps))]
     for b in comps:
         shs = _sheets(n, b, valid)
-        for s in (s2 for sh in shs for s2 in _split_by_paper(n, sh, drop_pages=len(shs) > 1)):
+        for s in (s2 for sh in shs for s2 in _split_by_paper(n, sh, drop_pages=len(shs) > 1,
+                                                             siblings=[o for o in shs if o is not sh])):
             s = [int(v) for v in s]
             docs.append({"where": "desk", "box": s, "under_tray": is_tray_open and s[3] >= TRAY_BAR[1] - 2
                          and s[1] >= DESK[1] and s[0] >= TRAY_BAR[0] - 2})

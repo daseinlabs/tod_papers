@@ -470,3 +470,33 @@ desk docs are found, so those ticks could not be re-run meaningfully. Two citati
 overlap stay one doc. The landing strips under the stamp heads are still masked with the bar (unmasking them changed
 Day 1 passport boxes); a paper visible only in a strip is reported by `passport_under`, not as a doc. The remote L4
 server runs its own copy of `extract.py`: redeploy it for the vision-side split.
+
+## Entry ticket across the open passport: passport in pieces (2026-10-03, run 201459 t40-56, Day 3)
+
+The entrant's ticket was dropped across the middle of the open passport (passport sheet native [192,215,314,320],
+ticket [234,228,374,278]). `_sheets` separated the two papers correctly, but `_split_by_paper` on the passport sheet
+then found the ticket's colour inside it and emitted that overlap [234,228,314,278] as a THIRD document (a duplicate
+of the ticket) next to the trimmed passport strip [192,278,314,320]. On the vision side the contour finder returned
+one panel around both papers [187,214,375,320] holding only the passport's lines (ENTRY VISA / UNITED FEDERATION /
+Breki, Garoar); its centre (281,267) lies on the ticket, so the loop (text = boxes centred in a doc) gave the passport
+strip NO text and both ticket boxes the passport's lines. TOD named the pieces `entry_ticket` (0.58-0.75); no box was
+offered as the passport for 17 ticks (t40-56; t28-39 the passport lay alone under the tray and was named correctly).
+
+Fixes:
+- `layout._split_by_paper(..., siblings=)`: a sub-rectangle lying inside another sheet `_sheets` already found in the
+  same component is that sheet's part over this one: not a new document, but still trimmed around (the passport keeps
+  its visible side, which here holds all its visible lines and is where a drag grabs the passport, not the ticket).
+- `extract._split_sheets` (factored out of `_split_mixed`): a panel whose contour spans >= 2 flat-colour sheets is
+  split per sheet even when its lines are one paper kind; a sheet whose box centre lies on another sheet is boxed
+  around its own lines so its centre lands on its own visible part. Citation / flyer handling (f78a7a4) unchanged.
+
+Before / after (desk docs, local extraction; layout-only result identical with the remote server's copy):
+
+| frame | before | after |
+|---|---|---|
+| 201459 t40/45/50/56 | [192,278,314,320] (no text), [234,228,314,278] (passport + ticket lines), [234,228,374,278] (same) | [192,278,314,320] UNITED FEDERATION / Breki, Garoar; [234,228,374,278] ENTRY TICKET / VALID ON |
+| 164732 t1-4, 182519 t100/t118 | unchanged | unchanged |
+
+`find_documents` over all 325 booth frames of 164732 / 182519 / 201459: only the 17 frames 201459 t40-56 change.
+Hybrid sweep of 30 frames of 164732 / 182519: one change, 182519 t76 flyer doc now carries its text (was empty).
+The remote L4 server runs its own copy of `extract.py`: redeploy it for the vision-side part of this fix.
