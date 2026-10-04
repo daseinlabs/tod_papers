@@ -805,7 +805,10 @@ def inspection_doc_questions(desk_text: list[str], day: str = "2") -> tuple[dict
     # ticket options: only dates OCR read on a line that itself says VALID (run 205418 t17: the ticket had left the
     # desk OCR, the options were the passport's dates labelled 'VALID ON ...', TOD took D1 = EXP. 1984.03.10 at 0.78)
     tdates = ocr_dates([t for t in desk_text if _VALID_RE.search(t)])
-    q, cand = {}, {"dates": ocr_dates(desk_text), "tdates": tdates, "toks": ocr_city_tokens(desk_text)}
+    # EXP. options: not the dates OCR read on a VALID line (run 222257 t24 Henry Chau, gt APPROVED: TOD took the
+    # ticket's 'VALID ON 1982.11.25' as the EXP. date at 0.76 -> expired today -> denied 0.72-0.80)
+    q, cand = {}, {"dates": ocr_dates([t for t in desk_text if not _VALID_RE.search(t)]), "tdates": tdates,
+                   "toks": ocr_city_tokens(desk_text)}
     if cand["dates"]:
         q["exp_date"] = {
             "type": "choice",
