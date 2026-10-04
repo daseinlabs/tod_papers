@@ -1740,6 +1740,52 @@ RB_TAB_RE = re.compile(r"^\s*(Basic Rules|Regional Map|Booth Info)\b", re.I)
 _RB_TPL = []
 
 
+NODOCS_HEAD_RE = re.compile(r"entrant\s*must\s*have|must\s*have\s*a\s*$", re.I)   # loop28: rule line, 1st OCR row
+INTERROGATE_RE = re.compile(r"interrog", re.I)
+
+
+def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H: int) -> tuple[list, dict]:
+    """loop28 (run 070003 t143-158, Jorji): in inspect mode step N offers exactly one click -- N4 the rule line
+    'Entrant must have a passport' (its two OCR rows 'Entrant must have a' / 'passport' merged into one option),
+    N4b the empty counter, N5 the INTERROGATE prompt. No inspect button (step H), no other paper. Falls back to the
+    unfiltered list when the element is not on screen (logged)."""
+    info: dict = {"step": nstep}
+    if nstep == "N4":
+        rbs = [d["box"] for d in (facts or {}).get("docs_named") or [] if d["id"] == "rulebook"]
+        txt = [b for b in boxes if b.kind == "text" and b.text and getattr(b, "name", "") not in layout.BY_NAME
+               and (not rbs or any(x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 for x1, y1, x2, y2 in rbs))]
+        full = [b for b in txt if NODOCS_RULE_RE.search(b.text)]
+        if full:
+            info["rule"] = full[0].text
+            return [full[0]], info
+        heads = sorted((b for b in txt if NODOCS_HEAD_RE.search(b.text)), key=lambda b: b.y1)
+        if heads:
+            h_ = heads[0]
+            tails = [b for b in txt if b is not h_ and re.search(r"pass", b.text, re.I) and 0 <= b.y1 - h_.y1
+                     <= 2.5 * max(h_.h, 1) and b.x1 < h_.x2 and b.x2 > h_.x1]
+            parts = [h_] + sorted(tails, key=lambda b: b.y1)[:1]
+            m = Box(min(b.x1 for b in parts), min(b.y1 for b in parts), max(b.x2 for b in parts),
+                    max(b.y2 for b in parts), "Entrant must have a passport", "text", max(b.conf for b in parts),
+                    caption=h_.caption)
+            info["rule"] = " / ".join(b.text for b in parts)
+            return [m], info
+    elif nstep == "N4b":
+        ce = [b for b in boxes if getattr(b, "name", "") == "counter_empty"]
+        if not ce:   # the inspect highlight on the counter can fail the pixel test: the layout element itself
+            e = layout.BY_NAME["counter_empty"]
+            x1, y1, x2, y2 = layout.scale_box(e.box, W, H)
+            ce = [layout.LBox(x1, y1, x2, y2, "", e.kind, 1.0, caption=e.desc, name=e.name, affordance=e.affordance)]
+            info["counter_empty"] = "layout"
+        return ce[:1], info
+    elif nstep == "N5":
+        pr = [b for b in boxes if b.text and INTERROGATE_RE.search(b.text)]
+        if pr:
+            info["prompt"] = pr[0].text
+            return pr[:1], info
+    info["fallback"] = True
+    return [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"], info
+
+
 def rulebook_nav(frame: np.ndarray, state: dict, facts: dict | None) -> tuple[list[Box], dict]:
     """loop24 step N2 (run 031627 t131-144: 14 clicks on the left page's corner at the spine, the page stayed CONTENTS;
     the right page's corner lies 62% on the 'DRAG DOCUMENTS HERE' label and merge_hybrid dropped it, and with the slip
@@ -1909,7 +1955,13 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if nopp and nstep != "N4b":
         # loop26: the empty counter is clicked only after the rule line was selected in inspect mode (N4b)
         boxes = [b for b in boxes if getattr(b, "name", "") != "counter_empty"]
-    rp_now = (state.get("rulebook_page") or {}).get("value", "not_open")
+    if nopp and nstep in ("N4", "N4b", "N5"):
+        # loop28 (run 070003 t143-158): inside inspect mode only the next step-N element is offered (never the
+        # inspect button: TOD left inspect mode at t144 / t148 / t150 ...)
+        boxes, ni_info = nodocs_inspect_boxes(boxes, nstep, facts, W, H)
+        if facts is not None:
+            facts["nodocs_inspect"] = ni_info
+    rp_now =(state.get("rulebook_page") or {}).get("value", "not_open")
     if nopp and not man.yes(state, "inspect_mode_on") and rp_now not in ("not_open", "basic_rules"):
         # loop24 step N2: the rulebook's next-page corner + the CONTENTS entries (rulebook_nav) replace vision's page
         # corners on the desk (run 031627 t131-144: the left page's spine corner clicked 14x, nothing turned)
@@ -2302,7 +2354,10 @@ class Entrant:
         """Start-of-tick update from request 1 (`papers`: TOD named a paper of the entrant's -- passport, ticket,
         flyer or an unread one -- on the desk or counter). The hand-back is TOD's PASSPORT_RETURNED_Q answer on this
         frame (audit B20), not a tick window."""
-        person = man.yes(state, "person_at_window")
+        # loop28 (run 070003 t144, Jorji): inspect mode darkens the booth, person_at_window read 0.48 and the step-N
+        # memory was dropped; while it is on and inspect mode is on the person counts from 0.3
+        person = man.yes(state, "person_at_window",
+                         man.NODOCS_INSPECT_PERSON_P if self.nodocs_on and man.yes(state, "inspect_mode_on") else 0.5)
         self.nodocs_ticks = self.nodocs_ticks + 1 if (person and man.yes(state, "no_documents_presented", man.NO_DOCS_P)
                                                       ) else 0
         if self.nodocs_on and not person:

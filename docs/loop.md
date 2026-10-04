@@ -346,6 +346,11 @@ person is there, with no fresh 3-tick streak; the sub-state questions stay asked
 line (offered click-only), N4b (an executed click on a 'must have a passport' line in inspect mode) click
 `counter_empty`. From N3 on the rulebook slot and the desk page corners are not offered, the rulebook's lines only
 in N4, `counter_empty` only in N4b. The furthest sub-step reached counts as progress for the stall / cycle rules.
+Loop28 (run 070003 t143-158, inspect mode darkens the booth: person 0.48 -> H left inspect mode 15 ticks): while
+`nodocs_on` and inspect_mode_on >= 0.5 the person counts from 0.3 (also for the memory reset) and unread boxes
+(identity < 0.4) are no entrant paper; `nodocs_inspect_boxes` offers exactly one click -- N4 the rule line (the
+OCR rows 'Entrant must have a' + 'passport' merged into one option), N4b `counter_empty` (layout element if the
+pixel test fails), N5 a box reading 'interrog...' -- never the inspect button; the dynamic block is one sentence.
 A changed ISS. city reading drops the stored verdict (and that tick's), and a city not spelled as in the rulebook
 list gets "city 'x' is not in the rulebook for C" in the state block.
 Offline `--sequential` carries entrant memory, history, exclusions and the cycle guard across consecutive

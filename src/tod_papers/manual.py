@@ -300,7 +300,9 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS, 
                          "not_readable": "an entry ticket may be there but its date cannot be read in this picture"}}
     # step N only on the days with a scripted entrant who presents nothing (Day 3 entrant 8, docs/game.md); loop10
     # run 161058 Day 1: TOD said no documents (0.64-0.75) for empty windows and arriving entrants -> 22 N ticks
-    if today in NO_DOCS_DATES and (prev is None or yes(prev, "person_at_window")):
+    # loop28 (dry run 070003 t151): in inspect mode the person read 0.46 -> the question was dropped next tick -> H;
+    # while step N is on for this entrant it stays asked
+    if today in NO_DOCS_DATES and (prev is None or yes(prev, "person_at_window") or nodocs_on):
         q["no_documents_presented"] = _noul(
             "Look at the person at the booth window and the counter shelf in front of them. Has the person handed "
             "over no documents at all: the counter in front of them is empty and nothing of theirs lies on the "
@@ -1083,7 +1085,13 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
     vtxt = _verdict_now(state, f)
     sc = f.get("stamp_clicks") or []
     out: list[str] = []
-    if step.startswith("N"):
+    if step in ("N4", "N4b", "N5"):
+        # loop28 (run 070003 t143-158, Jorji): inside inspect mode the block says exactly the one next thing
+        out.append({"N4": "Inspect mode is on. Click the rule 'Entrant must have a passport', then the empty counter.",
+                    "N4b": "Inspect mode is on and the rule 'Entrant must have a passport' is selected. Click the "
+                           "empty counter.",
+                    "N5": "Inspect mode is on. Click the INTERROGATE prompt."}[step])
+    elif step.startswith("N"):
         out.append("The person has handed over no documents: there is nothing to stamp. Ask for the passport with "
                    "inspect mode.")
         slip = game_slip(f)
@@ -1363,12 +1371,26 @@ def no_passport(state: dict, facts: dict | None = None) -> bool:
         # answer on NO_DOCS_TICKS consecutive ticks (or the game's slip)
         return False
     nd_p = NO_DOCS_KEEP_P if active else 0.5 if (slip or rules_open) else NO_DOCS_P
-    if (not yes(state, "no_documents_presented", nd_p) or not yes(state, "person_at_window")
+    # loop28 (run 070003 t143-158, Jorji): inspect mode darkens the booth -- person_at_window read 0.48 and three
+    # unread boxes (identity 0.26-0.33, rulebook / counter slices) appeared, step N switched off and step H left
+    # inspect mode (on/off 15 ticks). While step N is active and inspect mode is on, the person counts from
+    # NODOCS_INSPECT_PERSON_P and an unread box (identity < IDENTITY_MIN_P) is no entrant paper.
+    insp = nodocs_inspect(state, f)
+    if (not yes(state, "no_documents_presented", nd_p)
+            or not yes(state, "person_at_window", NODOCS_INSPECT_PERSON_P if insp else 0.5)
             or yes(state, "document_on_counter_shelf")):
         return False
     return not any((d["id"] == "passport" and d["p"] >= 0.5) or d["id"] == "entry_ticket"
-                   or (d["id"] == UNREAD and not (slip and d["where"] == "desk"))
+                   or (d["id"] == UNREAD and not (slip and d["where"] == "desk") and not insp)
                    for d in (facts or {}).get("docs_named") or [])
+
+
+NODOCS_INSPECT_PERSON_P = 0.3   # loop28: person_at_window floor while step N is on and inspect mode darkens the booth
+
+
+def nodocs_inspect(state: dict, facts: dict | None) -> bool:
+    """loop28: step N already held for this entrant (Entrant.nodocs_on) and TOD says inspect mode is on."""
+    return bool((facts or {}).get("nodocs_on")) and yes(state, "inspect_mode_on")
 
 
 def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[str, str]:
