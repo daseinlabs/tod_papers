@@ -1312,6 +1312,12 @@ def no_passport(state: dict, facts: dict | None = None) -> bool:
     # loop24 (run 031627 t144-156): the game's own slip 'THIS ENTRANT HAS NO DOCUMENTS' confirms TOD's answer (TOD
     # still has to say no documents, p >= 0.5); with it on the desk an unread DESK box (a slice of the rulebook the
     # slip cuts off, or the slip itself) is no entrant paper
+    f = facts or {}
+    if f.get("stamp_clicks") or f.get("pp_drop") is not None or f.get("handed_back") is not None:
+        # loop24 (run 035532 t26-37, Ramez Gadelrab): stamped APPROVED + passport handed back at t24, his ticket hidden
+        # under the open tray -> TOD 'no documents' 0.80 -> step N (rulebook out, empty counter clicked 10x). An entrant
+        # with a stamp press / passport drop on record has presented documents.
+        return False
     slip = bool(game_slip(facts))
     if (not yes(state, "no_documents_presented", 0.5 if slip else NO_DOCS_P) or not yes(state, "person_at_window")
             or yes(state, "document_on_counter_shelf")):
