@@ -1847,7 +1847,12 @@ class Entrant:
         if self.handed_back is not None and person and ra == "returned":
             # G2 (run 070911 t79-111: the entrant waited for the ticket still on the desk)
             self.waiting_docs = bool(papers)
-        if not person and (self.handed_back is not None or self.hb_drop is not None or not (
+        # run 221232 t31-32 (Emre Dede, stamped t27/t28): he left with his passport, TOD said no person (0.30/0.27),
+        # but the counter-shelf answer sat at 0.50 and the hand-back drop had been cleared by a 'still_here' -> no
+        # reset; Ava Lao inherited his stamp presses and verdict. A stamp press of TOD's on record + an empty window
+        # = that entrant has gone.
+        gone = self.stamp_clicks and (state.get("person_at_window") or {}).get("p", 1.0) <= 0.35
+        if not person and (self.handed_back is not None or self.hb_drop is not None or gone or not (
                 man.yes(state, "document_open_on_desk") or man.yes(state, "document_on_counter_shelf"))):
             if self.country or self.stamp_clicks or self.handed_back is not None or self.hb_drop is not None:
                 self.reset(tick, "window empty")
