@@ -138,8 +138,10 @@ D2. RECOVERY: the entrant's passport is no longer visible anywhere on the desk o
    dragging its tab (left end of the open stamp bar) back to the RIGHT (drop it on the "right edge of the
    desk" target). The hidden passport
    reappears; then continue with C.
-K. DESK CLUTTER: the state block names an M.O.A. CITATION slip or a flyer (the pink "The Pink Vice" card) lying in
-   the working area -- on a stamp landing strip, under the open stamp tray bar, or on the passport -- or an entry
+K. DESK CLUTTER (comes FIRST: before B, C, D, E, F and G, and before reading or deciding): the state block names an
+   M.O.A. CITATION slip or a flyer (the pink "The Pink Vice" card) lying anywhere on the desk -- on a stamp
+   landing strip, under the open stamp tray bar (also when only its lower part shows below the bar), on the
+   passport or elsewhere on the desk -- or an entry
    ticket LEFT BEHIND by an entrant who has already gone (nobody at the window: it can no longer be handed back,
    so it is stowed like a slip, never dragged onto the window). None is the
    entrant's document to check: never stamp it, never hand a citation to the entrant, never hand a flyer back
@@ -233,10 +235,10 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
   passport or the place you need to work, drag it aside to the left part of the desk ("desk" target). They
   are not needed to process day-1 entrants.
 - An M.O.A. CITATION slip (printed after a mistake) is the inspector's, not the entrant's: never stamp it, never
-  hand it to the entrant. Where it lies out of the way, leave it; in the working area see step K.
+  hand it to the entrant. On the desk it is stowed first (step K); on the counter shelf leave it.
 - A flyer an entrant puts down with their papers (the pink "The Pink Vice" card) has no rule value and is not a
-  document to check: never stamp it. In the working area see step K; otherwise leave it, or hand it back WITH the
-  entrant's other papers after the stamped passport.
+  document to check: never stamp it. On the desk it is stowed first (step K: counter shelf left of the
+  desk); after the stamped passport went back it may instead go back WITH the entrant's other papers.
 - Multi-page papers (the bulletin shows "3/4" at its bottom) turn pages when you click their bottom-right
   corner. Do not drag a page corner.
 
@@ -1167,14 +1169,15 @@ def clutter_phrase(c: dict, tray_open: bool) -> str:
                 "'right edge of the desk' target), then drag it onto the 'counter shelf left of the desk' target (step K)")
     where = (f"ON THE {' and '.join(x.upper() for x in c['strips'])} landing strip"
              + ("s" if len(c["strips"]) > 1 else "") if c["strips"]
-             else "on the passport" if c["on_passport"] else "where the stamp strips are")
-    return who + f". It lies {where}: drag it onto the 'counter shelf left of the desk' target (step K)"
+             else "on the passport" if c["on_passport"] else "on the desk")
+    return who + (f". It lies {where}: drag it onto the 'counter shelf left of the desk' target NOW (step K comes "
+                  "before every other booth step)")
 
 
 def clutter_step(state: dict, f: dict):
-    """Manual step K: a citation slip / flyer in the working area while the passport is not under a stamp head."""
+    """Manual step K: a citation slip / flyer on the desk (loop20: before every other booth step)."""
     cl = [c for c in f.get("clutter") or [] if c["in_way"]]
-    if not cl or f.get("passport_under"):
+    if not cl:
         return None
     tray = yes(state, "stamp_tray_open") or bool(f.get("tray_open_px"))
     under = [c for c in cl if c["under_bar"]]
@@ -1223,6 +1226,9 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         return "N2", "click the rulebook page corner until BASIC RULES shows"
     if yes(state, "inspect_mode_on"):
         return "H", "click the inspect-mode button (leave inspect mode)"
+    k_step = clutter_step(state, facts or {})   # loop20: clutter is stowed before B-G (user priority)
+    if k_step:
+        return k_step
     if (facts or {}).get("waiting_docs") and yes(state, "person_at_window"):
         return "G2", "drag the remaining document (entry ticket) -> entrant"
     if (facts or {}).get("handed_back") is not None:
@@ -1240,9 +1246,6 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     if yes(state, "bulletin_or_rulebook_covering_desk") and yes(state, "document_open_on_desk"):
         return "6", "drag bulletin/rulebook -> desk (aside)"
     f = facts or {}
-    k_step = clutter_step(state, f)
-    if k_step:
-        return k_step
     # loop13 run 182519 t89-92 (Maslov): the ticket stayed on the counter. Any counter paper that is UNREAD (identity
     # gate) or TOD's entry ticket goes to the desk once the passport is open there (no tick cap: the identity gate
     # keeps a stowed slip from looping it, it is named on the desk)

@@ -639,10 +639,10 @@ CLUTTER_P = 0.5
 def clutter_facts(named: list[dict], tray_open: bool) -> list[dict]:
     """Where each citation slip / flyer TOD named (request-1 identity, p >= CLUTTER_P) lies, from layout geometry
     only: on a stamp landing strip, under the open tray bar (above the strip, hidden by the bar), on the passport, or
-    elsewhere. in_way = it occupies the stamp area or the passport (loop10 run 164732 t92-121: a flyer and citation
+    elsewhere. in_way = it lies on the desk (loop20; before: the stamp area or the passport -- loop10 run 164732 t92-121: a flyer and citation
     slips under the tray / on the DENIED strip, 32-tick stall; run 161058 Uvilia: 71 ticks)."""
     pps = [d["native"] for d in named if d["id"] == "passport" and d["p"] >= 0.5 and d["where"] == "desk"]
-    bx1, by1, bx2, _ = layout.TRAY_BAR
+    bx1, by1, bx2, by2 = layout.TRAY_BAR
     sy1, sy2 = layout.STRIP_Y
     out = []
     for d in named:
@@ -658,10 +658,15 @@ def clutter_facts(named: list[dict], tray_open: bool) -> list[dict]:
                   if min(c, x2) - max(a, x1) >= 0.4 * (x2 - x1) and b <= sy2 and e >= sy1]
         bar = max(0, min(c, bx2) - max(a, bx1)) * max(0, min(e, sy1) - max(b, by1)) / area
         on_pp = any(p != d["native"] and _iou_t(p, d["native"]) >= 0.1 for p in pps)
-        under = bool(tray_open and bar >= 0.3)
+        # loop20 run 235653 t64-78: the flyer's visible box started AT the bar's bottom edge (y 212 = STRIP_Y[0]), its
+        # top hidden under the open bar -> bar overlap 0, 'on the APPROVED strip', drags grabbed the bar edge, 5
+        # refusals. A paper cut off by the bar edge counts as under the bar.
+        cut = bool(b <= by2 + 2 and min(c, bx2) - max(a, bx1) > 0)
+        under = bool(tray_open and (bar >= 0.3 or cut))
         out.append({"id": d["id"], "p": d["p"], "native": d["native"], "where": "desk", "strips": strips,
                     "under_bar": under, "on_passport": on_pp,
-                    "in_way": bool(strips or on_pp or bar >= 0.3)})
+                    # loop20 (user): any citation / flyer on the desk is in the working area -> step K first
+                    "in_way": True})
     return out
 
 
@@ -1582,7 +1587,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         # in run 092521 t217-218 while the entrant waited for it
         # only the entrant (and the tray stow edge, to uncover papers under the tray) are drop targets in G2
         keep = (REGION_CAPS["hand_back"], REGION_CAPS["tray_stow"]) + (
-            (REGION_CAPS["stow_papers"],) if any(c["in_way"] and c["id"] == "citation"
+            (REGION_CAPS["stow_papers"],) if any(c["in_way"] and c["id"] in CLUTTER_IDS
                                                  for c in facts.get("clutter") or []) else ())
         regions = [r for r in regions if r.caption in keep]   # a citation in the way is never handed to the entrant
     # step N (no passport presented): the entrant stays a drop target (hand back what they gave), the transcript
