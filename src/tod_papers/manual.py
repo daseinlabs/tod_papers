@@ -1059,6 +1059,17 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
                    "(nobody comes until you call).")
     elif step in ("F", "F0", "F2"):
         t_, sd_ = sc[-1]
+        ink = state.get("passport_stamp_ink") or {}
+        back = state.get("passport_returned") or {}
+        # loop22 (run 022401 t33-44): one DENIED press missed (your ink reading 'none' 0.92), the passport bounced
+        # back onto the counter from every hand-back drag ('still_here' 0.77) -- a re-press is allowed (< 2 presses)
+        if (ink.get("value") == "none" and ink.get("p", 0) >= 0.75 and back.get("value") == "still_here"
+                and back.get("p", 0) >= 0.6 and sum(1 for _, s_ in sc if s_ == sd_) < 2):
+            out.append(f"You pressed {sd_.upper()} at tick {t_}, but your ink reading shows NO stamp on the passport "
+                       f"(p={ink.get('p', 0):.2f}) and it stays with you: the press missed and the person will not "
+                       "take an unstamped passport. Drag it to the 'desk' target, then onto the landing strip under "
+                       f"the {sd_.upper()} stamp (open the stamp tray if closed) and press {sd_.upper()} once more.")
+            return "WHAT APPLIES NOW (from your own answers above):\n" + "\n".join(f"- {x}" for x in out)
         out.append(f"You pressed {sd_.upper()} at tick {t_}: the passport counts as stamped; do not press again.")
         if step == "F2":
             out.append(f"{vtxt}: one DENIED press overrules APPROVED; then hand the papers back.")
