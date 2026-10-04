@@ -677,6 +677,21 @@ def clutter_facts(named: list[dict], tray_open: bool) -> list[dict]:
                     # loop25: also when the open bar overlaps it -- only a strip / the passport makes it in the way
                     "in_way": not (st and not strips and not on_pp),
                     "stowed_tick": st["tick"] if st else None})
+    # loop25 run 044911 t62-66 (Ava Mutanen): the flyer put away at t61 showed on its spot [180,215,331,315] and a
+    # 19 px slice right above it [270,196,325,215] read 'flyer' 0.90 -> step K; TOD offered the entry ticket for the
+    # put-away spot 5x (refused) -> stop. A sliver (< 40% of the full size) of the same kind touching a put-away paper
+    # visible this frame is part of it.
+    for o in out:
+        fw, fh = CLUTTER_SIZE.get(o["id"], (0, 0))
+        a, b, c, e = o["native"]
+        if not (o["in_way"] and o["where"] == "desk" and fw and not o["strips"] and not o["on_passport"]
+                and (c - a) * (e - b) < 0.4 * fw * fh):
+            continue
+        for s in out:
+            if s is not o and s["id"] == o["id"] and s.get("stowed_tick") is not None and layout._ov(
+                    [a - 6, b - 6, c + 6, e + 6], list(s["native"])):
+                o.update(in_way=False, stowed_tick=s["stowed_tick"], sliver=True)
+                break
     return out
 
 
