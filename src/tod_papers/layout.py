@@ -773,6 +773,85 @@ def full_passport_box(vis, size, is_tray_open: bool) -> list[int]:
     return [x1, y2 - h, x2, y2]
 
 
+def full_sheet_box(vis, size, is_tray_open: bool, others: list | None = None) -> list[int]:
+    """full_passport_box for a visible box that another paper may trim (5d1669c: the entry ticket lying across the
+    open passport splits it, the passport box is only its visible strip). An edge of `vis` that touches / lies under
+    another paper (`others`, native boxes) is not a real sheet edge: the sheet extends past it -- upward when the
+    top is covered (or cut by the stamp bar), downward when the bottom is, left/right likewise. Uncovered edges are
+    real. Without overlap this is full_passport_box."""
+    x1, y1, x2, y2 = [int(v) for v in vis]
+    w, h = int(size[0]), int(size[1])
+    tol = EDGE_TOL + 2
+
+    def covers(o, edge):   # another paper reaches across this edge of vis
+        ox1, oy1, ox2, oy2 = o
+        if edge == "top":
+            return oy1 <= y1 + tol and oy2 >= y1 - tol and ox1 < x2 and ox2 > x1
+        if edge == "bottom":
+            return oy1 <= y2 + tol and oy2 >= y2 - tol and ox1 < x2 and ox2 > x1
+        if edge == "left":
+            return ox1 <= x1 + tol and ox2 >= x1 - tol and oy1 < y2 and oy2 > y1
+        return ox1 <= x2 + tol and ox2 >= x2 - tol and oy1 < y2 and oy2 > y1
+    others = [list(o) for o in (others or []) if _ov(o, vis) > 0 or any(covers(o, e) for e in
+                                                                        ("top", "bottom", "left", "right"))]
+    if not others:
+        return full_passport_box(vis, size, is_tray_open)
+    cov = {e: any(covers(o, e) for o in others) for e in ("top", "bottom", "left", "right")}
+    cut_top = (cov["top"] or y1 <= DESK[1] + EDGE_TOL
+               or (is_tray_open and abs(y1 - TRAY_BAR[3]) <= 3 and x2 > TRAY_BAR[0]))
+    if x2 - x1 < w - EDGE_TOL and (cov["left"] or x1 <= DESK[0] + EDGE_TOL) and not cov["right"]:
+        fx1 = x2 - w
+    else:
+        fx1 = x1
+    if y2 - y1 >= h - EDGE_TOL:
+        fy1 = y1
+    elif cut_top and not cov["bottom"]:
+        fy1 = y2 - h
+    else:
+        fy1 = y1
+    return [fx1, fy1, fx1 + w, fy1 + h]
+
+
+def passport_grab_point(vis, others: list | None = None, inset: int = 6) -> tuple[int, int]:
+    """A point on the passport itself (native): inside its visible box `vis`, `inset` px in, outside every other
+    paper's box (`others`, e.g. the entry ticket lying across it) -- the one nearest the box centre. The plain box
+    centre when nothing overlaps (or no free point exists)."""
+    x1, y1, x2, y2 = [int(v) for v in vis]
+    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+    obs = [o for o in (others or []) if _ov(o, vis) > 0]
+    if not obs:
+        return cx, cy
+    best, bd = None, None
+    for y in range(y1 + inset, max(y1 + inset, y2 - inset) + 1, 2):
+        for x in range(x1 + inset, max(x1 + inset, x2 - inset) + 1, 2):
+            if any(o[0] - inset <= x <= o[2] + inset and o[1] - inset <= y <= o[3] + inset for o in obs):
+                continue
+            d = (x - cx) ** 2 + (y - cy) ** 2
+            if bd is None or d < bd:
+                best, bd = (x, y), d
+    return best or (cx, cy)
+
+
+def head_footprint(side: str, stamp_box=None) -> list[int]:
+    """Where the stamp head inks (native): STRIP_X width centred on the detected stamp box (native, x-centre), the
+    strip rows STRIP_Y; the fixture strip when no stamp box was detected."""
+    sx1, sx2 = STRIP_X[side]
+    if stamp_box is not None:
+        c, hw = (stamp_box[0] + stamp_box[2]) / 2, (sx2 - sx1) / 2
+        sx1, sx2 = int(round(c - hw)), int(round(c + hw))
+    return [sx1, STRIP_Y[0], sx2, STRIP_Y[1]]
+
+
+def visa_page(full) -> list[int]:
+    """Upper (visa) page of an open passport box."""
+    x1, y1, x2, y2 = full
+    return [x1, y1, x2, int(round(y1 + (y2 - y1) * (1 - PASSPORT_DATA_FRAC)))]
+
+
+def contains(outer, inner) -> bool:
+    return outer[0] <= inner[0] and outer[1] <= inner[1] and outer[2] >= inner[2] and outer[3] >= inner[3]
+
+
 def clear_desk_spot(docs: list[dict], is_tray_open: bool, size=OPEN_PASSPORT, inspect_button: bool = False,
                     exclude: list | None = None) -> dict:
     """Where the open passport (size w x h, native) lies fully on the desk with the least covered: every
@@ -810,15 +889,17 @@ def clear_desk_spot(docs: list[dict], is_tray_open: bool, size=OPEN_PASSPORT, in
             "check": passport_obstruction(box, obst)}
 
 
-def passport_drop_point(spot: dict, src: dict | None, size, is_tray_open: bool) -> tuple[int, int]:
+def passport_drop_point(spot: dict, src: dict | None, size, is_tray_open: bool, others: list | None = None,
+                        grab=None) -> tuple[int, int]:
     """Cursor end point (native) that puts the passport onto `spot`. src = the passport's paper dict
     ({'where', 'box'/'native'}) or None. From the counter (closed passport) it opens centred on the cursor;
-    a paper dragged on the desk keeps its offset to the grab point (= the centre of its visible box)."""
+    a paper dragged on the desk keeps its offset to the grab point (`grab`, native; default the centre of its
+    visible box). `others`: other desk papers (a box trimmed by one of them is anchored by full_sheet_box)."""
     cx, cy = spot["center"]
     if src is not None and src.get("where") == "desk":
         vis = list(src.get("native") or src["box"])
-        full = full_passport_box(vis, size, is_tray_open)
-        gx, gy = (vis[0] + vis[2]) / 2, (vis[1] + vis[3]) / 2
+        full = full_sheet_box(vis, size, is_tray_open, others)
+        gx, gy = grab if grab is not None else ((vis[0] + vis[2]) / 2, (vis[1] + vis[3]) / 2)
         cx += gx - (full[0] + full[2]) / 2
         cy += gy - (full[1] + full[3]) / 2
     # the cursor must end on the desk (papers released over the counter close and fall back onto it)

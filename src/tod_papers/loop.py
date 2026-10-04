@@ -956,26 +956,73 @@ def desk_target(frame: np.ndarray, facts: dict | None, state: dict):
     size = layout.open_passport_size(open_src["native"] if open_src else None)
     exclude = [open_src["native"]] if open_src else []
     spot = layout.clear_desk_spot(sinfo.get("docs") or [], tray, size, bool(sinfo.get("inspect_button")), exclude)
-    nx, ny = layout.passport_drop_point(spot, open_src, size, tray)
+    others = _other_desk_papers(facts, open_src) if open_src else []
+    grab = layout.passport_grab_point(open_src["native"], others) if open_src else None
+    nx, ny = layout.passport_drop_point(spot, open_src, size, tray, others, grab)
     sx, sy = W / layout.NATIVE_W, H / layout.NATIVE_H
     hw = DESK_TARGET_HALF
     box = Box(int((nx - hw) * sx), int((ny - hw) * sy), int((nx + hw) * sx), int((ny + hw) * sy), "", "region", 0.0,
               caption=REGION_CAPS["desk"])
-    cur = layout.full_passport_box(open_src["native"], size, tray) if open_src else None
+    cur = layout.full_sheet_box(open_src["native"], size, tray, others) if open_src else None
     info = {"drop_native": [nx, ny], "passport_box_planned": spot["box"], "check": spot["check"],
+            "grab_native": list(grab) if grab else None, "passport_vis": list(open_src["native"]) if open_src else None,
             "passport_from": (src or {}).get("where"), "passport_box_now": cur,
             "at_spot": bool(cur is not None and layout._iou4(cur, spot["box"]) >= CLEAR_SPOT_IOU)}
     return box, info
 
 
-def strip_drop_point(sb: Box, tb: Box, facts: dict | None, frame: np.ndarray, state: dict):
-    """Cursor end point (frame px) for a passport dragged onto a stamp landing strip: the VISA page (upper half of
-    the open passport) must lie under the stamp head, so the grab offset to the visa-page centre is kept (loop10
-    runs 161058 t94-95 / 163640: the grab point -- often on the data page -- was dropped on the strip, the visa page
-    ended under the stamp bar and both stamps inked the DATA page: no decision recorded, EXP. covered). A closed
-    passport from the counter opens centred on the cursor. Returns None when the source is not the passport."""
+def _other_desk_papers(facts: dict | None, src: dict) -> list:
+    """Native boxes of the desk papers other than the passport `src` (the entry ticket lying across it, ...)."""
+    out = []
+    for d in (facts or {}).get("docs_named") or []:
+        b = d.get("native")
+        if not b or d.get("where") != "desk" or d is src or list(b) == list(src.get("native") or []):
+            continue
+        out.append(list(b))
+    return out
+
+
+def paper_on_passport(facts: dict | None) -> dict | None:
+    """A desk paper lying across the open passport TOD named (loop16 runs 205418 t14 / 210453 t14 / 211624 t13: the
+    entry ticket across the passport; 5d1669c then trims the passport box to its visible strip). Returns the
+    paper's docs_named entry + covered fraction of the passport box, or None."""
+    src = _passport_doc(facts)
+    if src is None or src["where"] != "desk":
+        return None
+    vis = src["native"]
+    tray = bool(((facts or {}).get("static") or {}).get("tray_open"))
+    # the whole sheet: a passport box trimmed by the ticket ends at the ticket's edge (no overlap with the box)
+    full = layout.full_sheet_box(vis, layout.open_passport_size(vis), tray, _other_desk_papers(facts, src))
+    va = max(1, (full[2] - full[0]) * (full[3] - full[1]))
+    best = None
+    for d in (facts or {}).get("docs_named") or []:
+        b = d.get("native")
+        if not b or d is src or d.get("where") != "desk" or list(b) == list(vis):
+            continue
+        if d.get("id") == "passport":
+            continue   # another piece of the same passport
+        ba = max(1, (b[2] - b[0]) * (b[3] - b[1]))
+        ov = layout._ov(b, full)
+        if ov >= 0.3 * ba and ov < 0.9 * va and (best is None or ov > best[1]):
+            best = (d, ov)
+    if best is None:
+        return None
+    return {"id": best[0]["id"], "native": list(best[0]["native"]), "covered": round(best[1] / va, 2)}
+
+
+def strip_plan(sb: Box, tb: Box, facts: dict | None, frame: np.ndarray, state: dict, stamp_box=None) -> dict | None:
+    """Grab and drop (frame px) for a passport dragged onto a stamp landing strip so that the VISA page (upper half
+    of the open passport) covers the stamp head footprint (layout.head_footprint, from the detected stamp box,
+    native). loop10 runs 161058/163640: the grab point -- often on the data page -- was dropped on the strip and the
+    DATA page got inked, so the grab offset to the sheet is kept. loop16: the sheet is the FULL open passport
+    anchored on its visible box (layout.full_sheet_box: a box trimmed by the entry ticket lying across it, or cut by
+    the stamp bar, extends past the covered edge), and the grab point lies on the passport, not on the paper across
+    it (layout.passport_grab_point). A closed passport from the counter opens centred on the cursor.
+    Returns {grab, drop (frame px), planned / visa / foot (native), inside, trimmed} or None when the source is not
+    the passport."""
     if tb.caption not in (REGION_CAPS["stamp_landing_denied"], REGION_CAPS["stamp_landing_approved"]):
         return None
+    side = "approved" if tb.caption == REGION_CAPS["stamp_landing_approved"] else "denied"
     src = _passport_doc(facts)
     if src is None:
         return None
@@ -985,22 +1032,53 @@ def strip_drop_point(sb: Box, tb: Box, facts: dict | None, frame: np.ndarray, st
     vis = list(src["native"])
     if not (vis[0] - 4 <= gx <= vis[2] + 4 and vis[1] - 4 <= gy <= vis[3] + 4):
         return None
+    others = _other_desk_papers(facts, src) if src["where"] == "desk" else []
+    sbn = [sb.x1 / sx, sb.y1 / sy, sb.x2 / sx, sb.y2 / sy]
+    if others and max(layout._iou4(sbn, o) for o in others) > layout._iou4(sbn, vis):
+        return None   # TOD's pick is the paper lying across the passport, not the passport
     tray = bool(((facts or {}).get("static") or {}).get("tray_open", man.yes(state, "stamp_tray_open")))
     size = layout.open_passport_size(vis if src["where"] == "desk" else None)
-    w0 = layout.OPEN_PASSPORT[0]
-    if src["where"] == "desk" and 0.8 * w0 <= vis[2] - vis[0] <= 1.2 * w0:   # one clean open passport box
-        full = layout.full_passport_box(vis, size, tray)
-        vcx, vcy = (full[0] + full[2]) / 2, full[1] + (full[3] - full[1]) * layout.PASSPORT_DATA_FRAC / 2
-        ox, oy = gx - vcx, gy - vcy
+    w, h = size
+    foot = layout.head_footprint(side, stamp_box)
+    fcx, fcy = (foot[0] + foot[2]) / 2, (foot[1] + foot[3]) / 2
+    trimmed = False
+    if src["where"] == "desk":
+        full = layout.full_sheet_box(vis, size, tray, others)
+        trimmed = full != layout.full_passport_box(vis, size, tray)
+        if not (0.8 * w <= vis[2] - vis[0] <= 1.2 * w or trimmed):
+            return None
+        gnx, gny = layout.passport_grab_point(vis, others)
+        ox, oy = gnx - full[0], gny - full[1]   # grab offset from the sheet's top-left corner
+        vh = h * (1 - layout.PASSPORT_DATA_FRAC)
+        nx1, ny1 = fcx - w / 2, fcy - vh / 2     # visa page centred on the head footprint
+        if ny1 + h > layout.NATIVE_H and layout.NATIVE_H - h >= foot[3] - vh:
+            ny1 = layout.NATIVE_H - h            # keep the data page on the frame while the visa page still covers
+        tx, ty = nx1 + ox, ny1 + oy
     elif src["where"] == "counter":
-        ox, oy = 0.0, size[1] / 4   # opens centred on the cursor: the visa centre is a quarter height above it
+        gnx, gny = gx, gy
+        ox, oy = w / 2, h / 2                   # opens centred on the cursor
+        tx, ty = fcx, fcy + h / 4               # the visa centre is a quarter height above the cursor
     else:
         return None
-    tx, ty = tb.center[0] / sx + ox, tb.center[1] / sy + oy
     m = 3 * layout.DESK_MARGIN   # the cursor must end on the desk
     tx = min(max(tx, layout.DESK[0] + m), layout.DESK[2] - m)
     ty = min(max(ty, layout.DESK[1] + m), layout.DESK[3] - m)
-    return int(tx * sx), int(ty * sy)
+    planned = [int(round(tx - ox)), int(round(ty - oy)), int(round(tx - ox + w)), int(round(ty - oy + h))]
+    visa = layout.visa_page(planned)
+    return {"side": side, "grab": (int(gnx * sx), int(gny * sy)), "drop": (int(tx * sx), int(ty * sy)),
+            "grab_native": [int(gnx), int(gny)], "planned": planned, "visa": visa, "foot": foot,
+            "inside": layout.contains(visa, foot), "trimmed": trimmed}
+
+
+def _stamp_box_native(idmap: dict, tb: Box, frame: np.ndarray):
+    """Native box of the detected stamp whose landing strip `tb` is (None when not detected this frame)."""
+    side = "approved" if tb.caption == REGION_CAPS["stamp_landing_approved"] else "denied"
+    H, W = frame.shape[:2]
+    sx, sy = W / layout.NATIVE_W, H / layout.NATIVE_H
+    for b in idmap.values():
+        if getattr(b, "name", "") == f"stamp_{side}":
+            return [b.x1 / sx, b.y1 / sy, b.x2 / sx, b.y2 / sy]
+    return None
 
 
 def passport_needs_clear_space(state: dict, facts: dict | None, day: str, info: dict) -> bool:
@@ -1030,6 +1108,7 @@ REGION_CAPS = {
     "hand_back": "the entrant at the booth window -- drop documents ON THE PERSON to hand them back",
     "desk": "desk (drop documents here to read them)",
     "desk_clear": "clear desk space (move the passport so its page is fully visible)",
+    "desk_aside": "clear desk space off the passport (drop the paper lying across the passport here)",
     "tray_stow": "right edge of the desk (drag the tray tab here to put the stamp tray away)",
     "stow_papers": "counter shelf left of the desk -- drop the rulebook, bulletin, a flyer or a citation slip here to put "
                    "it away (off the desk)",
@@ -1396,6 +1475,23 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         desk_info["target"] = name
         if facts is not None:
             facts["desk_target"] = desk_info
+        pop = paper_on_passport(facts)
+        if pop is not None and facts is not None:
+            # loop16 (205418 t14 / 210453 t14 / 211624 t13): the entry ticket lies across the open passport. Manual
+            # E: move that paper off it first -> a desk spot for THAT paper with the passport as an obstacle
+            pw, ph = pop["native"][2] - pop["native"][0], pop["native"][3] - pop["native"][1]
+            tray_ = bool(sinfo.get("tray_open", man.yes(state, "stamp_tray_open")))
+            asp = layout.clear_desk_spot(sinfo.get("docs") or [], tray_, (pw, ph), bool(sinfo.get("inspect_button")),
+                                         [pop["native"]])
+            ax_, ay_ = asp["center"]
+            gx_, gy_ = (pop["native"][0] + pop["native"][2]) / 2, (pop["native"][1] + pop["native"][3]) / 2
+            sx_, sy_ = W / layout.NATIVE_W, H / layout.NATIVE_H
+            hw_ = DESK_TARGET_HALF
+            regions.append(Box(int((ax_ - hw_) * sx_), int((ay_ - hw_) * sy_), int((ax_ + hw_) * sx_),
+                               int((ay_ + hw_) * sy_), "", "region", 0.0, caption=REGION_CAPS["desk_aside"]))
+            region_src["desk_aside"] = "derived_frame"
+            pop["aside_box_planned"] = asp["box"]
+            facts["paper_on_passport"] = pop
     if booth and facts is not None and facts.get("waiting_docs"):
         # G2: the remaining papers go to the entrant; the stow shelf (also 'counter shelf ...') took the ticket twice
         # in run 092521 t217-218 while the entrant waited for it
@@ -1650,7 +1746,9 @@ def fill_derived(res, D: dict) -> None:
 def decide(res, P: dict) -> dict:
     """TOD's request-2 answers -> the input to perform. The input kind is TOD's `action` answer and the element is
     TOD's `source` pick (audit A5/B26): a mismatch with the element's click/drag convention (manual section 2) is
-    logged in `note` / `convention_mismatch`, never corrected. Pure: no I/O."""
+    logged in `note` / `convention_mismatch`. One input convention (loop16): `drag` on a press-only element is
+    executed as a click (`input_convention` "drag->click (press-only element)", TOD's answer kept in tod_pick);
+    a click on a drag element (paper, tray tab) is executed as TOD chose. Pure: no I/O."""
     src = str(res["source"].value)
     act = str(res["action"].value) if "action" in res.answers else None
     if src == WAIT_KEY or not src.isdigit() or act == "wait":
@@ -1660,7 +1758,15 @@ def decide(res, P: dict) -> dict:
     cls = _cls(P["idmap"].get(int(src)), P["booth"], int(src) in P.get("doc_ids", ()))
     action = act if act in ("click", "drag") else ("drag" if cls == "drag" else "click")
     tod_pick = (action, src)
-    note, mismatch = "", None
+    note, mismatch, conv = "", None, None
+    if cls == "click" and action == "drag":
+        # press-only element (stamp, horn, button, page corner, inspect toggle, day tile, NEXT/CONTINUE text):
+        # TOD's pick is the element; actuating it is the input layer's job -> a click (loop16 211624: 20 APPROVED
+        # stamp drags vs 6 clicks). TOD's answer stays in tod_pick; papers / tray tab keep TOD's action.
+        mismatch = f"TOD chose drag #{src}; that element is press-only (executed as a click)"
+        conv, note, action = "drag->click (press-only element)", mismatch, "click"
+        return dict(action="click", src=src, tgt="none", note=note, tod_pick=tod_pick, convention_mismatch=mismatch,
+                    input_convention=conv, veto=None, p_src=float(res["source"].probabilities.get(src, 0.0)))
     if cls in ("click", "drag") and cls != action:
         mismatch = f"TOD chose {action} #{src}; by the convention that element is {cls}-only (executed as TOD chose)"
         note = mismatch
@@ -1780,8 +1886,11 @@ class Entrant:
                 self.checks[k] = {"value": v, "raw": state[k]["value"], "from": state[k].get("from"),
                                   "p": state[k]["p"], "tick": tick}
 
-    def after_action(self, tick: int, state: dict, action: str, sb, tb, frame, changed, src_desc: str = "") -> None:
-        if not changed or sb is None:
+    def after_action(self, tick: int, state: dict, action: str, sb, tb, frame, changed, src_desc: str = "",
+                     sent: bool = False) -> None:
+        """`sent`: the input was executed (not vetoed / skipped). A stamp press that was sent is recorded whether or
+        not the pixel check saw a change (user decision loop16: stamped = TOD's executed press)."""
+        if sb is None or not (changed or (sent and action == "click" and _stamp_side(sb, frame))):
             return
         if action == "click":
             side = _stamp_side(sb, frame)
@@ -1999,6 +2108,13 @@ def offline(args) -> int:
             "decision": {**D, "src_desc": P["desc"].get(D["src"], "-"),
                          "tgt_desc": P["desc"].get(D["tgt"], "-") if D["action"] == "drag" else None},
         }
+        _sb = P["idmap"].get(int(D["src"])) if D["src"].isdigit() else None
+        _tb = P["idmap"].get(int(D["tgt"])) if D["tgt"].isdigit() else None
+        if D["action"] == "drag" and _sb is not None and _tb is not None:
+            _sp = strip_plan(_sb, _tb, facts, frame, state, _stamp_box_native(P["idmap"], _tb, frame))
+            r["strip_plan"] = ({k_: _sp[k_] for k_ in ("side", "grab", "drop", "grab_native", "planned", "visa",
+                                                       "foot", "inside", "trimmed")} if _sp else None)
+        r["paper_on_passport"] = facts.get("paper_on_passport")
         results.append(r)
         stem = os.path.join(out_dir, os.path.basename(os.path.dirname(os.path.abspath(path))) + "_"
                             + os.path.splitext(os.path.basename(path))[0])
@@ -2409,7 +2525,7 @@ def run(args) -> int:
                 boxes={str(i): b.to_dict() for i, b in idmap.items()},
                 answers={q: {"choice": a.value, "probabilities": a.probabilities, "confidence": a.confidence}
                          for q, a in res.answers.items()},
-                tod_pick=list(D["tod_pick"]), input_convention=D["note"] or None,
+                tod_pick=list(D["tod_pick"]), input_convention=D.get("input_convention") or D["note"] or None,
                 convention_mismatch=D.get("convention_mismatch"),
             )
             sb = idmap.get(int(src)) if src.isdigit() else None
@@ -2454,10 +2570,20 @@ def run(args) -> int:
                         io_win.click(hwnd, cx, cy, settle=args.settle)
             elif action == "drag" and sb is not None and tb is not None and tb is not sb:
                 (ax, ay), (bx, by) = sb.center, tb.center
-                _sp = strip_drop_point(sb, tb, facts, frame, state)
+                _sp = strip_plan(sb, tb, facts, frame, state, _stamp_box_native(idmap, tb, frame))
+                _dk = (facts or {}).get("desk_target") or {}
+                if (_sp is None and tb.caption in (REGION_CAPS["desk"], REGION_CAPS["desk_clear"])
+                        and _dk.get("grab_native") and _dk.get("passport_vis")):
+                    _sx, _sy = frame.shape[1] / layout.NATIVE_W, frame.shape[0] / layout.NATIVE_H
+                    _v = _dk["passport_vis"]
+                    if layout._iou4([sb.x1 / _sx, sb.y1 / _sy, sb.x2 / _sx, sb.y2 / _sy], _v) >= 0.5:   # TOD's pick IS the passport
+                        # the desk drop point keeps the offset to this grab point (on the passport, not the ticket)
+                        ax, ay = int(_dk["grab_native"][0] * _sx), int(_dk["grab_native"][1] * _sy)
                 if _sp is not None:
-                    (bx, by) = _sp
+                    (ax, ay), (bx, by) = _sp["grab"], _sp["drop"]
                     rec["strip_drop"] = [bx, by]
+                    rec["strip_plan"] = {k_: _sp[k_] for k_ in ("side", "grab", "grab_native", "planned", "visa",
+                                                                 "foot", "inside", "trimmed")}
                 check_inside(hwnd, ax, ay)
                 check_inside(hwnd, bx, by)
                 executed = f"drag #{src} ({ax},{ay}) -> #{tgt} ({bx},{by})"
@@ -2523,6 +2649,10 @@ def run(args) -> int:
             if veto:
                 history.append(f"t{tick} | {ssum} | vetoed | {el} | {veto}")
             elif action == "click":
+                _ps = _stamp_side(sb, frame) if sb is not None else None
+                if _ps and executed.startswith("click"):
+                    # the press is the 'stamped' record (user decision loop16); the ink is next tick's informative read
+                    eff += f" | {_ps.upper()} pressed at tick {tick} (passport counts as stamped {_ps.upper()})"
                 history.append(f"t{tick} | {ssum} | click | {el} | {eff}")
             elif action == "drag":
                 tl = f"'{short(desc.get(tgt, 'nothing'), 50)}'"
@@ -2564,7 +2694,8 @@ def run(args) -> int:
             ent.last_under = facts.get("passport_under") or []
             rec["passport_under"] = ent.last_under
             ent.after_action(tick, state, action, sb, tb, frame, changed,
-                             src_desc=desc.get(str(src), "") if src is not None else "")
+                             src_desc=desc.get(str(src), "") if src is not None else "",
+                             sent=bool(executed.startswith(("click", "drag")) and not args.dry_run))
             if len(ent.log) != n_resets:
                 n_resets = len(ent.log)
                 refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0
@@ -2637,7 +2768,7 @@ def main(argv=None, result: dict | None = None) -> int:
                     "detector-labelled objects are never dropped; drop-target regions come on top)")
     ap.add_argument("--send-format", choices=("png", "jpeg"), default="png", help="png: smaller than jpeg on pixel art (~80 vs ~170 KB)")
     ap.add_argument("--jpeg-quality", type=int, default=90)
-    ap.add_argument("--history", type=int, default=10, help="past actions listed in the request-2 text")
+    ap.add_argument("--history", type=int, default=30, help="past actions listed in the request-2 text")
     ap.add_argument("--frames", nargs="+", help="offline: run on saved frames (no game window, no input)")
     ap.add_argument("--sequential", action="store_true",
                     help="offline: the frames are consecutive ticks of one run -- carry entrant memory, history, "

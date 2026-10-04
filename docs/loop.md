@@ -34,26 +34,35 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
    counted as ticket / flyer / passport by any step, the state block says it is not known, and manual step B
    says to drag unread papers to the desk so they can be read. The old B3 cap (`b3_n`) is gone.
 4. **State block** (request-2 text): facts only, each TOD reading labelled "your reading"; TOD's own verdict answer
-   and p ("Your verdict for this entrant (your own answer, this frame|tick N)"); "stamped" only as TOD's ink
-   reading; stamp presses as history ("a press; whether it marked the passport is the stamp-ink reading"). Removed:
+   and p ("Your verdict for this entrant (your own answer, this frame|tick N)"); "stamped" = TOD's executed
+   stamp press (loop16, user decision: "Stamp pressed: APPROVED at tick N"); the stamp-ink reading is shown as an
+   informative fact only ("Stamp ink on the passport (informative): ...", with "the press may have missed" when a
+   press is on record and no ink side was read) so TOD can see a missed press and press again. Removed:
    "Section 5 applied ... -> X", "the passport is under the wrong stamp: drag it onto X", "the next step is C",
    "Click the stamp the passport is lying under", "The decision is not known yet ... the stamps are not offered",
    the LOOP WARNING, "EXPIRED / not expired" and "(NOT) a valid issuing city".
 5. **Options**: both stamps are always offered when the tray is open (no verdict-, press- or ink-based hiding).
    A tray toggle loop (>= 3 open/close in 8 ticks without a press) strikes the CLOSING tab through via
    `stuck.ban` before request 2 (4 ticks) with the reason in RULED OUT and a `TRAY LOOP:` line at the top of the
-   history. The hand-back target is offered once TOD read stamp ink (or in G2 / step N). Desk regions on the
+   history. The hand-back target is offered once a stamp press of TOD's executed for this entrant (or in G2 / step N);
+   it is never gated on an ink re-read (runs 210453 t20 / 211624 t17: the APPROVED press inked the visa page,
+   STAMP_INK_Q read 'none' 0.59-0.89, nothing was handed back until 18:00). Desk regions on the
    vision extractor come from the frame or are dropped (`target_source: dropped`); `anchors.json` was removed.
 6. **Request 2**: `action` (click / drag / wait; its question text is the manual section 2 line
    `manual.INPUT_LINE` "Click for stamps/buttons/horn/page corners, drag for papers and the tray tab."), `source`
    (each element's option text ends with its input as a screen fact from its class, `manual.affordance_text`:
    "— click (press to stamp)", "— click", "— drag"), `target`. `decide` executes TOD's answers: no tab re-pick, no tab-target rewrite,
-   no desk re-drop re-pick, no click/drag coercion. A convention mismatch is logged (`convention_mismatch`, note)
-   and executed as chosen. A citation/flyer dropped onto a strip / the tray edge / (citation) the entrant is
+   no desk re-drop re-pick. A convention mismatch is logged (`convention_mismatch`, note); a click on a drag
+   element (paper, tray tab) is executed as chosen; a drag on a press-only element is a click (input conventions
+   below). A citation/flyer dropped onto a strip / the tray edge / (citation) the entrant is
    REFUSED (no input, logged), never redirected.
 7. **Guards that remain** (they refuse or exclude, never pick): stamp press refused unless TOD's strip answer puts
    the passport under that stamp; delete/trash veto on menus; stuck / repeat-drag / cycle exclusions; stop rules.
-8. **Entrant memory**: carries TOD's own readings and answers (country, EXP., city, ticket, ink, verdict). The
+8. **Entrant memory**: carries TOD's own readings and answers (country, EXP., city, ticket, ink, verdict) and
+   every executed stamp press (`stamp_clicks` [(tick, side)], recorded when the press input was sent on a stamp
+   the passport lay under, whether or not the pixel check saw a change). The history block (last 30 actions,
+   `--history 30`) shows the press ("APPROVED pressed at tick N (passport counts as stamped APPROVED)") and its
+   effect, and the state summary of later lines carries "STAMPED(APPROVED pressed tN), ink read none p=..". The
    hand-back is TOD's `passport_returned` answer: `returned` -> entrant done (`handed_back`); with an entrant paper
    (passport / ticket / flyer / unread) still named on the desk or counter while the person stays -> G2
    (`waiting_docs`); `still_here` -> the drop was not a hand-back. HANDBACK_STAY / HANDBACK_DOCS_STAY and the
@@ -61,6 +70,33 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
 9. `passport_sides` (strip): TOD's `passport_under_<side>` decides at p >= 0.6 (yes) or <= 0.4 (no). Only in
    between (or not asked) does the pixel paper test + TOD's identity "passport" of the strip paper break the tie;
    `strip[side].source` = `tod` / `pixel_tiebreak` / `tod_identity_*` in the tick json.
+
+### Input conventions (loop16)
+
+TOD's pick is the ELEMENT; actuating it is the input layer's job. `decide`:
+- `action=drag` on a press-only element -- a stamp, the horn, a button, a page corner, the inspect toggle, a day
+  tile, NEXT/CONTINUE text (`_cls` == click) -- is executed as a click, logged
+  `input_convention="drag->click (press-only element)"` and `convention_mismatch`; TOD's own answer stays in
+  `tod_pick` (run 211624: 20 APPROVED stamp drags vs 6 clicks). The stamp-press guard (passport under that stamp)
+  applies to the click.
+- papers and the tray tab keep TOD's action (click or drag), a mismatch is only logged.
+
+### Strip drop geometry (loop16)
+
+`strip_plan` (loop.py) replaces the old visa-centre-on-the-region-centre point: the sheet is the FULL open passport
+(`layout.full_sheet_box`) anchored on its visible box -- a box trimmed by a paper lying across it (5d1669c splits
+the passport around the entry ticket) or cut by the stamp bar extends past the covered edge, uncovered edges are
+real; the grab point lies on the passport, not on the paper across it (`layout.passport_grab_point`); the visa page
+(upper half) is centred on the head footprint (`layout.head_footprint`: STRIP_X width centred on the detected
+stamp box, rows STRIP_Y), the data page kept on the frame; `strip_plan` in the tick json logs grab / drop /
+planned / visa / foot / `inside` (visa page contains the footprint) / `trimmed`. The desk drop (`desk_target`)
+uses the same sheet anchoring and grab point. A paper lying across the open passport (`paper_on_passport`, >= 30%
+of that paper on the sheet) is a state-block fact and gets its own target "clear desk space off the passport"
+(`desk_aside`, a clear_desk_spot for that paper with the passport as obstacle); manual E: move it off first.
+Measured (loop16 frames): after the strip drag the passport sat at x 420-561 (Day 3, 210453 t19 / 211624 t17)
+vs 429-568 (Day 2, 164732 t43), top under the bar edge (y 212) in both: -8/-9 px in x, 0 in y; the visa page
+covered the APPROVED footprint (455-521) in both, and the Day 3 presses did ink (green mark visible at the visa
+top, 210453 t21, 211624 t18). The 205418 "t14 press" was a stamp drag with an empty strip.
 
 Still code (borderline, by design): question selection (which questions are asked, from the previous tick and a
 pixel tray test), drop-point geometry (desk spot, strip point), fixed-layout controls and targets in the hybrid

@@ -157,7 +157,9 @@ E0. A paper that is NOT the passport (the rulebook, the bulletin, a transcript; 
 E. The stamp tray is open, the passport lies under a stamp head (the state block says "The passport is
    under: APPROVED" or "DENIED"), and it is NOT stamped yet (no stamp ink is read on it, see F): decide with
    section 5, then click the stamp the passport is lying under; if you want the
-   other decision, first drag the passport to the other strip. ONE click. Clicking the stamp the passport is
+   other decision, first drag the passport to the other strip. ONE click. If the state block says a paper (the
+   entry ticket) lies across the open passport, first drag that paper off it onto the "clear desk space" /
+   "desk" target so the passport lies clear, then drag the passport by its own visible part. Clicking the stamp the passport is
    NOT under stamps nothing (the press is refused). Decide only when every reading today's rule needs is known
    -- the state block lists your own readings (issuing country, and from Day 2 the EXP. date and ISS. city, on
    Day 3 the entry ticket of a foreigner). If one is not read yet (your verdict was cannot_decide_yet), do not
@@ -168,15 +170,16 @@ H. INSPECT MODE (the state block says "Inspect mode is ON": desk darkened, red d
    inspect-mode button at the lower right of the desk once to leave it, then continue with the matching step.
    Inspect mode is not needed on Days 1-3 except in step N (no passport presented): the button is only offered
    while inspect mode is on or in step N, and in step N you stay in inspect mode until the interrogation is done.
-F. The passport IS STAMPED: the state block says "Stamp ink on the passport: APPROVED" or "DENIED" (ink read
-   on its page). A stamp press alone ("a stamp was clicked at tick N") is not proof: the press may have missed.
-   Then STOP clicking stamps and hand the papers back by dragging them onto the person at the window ("the
+F. The passport IS STAMPED: the state block says "Stamp pressed: APPROVED at tick N" or "DENIED at tick N" (your
+   press on the stamp the passport lay under was executed). The state block also shows the stamp-ink reading of
+   the passport page as a fact: if it says no ink is visible and you see no mark either, the press may have missed
+   -- you may press that stamp once more. Otherwise STOP clicking stamps and hand the papers back by dragging them onto the person at the window ("the
    entrant at the booth window -- drop documents ON THE PERSON to hand them back"). ORDER: the entrant leaves
    the moment the PASSPORT is back, and any paper still on the desk is left behind. So FIRST drag every OTHER
    paper of the entrant's (the entry ticket from Day 3) onto the person, one per turn; the stamped PASSPORT goes
    back LAST. While the state block names an entry ticket on the desk or the counter shelf, hand that back, not
    the passport. The open stamp tray does not have to be closed first; drag a paper by the part that is visible.
-F2. WRONG STAMP: the state block says which ink is on the passport. If it was stamped APPROVED but the
+F2. WRONG STAMP: the state block says which stamp was pressed. If it was stamped APPROVED but the
    rule (section 5) says DENIED, click DENIED once more -- a DENIED stamp overrules APPROVED -- then hand it
    back. If it was stamped DENIED but should have been APPROVED, it cannot be fixed (DENIED always wins and
    an APPROVED stamp on top does not count): hand it back as it is. The first two mistakes of each day are
@@ -258,7 +261,7 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
 - Clicking the loudspeaker over and over while the entrant was still at the window.
 - Clicking the clock/date drawer: it does nothing useful.
 - Run 20261002_083908: the passport was stamped DENIED at tick 9, then the stamps were clicked 10 more
-  times instead of handing it back. Once stamp ink is read on the passport, hand the passport back.
+  times instead of handing it back. Once the stamp press is on record, hand the passport back.
 - Run 20261002_083908: the stamp was chosen while the issuing country was not yet visible (it read "other"
   with only the visa page in view). Stamp only once the country name has been read.
 - Leaving the passport hidden behind the open tray and clicking the loudspeaker: nothing happens; close
@@ -676,12 +679,21 @@ def ink_now(state: dict, facts: dict | None) -> dict | None:
 
 
 def stamped(state: dict, facts: dict | None) -> list[str]:
-    """['ink'] when TOD read stamp ink on the passport (this tick, or carried for this entrant as mark_side), else
-    [] (manual rule F). A stamp press that changed pixels is NOT a stamped sign (audit B19)."""
-    return ["ink"] if ink_now(state, facts) or (facts or {}).get("mark_side") else []
+    """['pressed'] once TOD's stamp press was executed for this entrant (a stamp TOD picked, the passport under it
+    by TOD's strip answer, the input sent: entrant memory `stamp_clicks`), else [] (manual rule F). User decision
+    loop16 (runs 210453 t20 / 211624 t17: the APPROVED press inked the visa page, STAMP_INK_Q read 'none' 0.59-0.89,
+    no hand-back until 18:00): the ink reading is an informative fact in the state block, never the gate."""
+    return ["pressed"] if (facts or {}).get("stamp_clicks") else []
+
+
+def pressed_side(facts: dict | None) -> str | None:
+    """Side of the last executed stamp press for this entrant."""
+    sc = (facts or {}).get("stamp_clicks") or []
+    return sc[-1][1] if sc else None
 
 
 def ink_side(state: dict, facts: dict | None) -> str | None:
+    """Which ink TOD read (informative only, see stamped)."""
     ms = ink_now(state, facts) or (facts or {}).get("mark_side")
     return ms["value"] if ms else None
 
@@ -885,14 +897,16 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         if k == "passport_shows_stamp_mark":   # 'stamped' = TOD's ink reading (STAMP_INK_Q), never a pixel change
             ink = ink_now(state, facts)
             ms = ink or facts.get("mark_side")
+            # informative only (user decision loop16): 'stamped' is the executed press (stamped / pressed_side)
             if ms:
                 where = "this frame" if ink else f"tick {ms['tick']}"
-                lines.append(f"- Stamp ink on the passport: {ms['value'].upper()} (your reading, {where}, "
-                             f"p={ms['p']:.2f}): the passport is stamped {ms['value'].upper()}")
+                lines.append(f"- Stamp ink on the passport (informative): {ms['value'].upper()} (your reading, {where}, "
+                             f"p={ms['p']:.2f})")
             elif "passport_stamp_ink" in state:
                 a_ = state["passport_stamp_ink"]
-                lines.append(f"- Stamp ink on the passport: none read (your reading this frame: {a_['value']}, "
-                             f"p={a_['p']:.2f})")
+                lines.append(f"- Stamp ink on the passport (informative): no ink side read (your reading this frame: "
+                             f"{a_['value']}, p={a_['p']:.2f})" + (" -- a press is on record; if no mark shows, the "
+                             "press may have missed" if facts.get("stamp_clicks") else ""))
             continue
         lines.append(f"- {_LABEL[k]}: {_yn(state, k)}")
     for k in ("no_documents_presented", "interrogate_prompt_visible"):
@@ -927,8 +941,8 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         lines.append("- Passport data page readable: no (" + "; ".join(why) + "); the 'clear desk space' target "
                      "moves it so the whole page shows")
     for t, side in facts.get("stamp_clicks") or []:
-        lines.append(f"- The {side.upper()} stamp was pressed at tick {t} and the screen changed (a press; whether it "
-                     "marked the passport is the stamp-ink reading)")
+        lines.append(f"- Stamp pressed: {side.upper()} at tick {t} (your press, the passport lay under the {side.upper()} "
+                     "stamp; the passport counts as stamped from then on)")
     for t, side in facts.get("missed_stamps") or []:
         lines.append(f"- The {side.upper()} stamp was clicked at tick {t} while the passport lay under the other "
                      "stamp: nothing was stamped")
@@ -945,6 +959,11 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         if wrong:
             lines.append(f"- A paper that is NOT the passport lies under the {' and '.join(w.upper() for w in wrong)} "
                          "stamp (a stamp press there is refused)")
+    pop = facts.get("paper_on_passport")
+    if pop:
+        lines.append(f"- A paper ({pop['id'].upper()}) lies across the open passport on the desk (it covers "
+                     f"{int(round(100 * pop['covered']))}% of the passport's box); the 'clear desk space off the "
+                     "passport' target takes it off the passport")
     tr = ticket_to_return(state, facts)
     if stamped(state, facts) and tr:
         lines.append(f"- The entrant's ENTRY TICKET still lies on the {tr} (the entrant leaves as soon as the "
@@ -1015,9 +1034,12 @@ def state_summary(state: dict, facts: dict | None = None) -> str:
     bits.append("tray open" if yes(state, "stamp_tray_open") else "tray closed")
     if (facts or {}).get("passport_under"):
         bits.append("passport under " + "+".join((facts or {})["passport_under"]))
-    st = stamped(state, facts)
-    if st:
-        bits.append("STAMPED(" + "+".join(st) + ")")
+    if stamped(state, facts):
+        t_, sd_ = (facts or {})["stamp_clicks"][-1]
+        bits.append(f"STAMPED({sd_.upper()} pressed t{t_})")
+    ik = state.get("passport_stamp_ink")
+    if ik:
+        bits.append(f"ink read {ik['value']} p={ik['p']:.2f}")
     if (facts or {}).get("handed_back") is not None:
         bits.append("handed back")
     if yes(state, "bulletin_or_rulebook_covering_desk"):
@@ -1190,7 +1212,7 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         kc = None
     vside = verdict_side(state, facts)   # TOD's own verdict answer (diagnostic: which step TOD's answer implies)
     if stamped(state, facts):
-        if ink_side(state, facts) == "approved" and vside == "denied":
+        if pressed_side(facts) == "approved" and vside == "denied":
             return "F2", "click DENIED (overrules APPROVED)"
         if ticket_to_return(state, facts):
             return "F0", "drag the entry ticket -> entrant (before the passport)"
