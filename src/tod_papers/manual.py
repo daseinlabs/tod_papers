@@ -361,9 +361,11 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS, 
             "no - only the empty dark wall with height marks is visible there"),
         "document_on_counter_shelf": _noul(
             "Look at the grey-green counter shelf directly under the booth window (left side). Does a "
-            "passport or other document lie on that shelf?",
-            "yes - a passport/document lies on the counter shelf under the window",
-            "no - the counter shelf is empty"),
+            "passport or other document lie on that shelf? The dark strip along the very bottom edge of the "
+            "picture (rulebook, bulletin, booklets, clock, date) is the desk edge, not the shelf: things there "
+            "do not count.",
+            "yes - a passport/document lies on the grey-green counter shelf under the window",
+            "no - the grey-green counter shelf is empty (bottom-edge desk objects do not count)"),
         "document_open_on_desk": _noul(
             "Look at the dark desk: the whole lower part of the picture to the right of the grey-green counter "
             "shelf (bottom-centre and bottom-right). Is an open passport (cream page with a name, numbers, a photo or "
@@ -579,7 +581,7 @@ def _reading(r: dict | None, fmt) -> str:
     return f"{fmt(r)} (your answer at tick {r['tick']}, p={r['p']:.2f})" if r else "not read yet"
 
 
-def verdict_question(day: str, mem: dict) -> dict:
+def verdict_question(day: str, mem: dict, counter_doc: bool = True) -> dict:
     """Request-1b `verdict` choice: today's rule as text + the readings TOD itself gave for this entrant on earlier
     ticks (`mem`: country / exp / city / ticket, each {value, p, tick} or None), labelled as TOD's own answers. TOD
     applies the rule; no code compares anything."""
@@ -599,11 +601,13 @@ def verdict_question(day: str, mem: dict) -> dict:
                             + ("\nA paper still lying on the counter shelf (below the window, not yet dragged onto the "
                                "desk) has not been read and may be the entry ticket: while any paper lies on the "
                                "counter, 'no entry ticket' is not a final reading -- answer cannot_decide_yet."
-                               if d == "3" else ""),
+                               if d == "3" and counter_doc else ""),
             "criteria": {"approved": "APPROVED: the entrant's papers meet today's rule",
                          "denied": "DENIED: the entrant's papers break today's rule",
                          "cannot_decide_yet": "a reading today's rule needs (country, EXP. date, ISS. city or, for a "
-                                              "foreigner on Day 3, the entry ticket) is missing or unreadable"}}
+                                              "foreigner on Day 3, the entry ticket) is not read yet or unreadable "
+                                              "(a reading of 'no entry ticket among the papers' IS a reading: the "
+                                              "rule decides it)"}}
 
 
 def tod_verdict(state: dict, facts: dict | None) -> dict | None:

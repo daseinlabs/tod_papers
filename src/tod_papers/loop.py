@@ -576,7 +576,8 @@ def doc_probe(tod: TodClient, frame: np.ndarray, args, facts: dict, day: str = "
             q.update(iq)
     if facts.get("ask_verdict"):
         # audit A1: the verdict is TOD's answer -- today's rule + TOD's own earlier readings, no code comparison
-        q["verdict"] = man.verdict_question(day, facts.get("verdict_mem") or {})
+        q["verdict"] = man.verdict_question(day, facts.get("verdict_mem") or {},
+                                              counter_doc=bool(facts.get("counter_doc")))
     for i, d in enumerate((facts.get("docs") or []) if docs else []):
         c = doc_cache_get(d, tick)
         if c:
@@ -1789,6 +1790,7 @@ def _clean_state(state: dict) -> dict:
 TRAY_FLIP_LIMIT = man.TRAY_FLIP_LIMIT
 TRAY_BAN_TICKS = 4   # a toggle-looping closing tab stays excluded this long (A5)
 NONBOOTH_STOP = 60   # step-7 ticks in a row (cutscenes, day_end, menus) before the run stops
+COUNTER_CLAUSE_P = 0.55  # verdict text names a paper on the counter only when TOD said so last tick
 STOP_SCREEN_P = 0.5  # --stop-on-screen counts a tick only when TOD's screen answer has at least this p
 REPEAT_DRAG_N = 4   # same drag source box (same place) N ticks running -> exclude the source
 HORN_HIDE_P = 0.7
@@ -2041,6 +2043,9 @@ def set_verdict_ask(df: dict, ent: "Entrant", prev_state: dict | None, prev_fact
             or any(d["where"] == "desk" and d["id"] == "passport" and d["p"] >= 0.5 for d in pf.get("docs_named") or []))
     df["ask_verdict"] = bool(seen and ent.handed_back is None and day in DAY_RULES)
     df["verdict_mem"] = ent.verdict_mem()
+    # TOD's own counter answer last tick gates the "paper still on the counter" clause (run 225459 t19-25: empty
+    # shelf, counter p 0.50, the clause held TOD at cannot_decide_yet for a no-ticket foreigner)
+    df["counter_doc"] = man.yes(ps, "document_on_counter_shelf", COUNTER_CLAUSE_P)
 
 
 def gate_inspection(state: dict, asked: tuple, df: dict | None = None) -> dict:

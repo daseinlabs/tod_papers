@@ -397,6 +397,9 @@ about 1 citation per Day 2, inside the 2 free warnings. The manual's Day 2 rule 
 
 ## `--pause-think` (harness timing feature, off by default; loop18 invisible suspend, 2026-10-03)
 
+**Demo configuration: pause OFF.** The flag is a test-harness aid only (the user judged the suspend visually
+unacceptable for the demo); `store_true`, default off, and nothing in `src/`, `tools/` or `deploy/` turns it on.
+
 The game clock is held while TOD thinks. No input is chosen by the harness: no key, no menu, no click -- the
 game process is frozen and thawed, nothing else. Per booth tick:
 1. grab the frame (game running) -> the only frame extraction and TOD see;
