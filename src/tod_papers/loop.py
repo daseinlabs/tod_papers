@@ -2045,7 +2045,13 @@ def set_verdict_ask(df: dict, ent: "Entrant", prev_state: dict | None, prev_fact
     df["verdict_mem"] = ent.verdict_mem()
     # TOD's own counter answer last tick gates the "paper still on the counter" clause (run 225459 t19-25: empty
     # shelf, counter p 0.50, the clause held TOD at cannot_decide_yet for a no-ticket foreigner)
-    df["counter_doc"] = man.yes(ps, "document_on_counter_shelf", COUNTER_CLAUSE_P)
+    # ... or TOD's own paper naming last tick left a counter paper unread / named it the entry ticket (run 231248
+    # t13-22 Patrica, t58-59 Ava: ticket on the counter, counter answer 0.17, 'no entry ticket' read -> wrong DENIED)
+    df["counter_doc"] = (man.yes(ps, "document_on_counter_shelf", COUNTER_CLAUSE_P) or any(
+        d["where"] == "counter" and d["id"] in (man.UNREAD, "entry_ticket") for d in pf.get("docs_named") or []))
+    tk = (ent.checks.get("entry_ticket_dated_today") or {})
+    if df["counter_doc"] and tk.get("raw") == "no_ticket":   # dry run 231248 t16-17: the clause alone left TOD at
+        df["verdict_mem"]["ticket"] = None                    # denied 0.54-0.69; the reading is not final -> not read
 
 
 def gate_inspection(state: dict, asked: tuple, df: dict | None = None) -> dict:
