@@ -186,6 +186,104 @@ On a **quiet** laptop (game paused), local 0.5–0.8 s still beats remote. Remot
 only pays off while the game is loading the machine, which is always the case during a
 live loop.
 
+## Where a tick goes (2026-10-04, L4 remote extraction, measured)
+
+Source: the tick JSONs of `runs/20261004_115735` (253 timed ticks) and `runs/20261004_101937`
+(179). Both ran with the game held during thinking (`suspend.held_s`). Tick wall time is
+the difference between consecutive `time` stamps. Remote extraction ran on the L4
+(g2-standard-8). Values are median / p90 in ms, 115735 first and 101937 in brackets.
+
+| Term | median | p90 | Notes |
+|---|---|---|---|
+| `extract_ms` (client total) | 1087 [1063] | 1378 [1367] | server 940 [895] + net/HTTP 84 [85] + encode 19 |
+| ... `srv_ocr_ms` | 833 [796] | 1096 [1037] | CPU (RapidOCR, 8 vCPU). This is the server's critical path. |
+| ... `srv_gdino_ms` / `srv_clip_ms` / `srv_icon_ms` | 369 / 170 / 24 | 448 / 258 / 31 | GPU work, runs alongside OCR |
+| `state_ms` (request 1) | 1672 [1739] | 2030 [1928] | runs in parallel with extraction |
+| `doc_ms` (request 1b) | 952 [902] | 1370 [1356] | starts *after* extraction, alongside the rest of request 1; 0 when no new paper |
+| `prep_ms` | 48 [58] | 73 [88] | SoM render + prompt |
+| `tod_ms` (request 2) | 1466 [1461] | 1934 [1847] | serial, after 1/1b |
+| think = max(state, extract+1b) + prep + tod | 3745 [3571] | 4486 [4430] | `held_s` equals this to within 3 ms (median) |
+| anim wait (`anim_wait_s`) | 170 | 180 | pre-grab stability check |
+| post-input wait (`post_wait_s`) | 350 | 900 | early verify grab at 0.35 s; the full 0.9 s only when nothing changed yet |
+| everything else (input, park, gt, log) | click 533, drag 773, wait 1140 | | `wait` includes the 1 s `--wait-s` sleep |
+| **tick wall** | **5058 [4961]** | 5821 [5728] | mean 6043 [4955] |
+| game running per tick (wall − held) | 1.3 s | 1.6 s | with the hold on |
+
+The **un-paused tick** (the demo config, hold off) is just the wall time without the hold.
+The hold itself costs about 3 ms (suspend 2 ms, resume 0.4 ms, plus keep-alive thaws), so
+the median is **~5.0-5.1 s** and the mean 5.0-6.0 s. Here is what is on the critical path of a
+median tick, and the share of the 5.06 s:
+
+- **TOD inference, our own API: 3.15 s (62 %)**. This is max(request 1, request 1b) plus
+  request 2. Mean 3.25 s of 6.04 s (54 %).
+- **Extraction: 0.28 s (6 %)**. This counts only the part not hidden behind request 1.
+  The full 1.09 s mostly overlaps with request 1. It reaches the path because 1b waits for
+  the boxes. Mean 0.69 s (11 %), p90 0.89 s.
+- **Harness: ~1.3 s (26 %)**. Anim wait 0.17 s, post-wait 0.35 s, input and bookkeeping
+  0.5-0.8 s. The mean is 2.0 s (34 %) because `wait` ticks sleep 1 s.
+
+### Game time per tick and entrants per day
+
+Game clock rate is from `gt.clock` deltas on booth ticks. Held runs give 2.21 / 2.23
+game-min per *unheld* second (115735 / 101937). The unpaused run `20261003_164732` gives
+2.02 overall, and its booth-tick median is 2.97 (clock deltas are minute-quantised).
+`20261003_161058` stalls for 80 ticks with the clock frozen, so it is not used. Taking
+**~2.2 game-min per real second**, the 06:00-18:00 day (720 game-min) is **~327 s** of
+running game. Without the hold, a 5.06 s tick costs ~11 game-min.
+
+| un-paused tick | game-min / tick | entrants/day @ 8 ticks/entrant | @ 13 ticks/entrant |
+|---|---|---|---|
+| 6.5 s | 14.3 | 6.3 | 3.9 |
+| 5 s | 11.0 | 8.2 | 5.0 |
+| 4 s | 8.8 | 10.2 | 6.3 |
+| 3 s | 6.6 | 13.6 | 8.4 |
+
+The formula is 327 s / (tick × ticks per entrant). It ignores day-start and bulletin ticks.
+Day 3 has 8 entrants, so clearing it unpaused needs roughly ≤ 4 s ticks at 8-10 ticks per entrant.
+
+### A100 vs L4 (2026-10-04)
+
+Quota was available: `NVIDIA_A100_GPUS` 16 per region in us-west1, us-central1 and us-west4.
+`gcp_l4_spot.sh <cmd> --a100` creates a separate VM, `tod-extract-a100`. It is an
+a2-highgpu-1g (1× A100-SXM4-40GB, 12 vCPU), on-demand, in us-west4-b, built from the same
+image and `remote_up.sh` with the current `extract.py`/`layout.py`. Its state lives in
+`deploy/.zone.a100`/`.name.a100`, and its tunnel is on localhost:8766. `up` to a warm
+`/health` took 714 s. Bench: 20 frames from `runs/20261004_115735/raw_*.png` (every 12th),
+one warm-up call, then `extract_remote` per frame, alternating servers, two passes.
+
+| server | server_ms med | ocr | gdino | clip | net | **total_ms med** |
+|---|---|---|---|---|---|---|
+| L4 g2-standard-8 (us-west1-c) | 909 / 877 | 813 / 810 | 386 / 362 | 161 / 176 | 85 / 125 | **1018 / 1041** |
+| A100 a2-highgpu-1g (us-west4-b) | 763 / 786 | 657 / 668 | 350 / 340 | 166 / 166 | 81 / 74 | **874 / 874** |
+
+The A100 is **~150 ms faster per extraction**, and almost all of that is OCR: 12 vCPUs
+against 8. The GPU stages are within 10 % of the L4, because DINO and CLIP were never
+the bottleneck. Only the part of extraction not hidden behind request 1 shows up in the
+tick. Replaying the two runs' timings with extraction 150 ms shorter saves **~0.10 s per
+tick on average (median 0.15 s)**, which is 2-3 % of a tick. The price is ~$3.7/h
+on-demand against ~$0.5/h for the L4 spot. More OCR cores on a g2 (g2-standard-12/16)
+should buy the same 150 ms for much less. Even free, instant extraction would save only
+0.28 s median / 0.69 s mean per tick.
+
+**The dominant term is TOD request latency**: request 1 at 1.67 s median, then request 2
+at 1.47 s, serial, 3.15 s on the path. Getting a tick to 4 s or 3 s needs TOD-side work
+(fewer or shorter requests, merging 1/1b/2, a faster serving path). Extraction hardware
+cannot get there.
+
+### Harness-side savings still available (measured)
+
+- **Post-input wait**: 0.35 s median, 0.9 s p90. Ticks where the early grab sees no
+  change wait the full 0.9 s. The verify grab could overlap the next tick's grab, since
+  the next tick grabs a frame anyway, saving up to 0.35-0.9 s.
+- **Input and bookkeeping residual**: 0.53 s per click, 0.77 s per drag. This includes the
+  0.1 s `park_cursor` sleep, the drag motion, the `gt` snapshot and the JSON log. The log
+  and `gt` could go to a thread.
+- **`wait` ticks**: 1.14 s residual (the 1 s `--wait-s` sleep).
+- **Anim wait**: 0.17 s (one 0.15 s stability interval). This is a small saving.
+- **Request 1b after extraction**: 0.28 s median of extraction is on the path only
+  because 1b needs the boxes. Starting 1b from the previous tick's boxes, when the desk is
+  unchanged, would hide it.
+
 ## Turning it on
 
 One-time:
