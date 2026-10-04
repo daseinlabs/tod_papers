@@ -512,6 +512,46 @@ def _yn(state: dict, k: str) -> str:
 
 
 NO_DOCS_HINT_RE = re.compile(r"NO DOCUMENTS|INSPECT mode|to interrogate", re.I)
+NO_DOCS_SLIP_RE = re.compile(r"NO\s*DOCUMENTS|INSPECT\s*mode", re.I)   # the slip itself (title / first line)
+GAME_SLIP = "game_slip"   # loop24: docs_named id of the game's 'THIS ENTRANT HAS NO DOCUMENTS' slip
+
+
+RB_TAB_CAP = "rulebook contents entry '{}' -- click it to open that page"
+RB_CORNER_CAP = "rulebook next-page corner (bottom-right of the right-hand page) -- click it to turn one page forward"
+
+
+def n2_text(state: dict, facts: dict) -> str:
+    """loop24 step N2 (run 031627 t131-144: 14 clicks on the LEFT page's corner, the page stayed CONTENTS): the page
+    TOD says is open, where the rule is, and which offered element gets there (loop.rulebook_nav)."""
+    rp = (state.get("rulebook_page") or {}).get("value", "other")
+    nav = facts.get("rulebook_nav") or {}
+    s = (f"The rulebook is open on page {rp.upper().replace('_', ' ')} (your rulebook_page answer); the rule you need "
+         "is on 'Basic Rules'.")
+    if nav.get("tab"):
+        s += f" Click the element \"rulebook contents entry '{nav['tab']}'\" (the contents entry opens that page)."
+        if nav.get("corner"):
+            s += " The next-page corner also turns forward one page."
+    elif nav.get("corner"):
+        if rp == "contents" and nav.get("covered"):
+            s += " The game's notice covers the 'Basic Rules' contents entry;"
+        s += (" click the element 'rulebook next-page corner' (bottom-right of the RIGHT-hand page"
+              + (", visible below the notice" if nav.get("covered") else "") + ") to turn one page forward. "
+              "A corner at the middle (spine) of the book is not it.")
+    else:
+        s += " Click the bottom-right corner of the right-hand page to turn one page forward."
+    return s
+
+
+def game_slip(facts: dict | None) -> list[str]:
+    """loop24 (run 031627 t144-156): the OCR lines of the game's own slip 'THIS ENTRANT HAS NO DOCUMENTS / To proceed,
+    use INSPECT mode to interrogate' when it is on the desk ([] otherwise). It is the game's notice, never an entrant
+    paper, and confirms TOD's no_documents_presented."""
+    lines = [t for t in (facts or {}).get("desk_text") or [] if NO_DOCS_HINT_RE.search(t)]
+    if not any(NO_DOCS_SLIP_RE.search(t) for t in lines):
+        return []
+    # the slip's own lines, not a vision panel that merged the rulebook page with the slip
+    own = [t for t in lines if not re.search(r"CONTENTS|Arsto|Ministry|REGULATIONS", t, re.I)] or lines
+    return [short_text(t, 90) for t in own[:3]]
 
 
 DESK_LINE_MAX = 120    # loop21: request-2 desk OCR line cap (chars)
@@ -847,8 +887,15 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     rp = state.get("rulebook_page")
     if rp:
         lines.append(f"- Rulebook page open on the desk: {rp['value'].upper()} (p={rp['p']:.2f})")
+    slip = game_slip(facts)
     for d in facts.get("docs_named") or []:
         where = "counter shelf" if d["where"] == "counter" else "desk"
+        if d["id"] == GAME_SLIP:
+            lines.append(f"- On the desk ({d['pos']}): the GAME's own notice (not a paper of the entrant): "
+                         + " / ".join(slip[:2]))
+            continue
+        if d["id"] == UNREAD and slip and d["where"] == "desk":
+            continue   # loop24: a slice of the rulebook / notice the slip cut off; not an entrant paper
         if d["id"] == UNREAD:
             st = d.get("stowed")
             lines.append(f"- Paper on the {where} ({d['pos']}): UNREAD (what it is could not be read: best identity "
@@ -1028,8 +1075,12 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
     if step.startswith("N"):
         out.append("The person has handed over no documents: there is nothing to stamp. Ask for the passport with "
                    "inspect mode.")
+        slip = game_slip(f)
+        if slip:
+            out.append("The game's notice on the desk (not a paper of the entrant) confirms it: \"" + " / ".join(slip[:2])
+                       + "\".")
         out.append({"N1": "The rulebook is not open: drag it from its slot onto the 'desk' target (not the shelf).",
-                    "N2": "The rulebook is open on another page: click its page corner until Basic Rules shows.",
+                    "N2": n2_text(state, f),
                     "N3": "The rulebook shows Basic Rules: click the red inspect-mode button.",
                     "N4": "Inspect mode is on: click the rule line 'Entrant must have a passport', then the empty "
                           "counter shelf.",
@@ -1258,10 +1309,15 @@ def no_passport(state: dict, facts: dict | None = None) -> bool:
     no_documents 0.66 with counter 0.64 and the passport on the counter -> step B, not N). Loop22 (run 021346
     t30-55): a paper TOD's identity answer leaves UNREAD (or names a ticket) on the desk / counter is not "no
     documents" either -- it is read first (no_documents 0.62-0.66 with the passport back on the shelf, unread)."""
-    if (not yes(state, "no_documents_presented", NO_DOCS_P) or not yes(state, "person_at_window")
+    # loop24 (run 031627 t144-156): the game's own slip 'THIS ENTRANT HAS NO DOCUMENTS' confirms TOD's answer (TOD
+    # still has to say no documents, p >= 0.5); with it on the desk an unread DESK box (a slice of the rulebook the
+    # slip cuts off, or the slip itself) is no entrant paper
+    slip = bool(game_slip(facts))
+    if (not yes(state, "no_documents_presented", 0.5 if slip else NO_DOCS_P) or not yes(state, "person_at_window")
             or yes(state, "document_on_counter_shelf")):
         return False
-    return not any((d["id"] == "passport" and d["p"] >= 0.5) or d["id"] in ("unread", "entry_ticket")
+    return not any((d["id"] == "passport" and d["p"] >= 0.5) or d["id"] == "entry_ticket"
+                   or (d["id"] == UNREAD and not (slip and d["where"] == "desk"))
                    for d in (facts or {}).get("docs_named") or [])
 
 

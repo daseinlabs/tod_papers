@@ -722,6 +722,12 @@ def name_docs(state: dict, df: dict) -> list[dict]:
         a = a if a else ({"value": d["cached"]["id"], "p": d["cached"]["p"]} if d.get("cached") else None)
         if not a:
             continue
+        if (a["value"] not in ("rulebook", "bulletin") and any(man.NO_DOCS_SLIP_RE.search(t) for t in d.get("text") or ())
+                and not any(re.search(r"PASSPORT|ENTRY TICKET|CITATION", t, re.I) for t in d.get("text") or ())):
+            # loop24 (run 031627 t144-156): the game's slip 'THIS ENTRANT HAS NO DOCUMENTS' is its notice, never an
+            # entrant paper (not unread, not a ticket / passport for any step)
+            out.append({**d, "id": man.GAME_SLIP, "raw_id": a["value"], "p": a["p"]})
+            continue
         if a["p"] < man.IDENTITY_MIN_P:
             # identity gate (ticket_flyer_identity notes section 6): a near-uniform answer is no identity. The
             # paper is 'unread' and never counts as a ticket, flyer or passport for any step
@@ -1608,6 +1614,62 @@ def cap_options(src_ids: dict, tgt_ids: dict, idmap: dict, doc_ids, booth: bool)
     return {k: v for k, v in src_ids.items() if k not in drop}
 
 
+RB_CORNER_TPL = os.path.join(os.path.dirname(__file__), "rulebook_corner.png")   # native dog-ear, run 031627 t131
+RB_CORNER_MAX = 0.08   # TM_SQDIFF_NORMED: 0.0 on the corner in t131-156 (slip on or off), next best 0.06
+RB_TAB_RE = re.compile(r"^\s*(Basic Rules|Regional Map|Booth Info)\b", re.I)
+_RB_TPL = []
+
+
+def rulebook_nav(frame: np.ndarray, state: dict, facts: dict | None) -> tuple[list[Box], dict]:
+    """loop24 step N2 (run 031627 t131-144: 14 clicks on the left page's corner at the spine, the page stayed CONTENTS;
+    the right page's corner lies 62% on the 'DRAG DOCUMENTS HERE' label and merge_hybrid dropped it, and with the slip
+    on the desk vision found no right-page panel at all). Click targets for paging the open rulebook: its next-page
+    dog-ear (template match on the native frame, desk only) and, on CONTENTS, the section entries (local OCR over the
+    desk, one ~1 s call, only while TOD says the rulebook is open on a page other than Basic Rules)."""
+    H, W = frame.shape[:2]
+    sx, sy = W / layout.NATIVE_W, H / layout.NATIVE_H
+    native = cv2.resize(frame, (layout.NATIVE_W, layout.NATIVE_H), interpolation=cv2.INTER_NEAREST)
+    out, info = [], {}
+    if not _RB_TPL:
+        _RB_TPL.append(cv2.imread(RB_CORNER_TPL))
+    tpl = _RB_TPL[0]
+    dx1, dy1, dx2, dy2 = layout.DESK
+    if tpl is not None:
+        r = cv2.matchTemplate(native[dy1:dy2, dx1:dx2], tpl, cv2.TM_SQDIFF_NORMED)
+        mn, _, (mx, my), _ = cv2.minMaxLoc(r)
+        info["corner_score"] = round(float(mn), 4)
+        if mn <= RB_CORNER_MAX:
+            th, tw = tpl.shape[:2]
+            x1, y1 = dx1 + mx, dy1 + my
+            # click box: the fold (template) plus the page tip below / right of it
+            b = layout.LBox(int((x1 - 2) * sx), int((y1 - 3) * sy), int((x1 + tw + 1) * sx), int((y1 + th + 1) * sy),
+                            "", "page_corner", 1.0, caption=man.RB_CORNER_CAP, name="rulebook_corner",
+                            affordance="click")
+            out.append(b)
+            info["corner"] = [b.x1, b.y1, b.x2, b.y2]
+    if (state.get("rulebook_page") or {}).get("value") == "contents":
+        try:
+            s = round(W / layout.NATIVE_W)
+            crop = cv2.resize(frame, (W // s, H // s), interpolation=cv2.INTER_NEAREST)[dy1:dy2, dx1:dx2].copy()
+            t0 = time.perf_counter()
+            lines = ex._ocr_boxes(crop, s)
+            info["ocr_ms"] = round((time.perf_counter() - t0) * 1e3)
+        except Exception as e:   # local OCR missing: the corner alone
+            lines, info["ocr_error"] = [], repr(e)[:80]
+        for t in lines:
+            m = RB_TAB_RE.search(t.text or "")
+            if not m:
+                continue
+            name = " ".join(w.capitalize() for w in m.group(1).split())
+            b = layout.LBox(t.x1 + dx1 * s, t.y1 + dy1 * s, t.x2 + dx1 * s, t.y2 + dy1 * s, "", "text", 1.0,
+                            caption=man.RB_TAB_CAP.format(name), name="rulebook_tab", affordance="click")
+            out.append(b)
+            info.setdefault("tabs", []).append(name)
+        info["tab"] = "Basic Rules" if "Basic Rules" in info.get("tabs", []) else None
+        info["covered"] = info["tab"] is None and bool(man.game_slip(facts))
+    return out, info
+
+
 def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str, args,
             stuck: "StuckTracker | None" = None, tick: int = 0, facts: dict | None = None) -> dict:
     """Everything between (extract + request 1) and request 2: drop-target
@@ -1701,6 +1763,18 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         # run 021438 t3: TOD clicked the red inspect button; inspect mode froze every drag for 8 ticks. Days 1-3 need
         # no inspect mode, so the button is offered only while TOD says inspect mode is on (to leave it)
         boxes = [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"]
+    rp_now = (state.get("rulebook_page") or {}).get("value", "not_open")
+    if nopp and not man.yes(state, "inspect_mode_on") and rp_now not in ("not_open", "basic_rules"):
+        # loop24 step N2: the rulebook's next-page corner + the CONTENTS entries (rulebook_nav) replace vision's page
+        # corners on the desk (run 031627 t131-144: the left page's spine corner clicked 14x, nothing turned)
+        nb, rb_info = rulebook_nav(frame, state, facts)
+        if facts is not None:
+            facts["rulebook_nav"] = rb_info
+        if nb:
+            dx1_, dy1_, dx2_, dy2_ = layout.scale_box(layout.DESK, W, H)
+            boxes = [b for b in boxes if not (
+                (b.kind == "page_corner" and dx1_ <= b.center[0] <= dx2_ and dy1_ <= b.center[1] <= dy2_)
+                or (b.kind == "text" and any(_iou(b, n_) > 0.3 for n_ in nb)))] + nb
     if booth:
         # a press there toggles inspect mode whatever the element is called: run 081222/082950 dragged an entry
         # ticket by its proposed page corner / 'document under the tray' box at (2256,1256)/(2218,1232) -> inspect
@@ -1781,7 +1855,8 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
             continue
         for j, d in enumerate(dn_all):
             x1, y1, x2, y2 = d["box"]
-            if x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 and getattr(b, "name", "") not in layout.BY_NAME:
+            if (x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 and getattr(b, "name", "") not in layout.BY_NAME
+                    and not getattr(b, "name", "").startswith("rulebook_")):   # loop24: rulebook_nav click targets
                 rest = desc[str(i)].split(" — ", 1)[-1]   # drop the detector kind; TOD's identity names it
                 if d["id"] == man.UNREAD:   # identity gate: no name below IDENTITY_MIN_P
                     wh = "counter" if d["where"] == "counter" else "desk"
@@ -2339,7 +2414,7 @@ def offline(args) -> int:
             "inspect_asked": list(asked), "desk_facts": df,
             "manual_step_for_state (diagnostic, not sent)": step, "regions": P["regions"],
             "target_source": {n: v["target_source"] for n, v in P["regions"].items()},
-            "text_chars": P["text_info"], "state_text": P["state_text"], "state_text_words": len(P["state_text"].split()),
+            "text_chars": P["text_info"], "rulebook_nav": facts.get("rulebook_nav"), "state_text": P["state_text"], "state_text_words": len(P["state_text"].split()),
             "criteria": P["desc"],
             "answers": {q: {"choice": a.value, "probabilities": a.probabilities} for q, a in res.answers.items()},
             "action_top3": top(res["action"].probabilities),
@@ -2682,6 +2757,8 @@ def run(args) -> int:
             t1 = time.perf_counter()
             try:
                 rec["text_chars"] = P["text_info"]   # loop21: logged before the ask (a 413 tick keeps it)
+                if facts.get("rulebook_nav") is not None:
+                    rec["rulebook_nav"] = facts["rulebook_nav"]
                 print(f"[tick {tick:03d}] text_chars={P['text_info']['text_chars']} "
                       f"state={P['text_info']['state_chars']} hist={P['text_info']['hist_kept']}")
                 res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
