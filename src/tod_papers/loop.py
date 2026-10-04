@@ -741,6 +741,9 @@ def doc_cache_put(d: dict, a: dict, tick: int) -> None:
                       "p": a["p"], "tick": tick, "seen": tick})
 
 
+SLIVER_H = 14   # loop26: native px; a desk box thinner than this in the open bar band gets no identity
+
+
 def name_docs(state: dict, df: dict) -> list[dict]:
     """df['docs'] + TOD's identity answer for each (state['doc<i>'], or the cached answer for an unchanged paper)."""
     out = []
@@ -754,6 +757,14 @@ def name_docs(state: dict, df: dict) -> list[dict]:
             # loop24 (run 031627 t144-156): the game's slip 'THIS ENTRANT HAS NO DOCUMENTS' is its notice, never an
             # entrant paper (not unread, not a ticket / passport for any step)
             out.append({**d, "id": man.GAME_SLIP, "raw_id": a["value"], "p": a["p"]})
+            continue
+        nb = d.get("native") or ()
+        if (d.get("where") == "desk" and len(nb) == 4 and nb[3] - nb[1] < SLIVER_H and df.get("tray_open_px")
+                and nb[1] <= layout.STRIP_Y[1] + 4):
+            # loop26 run 053633 t91-100 (Benjamen Kotul): the entry ticket under the DENIED head showed an 11 px
+            # strip [300,212,440,223] between the bar and a citation -> 'flyer' 0.56-0.66 -> K1 / E0, TOD dragged it
+            # onto the strip 4x (refused) -> stop. A sliver that thin in the bar band carries no identity.
+            out.append({**d, "id": man.UNREAD, "raw_id": a["value"], "p": a["p"], "sliver": True})
             continue
         if a["p"] < man.IDENTITY_MIN_P:
             # identity gate (ticket_flyer_identity notes section 6): a near-uniform answer is no identity. The
@@ -2813,6 +2824,7 @@ def run(args) -> int:
                               "missed_stamps": list(ent.missed_stamps), "handed_back": ent.handed_back,
                               "mark_side": ent.mark_side, "verdict": ent.verdict, "hb_drop": ent.hb_drop}
             rec["clutter"] = facts.get("clutter")
+            rec["stowed_spots"] = [dict(x) for x in STOWED_SPOTS[-4:]]   # loop26: replay seeds them
             step = man.situation(state, day if day in DAY_RULES else "1", facts)
             ent.step_seen(step[0])
             sline = state_line(state)
