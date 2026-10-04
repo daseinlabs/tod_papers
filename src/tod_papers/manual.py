@@ -1206,11 +1206,14 @@ def ticket_to_return(state: dict, facts: dict | None) -> str | None:
 def no_passport(state: dict, facts: dict | None = None) -> bool:
     """Step N: TOD (request 1) says the person at the window has handed over no documents (p >= NO_DOCS_P), and
     TOD's other answers agree: nothing on the counter shelf, no paper TOD named the passport (run 092642 t9:
-    no_documents 0.66 with counter 0.64 and the passport on the counter -> step B, not N)."""
+    no_documents 0.66 with counter 0.64 and the passport on the counter -> step B, not N). Loop22 (run 021346
+    t30-55): a paper TOD's identity answer leaves UNREAD (or names a ticket) on the desk / counter is not "no
+    documents" either -- it is read first (no_documents 0.62-0.66 with the passport back on the shelf, unread)."""
     if (not yes(state, "no_documents_presented", NO_DOCS_P) or not yes(state, "person_at_window")
             or yes(state, "document_on_counter_shelf")):
         return False
-    return not any(d["id"] == "passport" and d["p"] >= 0.5 for d in (facts or {}).get("docs_named") or [])
+    return not any((d["id"] == "passport" and d["p"] >= 0.5) or d["id"] in ("unread", "entry_ticket")
+                   for d in (facts or {}).get("docs_named") or [])
 
 
 def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[str, str]:
@@ -1279,7 +1282,11 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         if (yes(state, "person_at_window") and (facts or {}).get("tray_flips", 0) < TRAY_FLIP_LIMIT
                 and not yes(state, "document_on_counter_shelf")):
             return "D2", "drag tray tab -> right edge (close tray, reveal hidden passport)"
-    if yes(state, "document_on_counter_shelf") and not yes(state, "document_open_on_desk"):
+    if ((yes(state, "document_on_counter_shelf") or any(
+            d["where"] == "counter" and d["id"] in ("passport", "entry_ticket", UNREAD) and not f.get("stowed")
+            for d in f.get("docs_named") or []))
+            and not yes(state, "document_open_on_desk")):
+        # loop22 (021346 t30): counter 0.27 'no' but TOD's identity answer names a paper on the counter (unread)
         return "B", "drag passport (counter) -> desk"
     if yes(state, "document_open_on_desk") and not yes(state, "stamp_tray_open"):
         return "C", "drag tray tab -> left (open tray)"
