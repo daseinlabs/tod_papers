@@ -248,6 +248,9 @@ The first entrant of day 1 is the tutorial; follow the same rule (his passport i
   tile is DAY 1 / NEW). It is a tile, not a button. Never click BACK,
   QUIT, or the trash/delete icon on this screen: BACK returns to the main menu and undoes progress, the
   trash icon deletes the save. If no day tile is drawn yet, choose wait.
+  Clicking a tile opens a box under the tiles (the day's name, money, family) with CONTINUE and CANCEL text:
+  click CONTINUE to load that day (the upper of the two short lines at the bottom of the box; OCR may misspell
+  it, e.g. 'COHTIHUE'). Clicking a tile, or the box's own "Day N" title, does nothing while the box is open.
 - After the day tile, the intro, newspaper and bulletin screens advance with NEXT, then WALK TO WORK takes
   you to the booth. Full-screen text without a button: click the text.
 - End of day (the family budget screen: SAVINGS, SALARY, RENT, HEAT, FOOD, MEDICINE ..., a total, SLEEP): the

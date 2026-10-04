@@ -292,6 +292,9 @@ def day_tiles(n: np.ndarray) -> list[dict]:
         return []
     eng = ex._ocr3_en or ex._get_ocr3()
     labels = [b for b in lines if DAY_LABEL_RE.match(b.text or "")]
+    if labels:   # loop15: the open load box's title "Day 3" sits lower, in the centre -- it is not a tile
+        top = min(b.y1 for b in labels)
+        labels = [b for b in labels if b.y1 <= top + 8]
     out = []
     for lb in labels:
         lx1, ly1, lx2, ly2 = lb.x1 + x0, lb.y1 + y0, lb.x2 + x0, lb.y2 + y0
@@ -318,6 +321,38 @@ def day_tiles(n: np.ndarray) -> list[dict]:
         out.append({"day": int(num) if num else None, "text": (txt + (" " + inner if inner else "")).strip(),
                     "box": box})
     out.sort(key=lambda t: t["box"][0])
+    return out
+
+
+def dialog_lines(n: np.ndarray) -> list[dict]:
+    """Day-select screen below the tile row: every drawn text line, read by OCR (loop15). Clicking a day tile opens
+    a box (day name, money, CONTINUE / CANCEL); run 20261003_195240 t4-59: the text detector never found CONTINUE
+    (dim green on black), so lines are found as bright-pixel components and each is read by the recogniser.
+    BACK is not offered (main-menu exit, as before). Returns [{'text': str, 'box': native box}]."""
+    from . import extract as ex
+    y0 = TILE_BAND[3]
+    m = cv2.dilate((n[y0:].max(2) > 40).astype(np.uint8), np.ones((3, 9), np.uint8))
+    k, _, st, _ = cv2.connectedComponentsWithStats(m)
+    eng = ex._ocr3_en or ex._get_ocr3()
+    if eng is None:
+        return []
+    out = []
+    for i in range(1, k):
+        x, y, w, h, _a = st[i]
+        if w < 16 or not 5 <= h <= 40:
+            continue
+        box = (max(0, x - 2), y0 + y - 1, min(NATIVE_W, x + w + 2), min(NATIVE_H, y0 + y + h + 1))
+        c = n[box[1]:box[3], box[0]:box[2]]
+        up = cv2.copyMakeBorder(cv2.resize(c, None, fx=4, fy=4, interpolation=cv2.INTER_NEAREST),
+                                8, 8, 8, 8, cv2.BORDER_CONSTANT, value=0)
+        try:
+            r = eng.recognize_txt([up])
+            txt = (r.txts[0] if r.txts else "").strip()
+        except Exception:
+            txt = ""
+        if len(txt) >= 3 and txt.upper() != "BACK":
+            out.append({"text": txt, "box": box})
+    out.sort(key=lambda t: (t["box"][1], t["box"][0]))
     return out
 
 
@@ -864,6 +899,12 @@ def extract_static(frame_bgr: np.ndarray, targets: bool = True, informational: b
                 x1, y1, x2, y2 = scale_box(t["box"], W, H)
                 out.append(LBox(x1, y1, x2, y2, t["text"], "object", 1.0, caption="day tile",
                                 name=f"day_tile_{t['day'] or i}", affordance="click"))
+        lines = dialog_lines(n)
+        flags["dialog_lines"] = [t["text"] for t in lines]
+        for i, t in enumerate(lines):
+            x1, y1, x2, y2 = scale_box(t["box"], W, H)
+            out.append(LBox(x1, y1, x2, y2, t["text"], "text", 1.0, caption="text line under the day tiles",
+                            name=f"dialog_{i}", affordance="click"))
     if screen == "booth":
         for i, d in enumerate(docs):
             key = "desk_under_tray" if d.get("under_tray") else d["where"]
