@@ -271,6 +271,7 @@ class _Fail:
     banned_until: int = -1   # tick index (exclusive) until which the box is excluded
     last_tick: int = 0
     why: str = ""            # set for cycle bans: the line shown under RULED OUT instead of 'did nothing'
+    tray: bool | None = None  # loop26: repeat-drag ban made with the tray open/closed; lifted when that changes
 
 
 @dataclass
@@ -336,6 +337,15 @@ class StuckTracker:
             if f.banned_until > tick and _same_element(f.box, b):
                 return f
         return None
+
+    def lift_tray(self, tray_now: bool | None) -> list:
+        """loop26 (run 055938 t78-87, Cassandra Ramovska): the passport was dragged desk -> desk 3x with the tray
+        closed (repeat-drag ban), TOD opened the tray at t81, then D needed the passport on the strip but it was still
+        excluded; TOD dragged the flyer onto the strip 5x (refused) -> stop. The tray opening or closing gives the
+        paper new drop targets: a repeat-drag ban made under the other tray state is lifted."""
+        lifted = [f for f in self.fails if f.tray is not None and tray_now is not None and f.tray != tray_now]
+        self.fails = [f for f in self.fails if f not in lifted]
+        return lifted
 
     def active_bans(self, tick: int) -> list:
         return [f for f in self.fails if f.banned_until > tick]
@@ -2816,6 +2826,8 @@ def run(args) -> int:
                 cyc.reset()
             facts = ent.facts(tick, df)
             add_tod_facts(facts, state, df, sinfo)
+            if stuck.lift_tray(facts.get("tray_open_px")):
+                rec["ban_lifted"] = "tray state changed"
             if tick < cycle_note[1]:
                 facts["cycle_note"] = cycle_note[0]
             rec["docs_named"] = [{k: d[k] for k in ("where", "id", "p", "text")} for d in facts["docs_named"]]
@@ -3073,6 +3085,7 @@ def run(args) -> int:
                 drag_key, drag_n = dk + (sb,), (drag_n + 1 if same else 1)
                 if drag_n >= REPEAT_DRAG_N:
                     f = stuck.ban(tick, "drag", sb, src_desc, drag_n)
+                    f.tray = facts.get("tray_open_px")
                     print(f"           repeat drag: '{short(src_desc, 50)}' -> same target {drag_n}x, state unchanged "
                           f"-> excluded for {args.ban_ticks} ticks")
                     rec["repeat_drag_ban"] = {"src": src_desc, "n": drag_n}
