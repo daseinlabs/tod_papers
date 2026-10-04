@@ -157,7 +157,9 @@ E0. A paper that is NOT the passport (the rulebook, the bulletin, a transcript; 
 E. The stamp tray is open, the passport lies under a stamp head (the state block says "The passport is
    under: APPROVED" or "DENIED"), and it is NOT stamped yet (no stamp ink is read on it, see F): decide with
    section 5, then click the stamp the passport is lying under; if you want the
-   other decision, first drag the passport to the other strip. ONE click. If the state block says a paper (the
+   other decision, first drag the passport to the other strip -- and if another paper (the entry ticket) lies
+   under the stamp you need, first drag that paper to the "desk" target (E0). Never click the stamp of the
+   decision you do not want, not even because the passport lies under it. ONE click. If the state block says a paper (the
    entry ticket) lies across the open passport, first drag that paper off it onto the "clear desk space" /
    "desk" target so the passport lies clear, then drag the passport by its own visible part. Clicking the stamp the passport is
    NOT under stamps nothing (the press is refused). Decide only when every reading today's rule needs is known
@@ -1238,7 +1240,11 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         return "B3", "drag the unread / ticket paper on the counter -> desk so it can be read"
     if yes(state, "stamp_tray_open") or f.get("tray_open_px"):
         wrong = [s_ for s_, v in (f.get("strip") or {}).items() if v.get("doc") and v["doc"] not in ("passport", UNREAD)]
-        if wrong and not f.get("passport_under"):
+        # ... also when the passport lies under the other head and the paper is on TOD's verdict side (run 232544
+        # t25-29: ticket under APPROVED, passport under DENIED, verdict approved -> 'drag passport under APPROVED'
+        # could not be done, TOD pressed DENIED x5, refused)
+        if wrong and (not f.get("passport_under") or vside in wrong):
+            wrong = [vside] if vside in wrong else wrong
             return "E0", f"drag the {f['strip'][wrong[0]]['doc']} off the {wrong[0].upper()} strip -> desk"
         if f.get("passport_under"):
             if vside is None:
