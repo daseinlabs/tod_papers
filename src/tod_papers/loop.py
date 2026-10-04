@@ -1430,6 +1430,9 @@ def press_gate(side: str, state: dict, facts: dict) -> str | None:
     return None
 
 
+REPRESS_MAX = 2   # loop21: executed presses of one stamp per entrant before that stamp is struck (stall rule)
+
+
 def stamp_hidden(boxes: list, frame: np.ndarray, state: dict, facts: dict | None = None) -> dict:
     """{side: reason} for the stamps NOT offered this tick: every stamp but the one TOD's verdict of this tick names
     (p >= VERDICT_P); both when the verdict is cannot_decide_yet, below VERDICT_P or not asked. Logged per tick as
@@ -1444,6 +1447,13 @@ def stamp_hidden(boxes: list, frame: np.ndarray, state: dict, facts: dict | None
             # the press_gate strip refusal, moved before request 2 (run 233434 t20-21: APPROVED pressed with the
             # passport under DENIED, refused twice): drag the passport under the stamp your verdict names first
             out[v["value"]] = f"hidden_by: passport_not_under={v['value']} ({man.under_phrase(f, v['value'])})"
+        presses = [t for t, sd in f.get("stamp_clicks") or [] if sd == v["value"]]
+        if v["value"] in sides and v["value"] not in out and len(presses) >= REPRESS_MAX:
+            # loop21 stall rule (run 012545 t40-58: DENIED pressed 11x, the ink on the visa page under the bar read
+            # 'none' every tick, the passport never went back): after REPRESS_MAX executed presses of the same
+            # stamp for this entrant that stamp is struck; TOD's verdict and every other option stay
+            out[v["value"]] = (f"hidden_by: pressed_{len(presses)}x={v['value']} "
+                               f"(ticks {', '.join(str(t) for t in presses[-3:])})")
         return out
     why = (f"hidden_by: tod_verdict={v['value']} p={v['p']:.2f}" if v else "hidden_by: tod_verdict=none")
     return {s_: why for s_ in sides}
@@ -1745,6 +1755,8 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     for sd, why in hidden.items():
         ban_lines.append(f"The {sd.upper()} stamp is not offered this tick ({why}): " + (
             "drag the passport to the strip under it first" if "passport_not_under" in why else
+            "you have already pressed it on this passport; the passport counts as stamped, a further press adds "
+            "nothing -- stamp ink under the stamp bar is often not visible" if "pressed_" in why else
             "the stamp you can press is the one your own verdict names; change your verdict if you disagree"))
     # one drag source per paper (61% of booth ticks offered the same passport 2+ times): the largest box on it
     # (page corner, panel, icon and overlapping same-identity paper boxes count as one paper, paper_groups)

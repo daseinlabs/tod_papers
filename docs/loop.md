@@ -47,7 +47,12 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
    (`hidden_by: passport_not_under=approved (...)`, the press_gate strip refusal moved before request 2; 233434 t20-21). Logged as `stamp_hidden` = `hidden_by: tod_verdict=approved p=0.81` (tick json) and a
    RULED OUT line in the state block ("the stamp you can press is the one your own verdict names; change your verdict
    if you disagree"). Both landing strips stay drop targets. Code never chooses the verdict (runs 232544 / 233434:
-   approved 0.65-0.84, DENIED pressed 5x, refuse-stop). No press- or ink-based hiding.
+   approved 0.65-0.84, DENIED pressed 5x, refuse-stop). No ink-based hiding. Stall rule (loop21, `REPRESS_MAX` 2):
+   after 2 executed presses of the verdict's stamp for this entrant that stamp is struck too
+   (`hidden_by: pressed_2x=denied (ticks ..)`, RULED OUT: "the passport counts as stamped, a further press adds
+   nothing"; run 012545 t40-58: DENIED pressed 11x, ink under the bar read 'none', no hand-back).
+   Request-2 text budget (loop21, `manual.build`): last 15 actions, lines <= 140 chars, desk OCR capped, the part
+   after the manual <= `STATE_BUDGET` 7000 chars (oldest history dropped first); `text_chars` in the tick json.
    A tray toggle loop (>= 3 open/close in 8 ticks without a press) strikes the CLOSING tab through via
    `stuck.ban` before request 2 (4 ticks) with the reason in RULED OUT and a `TRAY LOOP:` line at the top of the
    history. The hand-back target is offered once a stamp press of TOD's executed for this entrant (or in G2 / step N);
