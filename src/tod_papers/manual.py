@@ -1115,6 +1115,9 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
                        " -- not the paper on the counter shelf (that one is the entrant's and goes to the 'desk' "
                        "target later)." if any(d["where"] == "counter" and d["id"] != cl["id"]
                                                for d in f.get("docs_named") or []) else "."))
+    elif step == "R":
+        out.append("You read this entrant's passport earlier and it is not visible now: the open rulebook lies over "
+                   "it. Drag THE RULEBOOK onto the 'rulebook slot' target to put it away.")
     elif step == "G2":
         out.append("The passport is back and the entrant is still at the window waiting for the rest of their "
                    "papers: drag each paper of theirs still on the desk or counter shelf onto the person.")
@@ -1292,6 +1295,23 @@ def clutter_phrase(c: dict, tray_open: bool) -> str:
     return who + f"; it lies {where}"
 
 
+def rulebook_hides_passport(state: dict, facts: dict | None) -> bool:
+    """loop27 (run 064906 t16-35, Aidan Murphy): the passport went to the desk, TOD then dragged the open rulebook
+    over it; no passport / unread paper was visible again and TOD waited 12 ticks -> stall stop. Outside step N: the
+    person is at the window, a paper TOD named the rulebook lies on the desk, nothing TOD named the passport or left
+    unread is visible, nothing is stamped or handed back, and TOD already read this entrant's passport (EXP. / city /
+    country on record)."""
+    f = facts or {}
+    if not yes(state, "person_at_window") or f.get("handed_back") is not None or f.get("waiting_docs"):
+        return False
+    if stamped(state, f) or not (f.get("exp_carried") or f.get("city_carried") or f.get("country_carried")):
+        return False
+    named = f.get("docs_named") or []
+    if not any(d["id"] == "rulebook" and d["where"] == "desk" and d["p"] >= 0.5 for d in named):
+        return False
+    return not any(d["id"] in ("passport", UNREAD) for d in named)
+
+
 def clutter_step(state: dict, f: dict):
     """Manual step K: a citation slip / flyer on the desk (loop20: before every other booth step)."""
     cl = [c for c in f.get("clutter") or [] if c["in_way"]]
@@ -1375,6 +1395,8 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     k_step = clutter_step(state, facts or {})   # loop20: clutter is stowed before B-G (user priority)
     if k_step:
         return k_step
+    if rulebook_hides_passport(state, facts):
+        return "R", "drag the rulebook -> rulebook slot (put it away; the passport is under it)"
     if (facts or {}).get("waiting_docs") and yes(state, "person_at_window"):
         return "G2", "drag the remaining document (entry ticket) -> entrant"
     if (facts or {}).get("handed_back") is not None:

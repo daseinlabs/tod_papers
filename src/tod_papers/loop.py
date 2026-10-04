@@ -1131,6 +1131,13 @@ def stow_hygiene(regions: list, facts: dict | None) -> dict:
                                  "line": "The entrant's papers are not offered this tick (hidden_by: put_away_first): "
                                          "the flyer / citation slip in the working area goes to the put-away spot "
                                          "first."}
+    if f.get("rulebook_over_passport"):
+        tk = [list(d["box"]) for d in named if d.get("box") and d["id"] in ("entry_ticket", man.UNREAD)]
+        rb = [list(d["box"]) for d in named if d.get("box") and d["id"] == "rulebook"]
+        if tk:   # loop27 dry run 064906 t28-30: TOD dropped the entry ticket on the rulebook slot
+            out["rulebook_first"] = {"boxes": tk, "keep": rb, "why": "hidden_by: rulebook_first",
+                                     "line": "The entry ticket is not offered this tick (hidden_by: rulebook_first): "
+                                             "the open rulebook goes back to its slot first; the passport is under it."}
     return out
 
 
@@ -1300,6 +1307,7 @@ REGION_CAPS = {
     "tray_stow": "right edge of the desk (drag the tray tab here to put the stamp tray away)",
     "stow_papers": "put-away spot on the desk FOR THE FLYER / CITATION SLIP ONLY -- never the entrant's passport or "
                    "entry ticket (those go to the desk to be read)",
+    "rulebook_slot": "rulebook slot (drop the open rulebook here: it closes and goes back below the counter)",
 }
 
 
@@ -1853,6 +1861,13 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     # desk are click-only (inspect button, then the rule line, then the empty counter -- no rulebook drags)
     nstep = man.situation(state, day if day in DAY_RULES else "1", facts)[0] if nopp else ""
     rb_placed = nstep >= "N3"
+    if booth and facts is not None and not nopp and man.rulebook_hides_passport(state, facts):
+        # loop27 step R (run 064906 t22-35, Aidan Murphy): the open rulebook lies over the passport TOD already read;
+        # the rulebook slot (layout stow_papers: a rulebook dropped on the counter closes) is offered as a target
+        x1, y1, x2, y2 = layout.scale_box(layout.BY_NAME["stow_papers"].box, W, H)
+        regions = regions + [Box(x1, y1, x2, y2, "", "region", 0.0, caption=REGION_CAPS["rulebook_slot"])]
+        region_src["rulebook_slot"] = "static"
+        facts["rulebook_over_passport"] = True
     if nopp:
         # step N reads the rulebook on the DESK; the stow shelf puts it away (Jorji dry-run: TOD dropped the rulebook
         # on 'counter shelf left of the desk' instead of the desk). The desk stays a drop target.
@@ -2233,6 +2248,9 @@ def decide(res, P: dict) -> dict:
         # loop23 dry run 023151 t49-50: the entrant's counter paper (passport) dropped on the put-away spot -- the
         # spot takes a flyer / citation only. Refused (no input, logged); TOD's target is never replaced
         veto = f"refused: entrant paper #{src} onto the put-away spot (flyer / citation slip only)"
+    elif (action == "drag" and tb_ is not None and tb_.caption == REGION_CAPS["rulebook_slot"]
+          and not P["desc"].get(src, "").startswith("rulebook (TOD")):
+        veto = f"refused: #{src} onto the rulebook slot (the rulebook only)"
     return dict(action=action, src=src, tgt=tgt, note=note, tod_pick=tod_pick, convention_mismatch=mismatch,
                 input_convention=conv, veto=veto, p_src=float(res["source"].probabilities.get(src, 0.0)))
 
