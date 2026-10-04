@@ -2382,7 +2382,10 @@ class Entrant:
             self.handed_back = tick
         elif ra == "still_here":
             self.hb_drop = None   # TOD still sees the passport: the drop on the person was not a hand-back
-            if self.handed_back is not None:
+            # loop28 (run 073256 t51-65, Ava Hazledine): hand-back recorded t51, t52 'still_here' 0.66 with no passport
+            # named anywhere cleared it -> her ticket had no hand-back target, 12-tick stall. Undone only when TOD
+            # names a passport on the desk / counter again.
+            if self.handed_back is not None and pp_named is not False:
                 self.handed_back, self.waiting_docs = None, False
         if self.handed_back is not None and person and ra == "returned":
             # G2 (run 070911 t79-111: the entrant waited for the ticket still on the desk)
