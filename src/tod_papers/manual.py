@@ -738,6 +738,7 @@ def known_exp(state: dict, facts: dict | None):
 # ---- request 1b: Day 2/3 readings as choices over the strings the OCR read on the screen ----------------------
 # (private eval 2026-10-03, 30 gt-labelled Day 2 frames: expiry 3/30 -> 28/30 right, 0 wrong; city 26/30 -> 30/30)
 _DATE_RE = re.compile(r"(19\d\d)[.,](\d\d)[.,](\d\d)")
+_VALID_RE = re.compile(r"VA[L1I][I1L]D|VALID|ENTRY\s*T[I1]CKET", re.I)   # pixel-font OCR may swap I/L/1
 _ISS_RE = re.compile(r"(?:^|[\s.;,])(?:[I1lUu]?[S5s$][S5s$]\.?)\s*([A-Za-z][A-Za-z.' ]*?)\s*"
                      r"(?=\bE[XNR]?P\b|\bE[XNR]?P[.\d ]|\bP\.\d|\d|ARSTOT|$)")
 _ALL_CITIES = [c for v in ISSUING_CITIES.values() for c in v]
@@ -789,7 +790,10 @@ def inspection_doc_questions(desk_text: list[str], day: str = "2") -> tuple[dict
     """Request-1b questions (Day 2/3) + the candidate lists needed to read the answers back. The options are the
     strings the OCR read on the screen; the spelling contrast is asked only when the first city token differs from
     the nearest rulebook name (neutral labels, OCR spelling first)."""
-    q, cand = {}, {"dates": ocr_dates(desk_text), "toks": ocr_city_tokens(desk_text)}
+    # ticket options: only dates OCR read on a line that itself says VALID (run 205418 t17: the ticket had left the
+    # desk OCR, the options were the passport's dates labelled 'VALID ON ...', TOD took D1 = EXP. 1984.03.10 at 0.78)
+    tdates = ocr_dates([t for t in desk_text if _VALID_RE.search(t)])
+    q, cand = {}, {"dates": ocr_dates(desk_text), "tdates": tdates, "toks": ocr_city_tokens(desk_text)}
     if cand["dates"]:
         q["exp_date"] = {
             "type": "choice",
@@ -798,13 +802,13 @@ def inspection_doc_questions(desk_text: list[str], day: str = "2") -> tuple[dict
                             "date)?",
             "criteria": {**{f"D{i + 1}": f"EXP. {d}" for i, d in enumerate(cand["dates"])},
                          "none": "none of these is the passport's EXP. date, or no open passport data page is visible"}}
-    if day == "3" and cand["dates"]:
+    if day == "3" and tdates:
         # run 092642 Troyer: ticket VALID ON 1982.12.09 read 'dated_today' by the yes/no-style question
         q["ticket_date"] = {
             "type": "choice",
-            "instructions": "OCR found these dates on the documents on the desk. On the ENTRY TICKET (small slip with "
+            "instructions": "OCR read these 'VALID ON' lines on the desk. On the ENTRY TICKET (small slip with "
                             "'ENTRY TICKET' and 'VALID ON'), which one is printed after 'VALID ON'?",
-            "criteria": {**{f"D{i + 1}": f"VALID ON {d}" for i, d in enumerate(cand["dates"])},
+            "criteria": {**{f"D{i + 1}": f"VALID ON {d}" for i, d in enumerate(tdates)},
                          "none": "none of these is the entry ticket's date, or no entry ticket is visible"}}
     if cand["toks"]:
         q["issuing_city_tok"] = {
@@ -839,11 +843,12 @@ def read_inspection_answers(state: dict, cand: dict) -> None:
     i = _pick(state.get("exp_date"), len(cand["dates"]))
     if i is not None:
         state["exp_read"] = {"value": cand["dates"][i], "p": state["exp_date"]["p"]}
-    i = _pick(state.get("ticket_date"), len(cand["dates"]))
-    if i is not None:   # the ticket's date as picked among the OCR dates overrides the direct ticket answer
-        same = cand["dates"][i] == DAY_DATES["3"]
+    td = cand.get("tdates", cand["dates"])
+    i = _pick(state.get("ticket_date"), len(td))
+    if i is not None:   # the ticket's date as picked among the OCR 'VALID ON' dates overrides the direct ticket answer
+        same = td[i] == DAY_DATES["3"]
         state["entry_ticket_dated_today"] = {"value": "dated_today" if same else "other_date",
-                                             "p": state["ticket_date"]["p"], "from": f"VALID ON {cand['dates'][i]}"}
+                                             "p": state["ticket_date"]["p"], "from": f"VALID ON {td[i]}"}
     a = state.get("issuing_city_tok")
     i = _pick(a, len(cand["toks"]))
     if i is None:
