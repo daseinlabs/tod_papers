@@ -913,6 +913,7 @@ def strip_facts(state: dict, df: dict, sinfo: dict | None) -> dict:
 
 
 STRIP_TOD_P = 0.5   # loop20: TOD's strip answer 'passport under this stamp' at p >= this is the under-strip fact
+STRIP_NOPAPER_P = 0.85   # loop29: a strip answer below this is overruled when the pixel check finds no paper there
 STRIP_ID_P = 0.5    # ... OR TOD's identity 'passport' (p >= this) of the paper over that strip + paper pixels there
 
 
@@ -932,6 +933,12 @@ def passport_sides(strip: dict) -> list[str]:
             continue
         if v["doc"] in CLUTTER_IDS and (v["doc_p"] or 0) >= CLUTTER_P and (pp or 0) < 0.85:
             v["source"] = "tod_identity_clutter"
+            continue
+        if v["paper"] is False and v["doc"] != "passport" and (pp or 0) < STRIP_NOPAPER_P:
+            # loop29 run 085826 t21 (Iain Baillie): strip answers pD 0.64 / pA 0.62, passport only under APPROVED
+            # (pixel check: no paper on the DENIED strip, no named passport over it) -> DENIED pressed on empty strip, unstamped passport
+            # handed back, entrant never left (12-tick stall)
+            v["source"] = "pixel_no_paper"
             continue
         if pp is not None and pp >= STRIP_TOD_P:
             v["source"] = "tod_strip"
