@@ -159,7 +159,10 @@ E. The stamp tray is open, the passport lies under a stamp head (the state block
    section 5, then click the stamp the passport is lying under; if you want the
    other decision, first drag the passport to the other strip -- and if another paper (the entry ticket) lies
    under the stamp you need, first drag that paper to the "desk" target (E0). Never click the stamp of the
-   decision you do not want, not even because the passport lies under it. ONE click. If the state block says a paper (the
+   decision you do not want, not even because the passport lies under it. The stamp you can press is the one your
+   own verdict names (the other stamp is struck through, and both are while your verdict is cannot_decide_yet;
+   your stamp is also struck through until the passport lies under it: drag the passport there first);
+   change your verdict if you disagree. ONE click. If the state block says a paper (the
    entry ticket) lies across the open passport, first drag that paper off it onto the "clear desk space" /
    "desk" target so the passport lies clear, then drag the passport by its own visible part. Clicking the stamp the passport is
    NOT under stamps nothing (the press is refused). Decide only when every reading today's rule needs is known
@@ -628,6 +631,13 @@ def verdict_side(state: dict, facts: dict | None) -> str | None:
     return v["value"] if v and v["value"] in ("approved", "denied") and v["p"] >= VERDICT_P else None
 
 
+def _pp_phrase(v: dict) -> str:
+    """'the PASSPORT (p=0.81)' -- the p of the branch that made it the under-strip fact (loop20)."""
+    if v.get("source") == "tod_identity+pixel":
+        return f"the PASSPORT (your identity of the paper there: passport, p={(v.get('doc_p') or 0):.2f})"
+    return f"the PASSPORT (p={(v.get('passport_p') or 0):.2f})"
+
+
 def under_phrase(facts: dict, side: str) -> str:
     """'the RULEBOOK (p=0.93) lies under the DENIED stamp, not the passport' etc. (from TOD's answers)."""
     v = (facts.get("strip") or {}).get(side) or {}
@@ -959,15 +969,16 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         pu = facts.get("passport_under") or []
         for side in ("denied", "approved"):
             lines.append(f"- Under the {side.upper()} stamp: " + (
-                f"the PASSPORT (p={(facts['strip'][side]['passport_p'] or 0):.2f})" if side in pu
-                else under_phrase(facts, side)))
+                _pp_phrase(facts["strip"][side]) if side in pu else under_phrase(facts, side)))
         lines.append("- The passport is under: " + (" and ".join(x.upper() for x in pu) if pu else "none")
-                     + ". Both stamps can be pressed; a press on a stamp the passport is not under is refused")
+                     + ". Only the stamp your verdict of this tick names is offered; a press on a stamp the passport "
+                       "is not under is refused")
         wrong = [s_ for s_ in ("denied", "approved") if (facts["strip"][s_].get("doc") or "passport") != "passport"
                  and s_ not in pu]
         if wrong:
             lines.append(f"- A paper that is NOT the passport lies under the {' and '.join(w.upper() for w in wrong)} "
-                         "stamp (a stamp press there is refused)")
+                         "stamp (a stamp press there is refused): drag it to the \"desk\" target first to clear "
+                         "that strip (E0)")
     pop = facts.get("paper_on_passport")
     if pop:
         lines.append(f"- A paper ({pop['id'].upper()}) lies across the open passport on the desk (it covers "

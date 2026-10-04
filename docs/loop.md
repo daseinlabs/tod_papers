@@ -41,7 +41,13 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
    "Section 5 applied ... -> X", "the passport is under the wrong stamp: drag it onto X", "the next step is C",
    "Click the stamp the passport is lying under", "The decision is not known yet ... the stamps are not offered",
    the LOOP WARNING, "EXPIRED / not expired" and "(NOT) a valid issuing city".
-5. **Options**: both stamps are always offered when the tray is open (no verdict-, press- or ink-based hiding).
+5. **Options** (loop20, `stamp_hidden`): the stamp offered is the one TOD's OWN verdict of this tick names (request 1b,
+   p >= 0.5); the other stamp is struck through in the SoM, and both are while the verdict is `cannot_decide_yet`,
+   below 0.5 or not asked; the verdict stamp too while the passport is not under it
+   (`hidden_by: passport_not_under=approved (...)`, the press_gate strip refusal moved before request 2; 233434 t20-21). Logged as `stamp_hidden` = `hidden_by: tod_verdict=approved p=0.81` (tick json) and a
+   RULED OUT line in the state block ("the stamp you can press is the one your own verdict names; change your verdict
+   if you disagree"). Both landing strips stay drop targets. Code never chooses the verdict (runs 232544 / 233434:
+   approved 0.65-0.84, DENIED pressed 5x, refuse-stop). No press- or ink-based hiding.
    A tray toggle loop (>= 3 open/close in 8 ticks without a press) strikes the CLOSING tab through via
    `stuck.ban` before request 2 (4 ticks) with the reason in RULED OUT and a `TRAY LOOP:` line at the top of the
    history. The hand-back target is offered once a stamp press of TOD's executed for this entrant (or in G2 / step N);
@@ -59,7 +65,7 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
 7. **Guards that remain** (they refuse or exclude, never pick): stamp press (`press_gate`, loop18) refused unless
    TOD's verdict answer of THIS tick (p >= 0.5) names that stamp -- `cannot_decide_yet`, the other stamp or no
    verdict this tick -> refused, history callout "refused: your verdict this tick was X (p)" -- and unless TOD's
-   strip answer puts the passport under that stamp. Code never chooses the verdict and never hides a stamp; the
+   strip answer puts the passport under that stamp (backstop; the verdict hiding of step 5 comes first). Code never chooses the verdict; the
    verdict is asked every tick the passport is readable, so TOD can change its mind. Request 2's action question
    starts with TOD's own line "Your verdict this tick: X (p)"; the landing strips stay "stamp landing strip (under
    the APPROVED/DENIED stamp head)" with nothing about the verdict. On an entrant-memory reset tick that tick's
@@ -74,9 +80,12 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
    (passport / ticket / flyer / unread) still named on the desk or counter while the person stays -> G2
    (`waiting_docs`); `still_here` -> the drop was not a hand-back. HANDBACK_STAY / HANDBACK_DOCS_STAY and the
    Day-3 "no passport, ticket left" combination rule were removed.
-9. `passport_sides` (strip): TOD's `passport_under_<side>` decides at p >= 0.6 (yes) or <= 0.4 (no). Only in
-   between (or not asked) does the pixel paper test + TOD's identity "passport" of the strip paper break the tie;
-   `strip[side].source` = `tod` / `pixel_tiebreak` / `tod_identity_*` in the tick json.
+9. `passport_sides` (strip, loop20): the passport is under a head when TOD's `passport_under_<side>` p >= 0.5 OR
+   TOD's identity of the paper over that strip is "passport" (p >= 0.5) AND the pixel test finds paper on the strip
+   (run 233434 t22: strip "not passport" 0.73, identity passport 0.90 -> correct APPROVED press refused). A paper
+   TOD's identity names as not-passport (p >= 0.6, strip p < 0.75) or clutter is excluded; the state block then
+   says to drag it to the desk first (E0; the desk target stays offered while a paper lies on a strip).
+   `strip[side].source` = `tod_strip` / `tod_identity+pixel` / `none` / `tod_identity_*` in the tick json.
 
 ### Input conventions (loop16)
 

@@ -847,16 +847,18 @@ def strip_facts(state: dict, df: dict, sinfo: dict | None) -> dict:
     return out
 
 
-STRIP_TOD_P = 0.6   # TOD's strip answer decides at p >= this (yes) or <= 1 - this (no); in between the pixel
-# paper test + TOD's identity of the strip paper break the tie (logged as strip[side]['source'] = 'pixel_tiebreak')
+STRIP_TOD_P = 0.5   # loop20: TOD's strip answer 'passport under this stamp' at p >= this is the under-strip fact
+STRIP_ID_P = 0.5    # ... OR TOD's identity 'passport' (p >= this) of the paper over that strip + paper pixels there
 
 
 def passport_sides(strip: dict) -> list[str]:
-    """Stamp heads with the PASSPORT under them = TOD's passport_under_<side> answers (audit B27/D10). A paper TOD's
-    identity names as something else (entry ticket, rulebook ... at p >= 0.6; a citation / flyer) is not the passport
-    unless the strip answer is confident (run 075504 t112-114; 161058 t95-96). Only when TOD is unsure both ways
-    (p between 0.4 and 0.6, or not asked) does the pixel 'paper in the strip' test, together with TOD's identity
-    'passport' of the paper over that strip, break the tie; each side records strip[side]['source']."""
+    """Stamp heads with the PASSPORT under them (audit B27/D10; loop20). Under-strip fact = TOD's passport_under_<side>
+    answer >= STRIP_TOD_P, OR TOD's identity of the paper over that strip = passport (p >= STRIP_ID_P) AND the pixel
+    test finds paper on the strip (run 233434 t22: strip answer 'not passport' 0.73, identity passport 0.90, passport
+    there -> a correct APPROVED press was refused). A paper TOD's identity names as something else (entry ticket,
+    rulebook ... at p >= 0.6; a citation / flyer) is not the passport unless the strip answer is confident (run 075504
+    t112-114; 161058 t95-96). strip[side]['source'] records which branch fired: 'tod_strip', 'tod_identity+pixel',
+    'none' (neither), or the not-passport identity exclusions."""
     out = []
     for s_, v in strip.items():
         pp = v["passport_p"]
@@ -867,15 +869,13 @@ def passport_sides(strip: dict) -> list[str]:
             v["source"] = "tod_identity_clutter"
             continue
         if pp is not None and pp >= STRIP_TOD_P:
-            v["source"] = "tod"
+            v["source"] = "tod_strip"
             out.append(s_)
-        elif pp is not None and pp <= 1 - STRIP_TOD_P:
-            v["source"] = "tod"
+        elif v["paper"] and v["doc"] == "passport" and (v["doc_p"] or 0) >= STRIP_ID_P:
+            v["source"] = "tod_identity+pixel"
+            out.append(s_)
         else:
-            tie = bool(v["paper"] and v["doc"] == "passport" and (v["doc_p"] or 0) >= 0.5)
-            v["source"] = "pixel_tiebreak"
-            if tie:
-                out.append(s_)
+            v["source"] = "none"
     return out
 
 
@@ -1425,6 +1425,25 @@ def press_gate(side: str, state: dict, facts: dict) -> str | None:
     return None
 
 
+def stamp_hidden(boxes: list, frame: np.ndarray, state: dict, facts: dict | None = None) -> dict:
+    """{side: reason} for the stamps NOT offered this tick: every stamp but the one TOD's verdict of this tick names
+    (p >= VERDICT_P); both when the verdict is cannot_decide_yet, below VERDICT_P or not asked. Logged per tick as
+    facts['stamp_hidden'] ('hidden_by: tod_verdict=approved p=0.81')."""
+    sides = {_stamp_side(b, frame) for b in boxes} - {None}
+    v = state.get("verdict")
+    if v and v["value"] in ("approved", "denied") and v["p"] >= man.VERDICT_P:
+        why = f"hidden_by: tod_verdict={v['value']} p={v['p']:.2f}"
+        out = {s_: why for s_ in sides if s_ != v["value"]}
+        f = facts or {}
+        if v["value"] in sides and "strip" in f and v["value"] not in (f.get("passport_under") or []):
+            # the press_gate strip refusal, moved before request 2 (run 233434 t20-21: APPROVED pressed with the
+            # passport under DENIED, refused twice): drag the passport under the stamp your verdict names first
+            out[v["value"]] = f"hidden_by: passport_not_under={v['value']} ({man.under_phrase(f, v['value'])})"
+        return out
+    why = (f"hidden_by: tod_verdict={v['value']} p={v['p']:.2f}" if v else "hidden_by: tod_verdict=none")
+    return {s_: why for s_ in sides}
+
+
 def verdict_line(state: dict) -> str:
     """TOD's own verdict of this tick, put directly above the action question of request 2 ('' when not asked)."""
     v = state.get("verdict")
@@ -1637,8 +1656,8 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if nopp:
         boxes = [b for b in boxes if not (_is_tray_tab(b) or b.caption == TRAY_HANDLE_CAP
                                           or (b.caption or "").startswith("tab at screen edge"))]
-    # audit A1: both stamps are offered whenever the tray is open -- no stamp is hidden by a code verdict, a press
-    # memory or an ink reading. The only stamp guard is the refusal veto in run() (TOD's strip answer).
+    # audit A1: no stamp is hidden by a code verdict, a press memory or an ink reading; since loop20 only TOD's own
+    # verdict of this tick decides which stamp is offered (stamp_hidden below).
     tray_note = None
     flips = (facts or {}).get("tray_flips", 0)
     if stuck is not None and flips >= TRAY_FLIP_LIMIT:
@@ -1653,7 +1672,15 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
                              f"without a stamp; its closing tab is ruled out for {TRAY_BAN_TICKS} ticks.")
     if facts is not None:
         facts["tray_note"] = tray_note
-    banned = (lambda b: stuck.banned(tick, b) is not None) if stuck is not None else (lambda b: False)
+    # loop20 (runs 232544 t10-25, 233434 t15-25: verdict approved 0.65-0.84, DENIED pressed 5x, refuse-stop): the stamp
+    # TOD can press is the one ITS OWN verdict of this tick names (request 1b, p >= VERDICT_P); the other stamp, or both
+    # when the verdict is cannot_decide_yet / not given, is struck through (not offered). Code never picks the
+    # verdict -- TOD changes its verdict to press the other stamp. press_gate stays as the backstop.
+    hidden = stamp_hidden(boxes, frame, state, facts) if booth else {}
+    if facts is not None:
+        facts["stamp_hidden"] = {s_: why for s_, why in hidden.items()}
+    banned = (lambda b: (stuck is not None and stuck.banned(tick, b) is not None)
+              or (_stamp_side(b, frame) in hidden))
     annotated, idmap = annotate(frame, list(boxes) + regions, max_marks=args.max_marks - 1 + len(regions),
                                 excluded=banned)
     if not booth:  # text/cutscene screens without a button are advanced by clicking the screen itself
@@ -1706,6 +1733,14 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
                 continue
             ban_lines.append(f"{verb} '{short(f.desc, 60)}' did nothing (tried {f.count}x); excluded for "
                              f"{f.banned_until - tick} more tick(s)")
+    for i, b in idmap.items():
+        sd = _stamp_side(b, frame)
+        if sd in hidden:
+            banned_ids[str(i)] = _Fail("click", b, desc[str(i)], why=hidden[sd])
+    for sd, why in hidden.items():
+        ban_lines.append(f"The {sd.upper()} stamp is not offered this tick ({why}): " + (
+            "drag the passport to the strip under it first" if "passport_not_under" in why else
+            "the stamp you can press is the one your own verdict names; change your verdict if you disagree"))
     # one drag source per paper (61% of booth ticks offered the same passport 2+ times): the largest box on it
     # (page corner, panel, icon and overlapping same-identity paper boxes count as one paper, paper_groups)
     dup_ids = set()
@@ -2182,6 +2217,7 @@ def offline(args) -> int:
                                      if _stamp_side(P["idmap"][int(k)], frame)),
             "tray_open_px": facts.get("tray_open_px"), "stamped": man.stamped(state, facts),
             "strip_source": {k: v.get("source") for k, v in (facts.get("strip") or {}).items()},
+            "stamp_hidden": facts.get("stamp_hidden"),
             "unread_docs": [d["where"] for d in facts.get("docs_named") or [] if d["id"] == man.UNREAD],
             "extractor": args.extractor, "passport_under": facts.get("passport_under"),
             "n_boxes_raw": len(boxes), "n_sources": len(P["src_ids"]), "n_targets": len(P["tgt_ids"]),
@@ -2527,6 +2563,7 @@ def run(args) -> int:
             P = prepare(frame, boxes, state, history, day, args, stuck=stuck, tick=tick, facts=facts)
             annotated, idmap, desc, banned_ids = P["annotated"], P["idmap"], P["desc"], P["banned_ids"]
             rec["prep_ms"] = P["prep_ms"]
+            rec["stamp_hidden"] = facts.get("stamp_hidden")
             rec["regions"] = P["regions"]
             rec["target_source"] = {n: v["target_source"] for n, v in P["regions"].items()}
             t1 = time.perf_counter()
