@@ -44,8 +44,10 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
    `stuck.ban` before request 2 (4 ticks) with the reason in RULED OUT and a `TRAY LOOP:` line at the top of the
    history. The hand-back target is offered once TOD read stamp ink (or in G2 / step N). Desk regions on the
    vision extractor come from the frame or are dropped (`target_source: dropped`); `anchors.json` was removed.
-6. **Request 2**: `action` (click / drag / wait, with the convention "stamps/buttons are clicked, papers/tab are
-   dragged" as text), `source`, `target`. `decide` executes TOD's answers: no tab re-pick, no tab-target rewrite,
+6. **Request 2**: `action` (click / drag / wait; its question text is the manual section 2 line
+   `manual.INPUT_LINE` "Click for stamps/buttons/horn/page corners, drag for papers and the tray tab."), `source`
+   (each element's option text ends with its input as a screen fact from its class, `manual.affordance_text`:
+   "— click (press to stamp)", "— click", "— drag"), `target`. `decide` executes TOD's answers: no tab re-pick, no tab-target rewrite,
    no desk re-drop re-pick, no click/drag coercion. A convention mismatch is logged (`convention_mismatch`, note)
    and executed as chosen. A citation/flyer dropped onto a strip / the tray edge / (citation) the entrant is
    REFUSED (no input, logged), never redirected.
@@ -174,6 +176,8 @@ rapidocr/opencv come from there) plus `pywin32 dxcam mss comtypes`. Recipe in `r
 7. **Click/drag convention: logged, not enforced** (loop15; `enforce_input` was dead code and is deleted):
    TOD's `action` answer is executed. When it disagrees with the element class (`manual.input_class`, TOD's
    paper identity) the tick json gets `convention_mismatch` and `input_convention`; the input is not changed.
+   Loop16 (B26): the class is also stated in each option's text and the manual's input paragraph is one line;
+   dry run 9 frames (201459 t10/26/28/40/50/60, 200239 t5/10/42): mismatches 4 -> 1.
 8. Execute, verify by frame diff, log (`tick_NNNN.{png,json}`, `viz_NNNN.png`, `raw_NNNN.png`,
    `summary.md` with state + manual step per tick). The JSON is written in the tick; the PNGs and the overlay
    render go to a log thread (`_LOG_POOL`, ~0.5-0.75 s off the tick), flushed before `summary.md`. `manual_step_for_state` in the json is

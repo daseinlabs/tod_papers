@@ -1187,12 +1187,8 @@ def derive_tray_handle(boxes: list, frame: np.ndarray, state: dict):
 # request 2 questions + the click/drag convention
 # --------------------------------------------------------------------------
 
-ACTION_RULE = (
-    "Convention (manual section 2): stamps and buttons are clicked, papers and the tray tab are dragged -- the "
-    "loudspeaker/horn, the APPROVED and DENIED stamps, buttons/menu text and page corners are CLICKED; documents "
-    "(passport, papers, bulletin, rulebook), the stamp tray tab and the shutter lever are DRAGGED. Drop targets "
-    "(stamp landing strip, the entrant, desk) are only the end point of a drag."
-)
+# the action question says the one input line of manual section 2 itself (B26)
+ACTION_RULE = man.INPUT_LINE + " Drop targets are only the end point of a drag."
 
 
 WAIT_KEY = "wait"
@@ -1209,8 +1205,8 @@ ACTION_CHOICES = {
 def build_questions(src_ids: dict, tgt_ids: dict, booth: bool = True) -> dict:
     """Request 2: the input kind (TOD's `action`, audit B26), the element and, in the booth, the drop target."""
     q = {
-        "action": choice("Following the manual and what is currently true on screen, what kind of mouse input is "
-                         "the next step? " + ACTION_RULE, dict(ACTION_CHOICES)),
+        "action": choice("Following the manual and what is currently true on screen, which mouse input does the next "
+                         "step use? " + ACTION_RULE, dict(ACTION_CHOICES)),
         "source": choice(
             "Following the manual and what is currently true on screen: which numbered element is clicked "
             "next, or, for a drag, picked up? Use the number drawn on its marker; choose 'wait' if nothing should "
@@ -1505,6 +1501,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     doc_of: dict = {}   # element id -> index of the paper it lies on
     dn_all = (facts or {}).get("docs_named") or []
     same_paper = paper_groups(dn_all)
+    free_ids = set()   # step-N rulebook: pages dragged, corners/rule lines clicked -> no single input stated
     for i, b in idmap.items():   # name each paper by TOD's request-1 identity answer (geometry: centre inside)
         if b.kind in ("region", "background"):
             continue
@@ -1518,7 +1515,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
                 else:
                     desc[str(i)] = f"{d['id']} (TOD {d['p']:.2f}) — {rest}"
                 if nopp and d["id"] == "rulebook":
-                    pass   # step N: rulebook pages and rule lines are clicked (page corner, inspect-mode rule)
+                    free_ids.add(i)   # step N: rulebook pages and rule lines are clicked (page corner, inspect-mode rule)
                 elif d["id"] != "other" or b.kind == "text":   # a texted 'other' paper is still a paper (run
                     doc_ids.add(i)                          # 090830 t22-43: the Pink Vice flyer clicked 8x)   # run 114927 t30-86: the counter passport was labelled 'rubber stamp' (click-only)
                     # a single-sheet paper's page corner is only another drag handle on it (passport: 29 of 93
@@ -1526,6 +1523,13 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
                     if b.kind != "page_corner" or d["id"] not in MULTIPAGE_IDS:
                         doc_of[i] = same_paper[j]
                 break
+    # each element's option text ends with its input, a screen fact from its class (audit B26: TOD dragged
+    # click-only stamps/horn 22-34x per launch). It describes the element; TOD's `action` answer is still executed.
+    for i, b in idmap.items():
+        if b.kind != "region" and i not in free_ids:
+            aff = man.affordance_text(b, _cls(b, booth, i in doc_ids))
+            if aff:
+                desc[str(i)] = f"{desc[str(i)]} — {aff}"
     banned_ids, ban_lines = {}, []
     if stuck is not None:
         for i, b in idmap.items():

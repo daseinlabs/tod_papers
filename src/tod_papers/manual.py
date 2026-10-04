@@ -56,13 +56,15 @@ DAY_RULES = {
 # the manual (static text, sent in full every tick)
 # --------------------------------------------------------------------------
 
+# the one input-convention line: manual section 2 and the request-2 `action` question say it identically (B26)
+INPUT_LINE = "Click for stamps/buttons/horn/page corners, drag for papers and the tray tab."
+
 MANUAL = """\
 PAPERS, PLEASE -- HOW TO WORK THE BORDER BOOTH WITH THE MOUSE
 
 You are the border inspector. Every input is either a CLICK on one numbered element or a DRAG of one
 numbered element onto a numbered drop target. Each turn you choose the input (click, drag or wait), the element
-and, for a drag, the drop target. Stamps and buttons are clicked; papers and the tray tab are dragged (section 2).
-Choose "wait" when nothing should be done.
+and, for a drag, the drop target. Choose "wait" when nothing should be done.
 
 1. WHAT IS WHERE ON THE BOOTH SCREEN
 - Top strip: the border yard seen from above (the queue of people on the left, guards, the road). Just
@@ -85,19 +87,8 @@ Choose "wait" when nothing should be done.
   Under the bar runs a dark strip with the words ALIGN VISA BENEATH STAMP: that strip is where a passport
   must lie for a stamp to mark it. A stamp only marks what lies in the strip directly under THAT stamp.
 
-2. CLICK OR DRAG -- EACH ELEMENT HAS EXACTLY ONE
-CLICK only (never drag these):
-- the loudspeaker / horn on the booth roof;
-- the APPROVED and DENIED stamps (and their knobs) -- a stamp is pressed by clicking it;
-- buttons and menu text (STORY, day tiles, NEXT, CONTINUE, WALK TO WORK ...);
-- page corners -- the bottom-right corner of a multi-page paper turns its page;
-- text/cutscene screens that have no button (click the text).
-DRAG only (clicking them does nothing):
-- every document: the closed passport on the counter, the open passport on the desk, papers, the
-  bulletin, the rulebook. Press on the document, move it, release it where it should go;
-- the stamp tray TAB at the right edge of the desk (drag it LEFT to pull the tray out, RIGHT to put it away);
-- the shutter lever.
-Dragging a stamp does nothing. Clicking a document does nothing. Clicking empty desk does nothing.
+2. CLICK OR DRAG
+""" + INPUT_LINE + """ (Each numbered element's text ends with its input: "— click" or "— drag".)
 
 3. DROP TARGETS (marked regions, used only as the end point of a drag)
 - "stamp landing strip (under the APPROVED stamp head)" / "(under the DENIED stamp head)": the part of the
@@ -1262,3 +1253,22 @@ def input_class(box, booth: bool) -> str | None:
     if cap in DRAG_CAPS:
         return "drag"
     return None
+
+
+STAMP_CAPS = {"rubber stamp", "red rubber stamp", "green rubber stamp"}
+
+
+def affordance_text(box, cls: str | None) -> str:
+    """The element's input as a screen fact for its option text (B26): what the element IS operated by, derived
+    from its class (`cls` = loop._cls / input_class). It describes the element, it does not say which to pick.
+    '' when the class is unknown or the element is a drop target."""
+    if cls == "click":
+        name, cap = getattr(box, "name", "") or "", getattr(box, "caption", "") or ""
+        if name.startswith("stamp_") or cap in STAMP_CAPS:
+            return "click (press to stamp)"
+        if getattr(box, "kind", "") == "page_corner":
+            return "click (turns the page)"
+        return "click"
+    if cls == "drag":
+        return "drag"
+    return ""
