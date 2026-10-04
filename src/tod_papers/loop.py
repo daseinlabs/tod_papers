@@ -1054,7 +1054,11 @@ def stow_target(frame: np.ndarray, facts: dict | None, desk_info: dict | None):
         return None
     H, W = frame.shape[:2]
     named = (facts or {}).get("docs_named") or []
-    way = [c for c in (facts or {}).get("clutter") or [] if c.get("in_way") and c.get("native")]
+    # loop27 (run 063544 t100-106, Sebastienne Hermann): the only flyer in the way was a sliver under the open tray
+    # bar (K1: close the tray first, it cannot be dragged) -- the put-away spot was offered, TOD dropped a rulebook
+    # sliver on it 3x (refused) -> stop. Offered only for a flyer / citation that can be picked up now.
+    way = [c for c in (facts or {}).get("clutter") or [] if c.get("in_way") and c.get("native")
+           and not c.get("under_bar")]
     if not way:
         # dry run 023151 t43-44: offered with nothing to put away, TOD dropped the entrant's counter paper on it
         return None
