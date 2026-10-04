@@ -1109,7 +1109,12 @@ def merge_hybrid(static_boxes: list[Box], vision_boxes: list[Box], iou_drop: flo
                 and not inside(v, label) >= 0.6
                 and not (tray and inside(v, bar) >= 0.8)]
     vdocs = [v for v in keep if any(iou(v, d) > 0.1 for d in docs)]
-    out = fixed + keep + ([] if vdocs else docs)
+    # loop23 (run 030640 t47-62): vision boxed the desk papers but not the ticket on the counter shelf -> the static
+    # counter doc was dropped with the rest and the paper TOD's B3 names had no mark. A static counter-shelf doc that
+    # no vision box overlaps is kept on its own
+    lone = [d for d in docs if getattr(d, "name", "").startswith("doc_counter")
+            and not any(iou(v, d) > 0.1 or inside(v, d) >= 0.5 for v in keep)]
+    out = fixed + keep + (lone if vdocs else docs)
     if frame_wh is not None and screen == "booth" and LAST.get("docs"):
         refine_docs_by_text(LAST["docs"], out, *frame_wh)
     return out
