@@ -1085,9 +1085,11 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
     vtxt = _verdict_now(state, f)
     sc = f.get("stamp_clicks") or []
     out: list[str] = []
-    if step in ("N4", "N4b", "N5"):
+    if step in ("N4", "N4a", "N4b", "N5"):
         # loop28 (run 070003 t143-158, Jorji): inside inspect mode the block says exactly the one next thing
         out.append({"N4": "Inspect mode is on. Click the rule 'Entrant must have a passport', then the empty counter.",
+                    "N4a": "Inspect mode is on, but the rule 'Entrant must have a passport' is not visible on the "
+                           "desk. Click the red inspect-mode button to leave inspect mode.",
                     "N4b": "Inspect mode is on and the rule 'Entrant must have a passport' is selected. Click the "
                            "empty counter.",
                     "N5": "Inspect mode is on. Click the INTERROGATE prompt."}[step])
@@ -1101,6 +1103,9 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
         out.append({"N1": "The rulebook is not open: drag it from its slot onto the 'desk' target (not the shelf).",
                     "N2": n2_text(state, f),
                     "N3": "The rulebook shows Basic Rules: click the red inspect-mode button.",
+                    "N3a": "The rulebook shows Basic Rules, but its rule lines are hidden at the left edge of the "
+                           "desk. Drag the rulebook onto the 'desk' target so the rule 'Entrant must have a "
+                           "passport' is visible.",
                     "N4": "Inspect mode is on: click the rule line 'Entrant must have a passport' in the rulebook.",
                     "N4b": "Inspect mode is on and the rule line is selected: click the empty counter shelf in front "
                            "of the person.",
@@ -1403,11 +1408,19 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         rp = (state.get("rulebook_page") or {}).get("value", "not_open")
         if yes(state, "interrogate_prompt_visible"):
             return "N5", "click the interrogate prompt"
+        # loop28 (run 074339 t138-160, Jorji): BASIC RULES open but its left page (the rule lines) lay under the booth
+        # edge -- only 'RULES' was read; inspect mode then had no rule line to click (horn / counter clicked 20x).
+        # The rule line must be on screen (prepare: facts['nodocs_rule_visible'], OCR of the frame).
+        hidden_rule = (facts or {}).get("nodocs_rule_visible") is False
         if yes(state, "inspect_mode_on"):
             if (facts or {}).get("nodocs_rule_tick") is not None:
                 return "N4b", "inspect mode: click the empty counter shelf (rule line selected)"
+            if hidden_rule:
+                return "N4a", "inspect mode, rule line not visible: click the inspect-mode button (leave)"
             return "N4", "inspect mode: click the passport rule line"
         if rp == "basic_rules":
+            if hidden_rule:
+                return "N3a", "drag the rulebook onto the middle of the desk (its rule lines are not visible)"
             return "N3", "click the inspect-mode button"
         if rp == "not_open":
             return "N1", "drag the rulebook from its slot onto the desk"

@@ -1769,8 +1769,12 @@ def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H:
                     caption=h_.caption)
             info["rule"] = " / ".join(b.text for b in parts)
             return [m], info
+    elif nstep == "N4a":   # loop28: the rule line is not on screen -- leave inspect mode (N3a moves the rulebook)
+        tg = [b for b in boxes if getattr(b, "name", "") == "inspect_toggle"]
+        if tg:
+            return tg[:1], info
     elif nstep == "N4b":
-        ce = [b for b in boxes if getattr(b, "name", "") == "counter_empty"]
+        ce =[b for b in boxes if getattr(b, "name", "") == "counter_empty"]
         if not ce:   # the inspect highlight on the counter can fail the pixel test: the layout element itself
             e = layout.BY_NAME["counter_empty"]
             x1, y1, x2, y2 = layout.scale_box(e.box, W, H)
@@ -1778,7 +1782,10 @@ def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H:
             info["counter_empty"] = "layout"
         return ce[:1], info
     elif nstep == "N5":
-        pr = [b for b in boxes if b.text and INTERROGATE_RE.search(b.text)]
+        # not a line of a paper TOD named (run 074339 t152+: the game's slip reads '... use INSPECT mode to interrogate.')
+        papers = [d["box"] for d in (facts or {}).get("docs_named") or [] if d.get("box")]
+        pr = [b for b in boxes if b.text and INTERROGATE_RE.search(b.text) and not man.NO_DOCS_HINT_RE.search(b.text)
+              and not any(x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 for x1, y1, x2, y2 in papers)]
         if pr:
             info["prompt"] = pr[0].text
             return pr[:1], info
@@ -1905,8 +1912,16 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         facts["no_passport"] = nopp
     # loop26: from N3 on the rulebook is already open on BASIC RULES: its slot is not offered and its elements on the
     # desk are click-only (inspect button, then the rule line, then the empty counter -- no rulebook drags)
+    if nopp and facts is not None:
+        # loop28 (run 074339 t138-160): is the 'Entrant must have a passport' line on screen (OCR of this frame)?
+        # The left rulebook page can lie under the booth edge -> N3a / N4a (situation)
+        facts["nodocs_rule_visible"] = any(
+            b.kind == "text" and b.text and getattr(b, "name", "") not in layout.BY_NAME
+            and (NODOCS_RULE_RE.search(b.text) or NODOCS_HEAD_RE.search(b.text)) for b in boxes)
     nstep = man.situation(state, day if day in DAY_RULES else "1", facts)[0] if nopp else ""
-    rb_placed = nstep >= "N3"
+    rb_placed = nstep >= "N3" and nstep != "N3a"   # N3a: the rulebook is dragged further onto the desk
+    if nstep == "N3a":
+        boxes = [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"]
     if booth and facts is not None and not nopp and man.rulebook_hides_passport(state, facts):
         # loop27 step R (run 064906 t22-35, Aidan Murphy): the open rulebook lies over the passport TOD already read;
         # the rulebook slot (layout stow_papers: a rulebook dropped on the counter closes) is offered as a target
@@ -1931,7 +1946,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         # the paper stores below the counter (bulletin, rulebook slot, transcript printer) are not needed on Days 1-3
         # and only add papers to the desk (run 044332 t48-52: a fresh bulletin dragged onto the stamp strips;
         # run 005956 t18-31: 14 bulletin-storage drags)
-        hide_n = ("horn", "bulletin") + ((("rulebook",) if rb_placed else ()) if nopp
+        hide_n = ("horn", "bulletin") + ((("rulebook",) if nstep >= "N3" else ()) if nopp
                                          else ("rulebook", "transcript"))   # step N needs the rulebook (N1/N2)
         nb = [b for b in boxes if getattr(b, "name", "") not in hide_n and b.caption != "speaker/horn"]
         if len(nb) < len(boxes) and facts is not None:
@@ -1955,7 +1970,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if nopp and nstep != "N4b":
         # loop26: the empty counter is clicked only after the rule line was selected in inspect mode (N4b)
         boxes = [b for b in boxes if getattr(b, "name", "") != "counter_empty"]
-    if nopp and nstep in ("N4", "N4b", "N5"):
+    if nopp and nstep in ("N4", "N4a", "N4b", "N5"):
         # loop28 (run 070003 t143-158): inside inspect mode only the next step-N element is offered (never the
         # inspect button: TOD left inspect mode at t144 / t148 / t150 ...)
         boxes, ni_info = nodocs_inspect_boxes(boxes, nstep, facts, W, H)

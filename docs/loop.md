@@ -351,6 +351,10 @@ Loop28 (run 070003 t143-158, inspect mode darkens the booth: person 0.48 -> H le
 (identity < 0.4) are no entrant paper; `nodocs_inspect_boxes` offers exactly one click -- N4 the rule line (the
 OCR rows 'Entrant must have a' + 'passport' merged into one option), N4b `counter_empty` (layout element if the
 pixel test fails), N5 a box reading 'interrog...' -- never the inspect button; the dynamic block is one sentence.
+Loop28 N3a / N4a (run 074339 t138-193: BASIC RULES open with its left page under the booth edge, only 'RULES'
+read): `facts['nodocs_rule_visible']` = a frame OCR box reads 'must have a pass' / 'Entrant must have'. Not visible
+-> N3a drag the rulebook onto the desk target (inspect button not offered), or in inspect mode N4a click the
+inspect button only (leave); visible -> N3 / N4 as before.
 A changed ISS. city reading drops the stored verdict (and that tick's), and a city not spelled as in the rulebook
 list gets "city 'x' is not in the rulebook for C" in the state block.
 Offline `--sequential` carries entrant memory, history, exclusions and the cycle guard across consecutive
