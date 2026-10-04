@@ -1928,6 +1928,7 @@ class Entrant:
     verdict: dict | None = None     # {"value": approved|denied|cannot_decide_yet, "p", "tick"}: TOD's verdict answer
     reset_tick: int = -1            # tick of the last reset: that tick's verdict / readings are not stored
     discarded: dict | None = None   # {"tick", "verdict"} what the last reset tick dropped (logs)
+    stowed: list = field(default_factory=list)   # [(tick, 'flyer'|'citation')] executed step-K drops on the stow shelf
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
@@ -1935,6 +1936,7 @@ class Entrant:
         self.tray_seen = []   # run 005956 t18/t21: entrant 2's tray toggles blocked entrant 3's first tray opening
         self.waiting_docs = False
         self.mark_side, self.verdict = None, None
+        self.stowed = []
         self.reset_tick = tick
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
@@ -2014,6 +2016,11 @@ class Entrant:
         not the pixel check saw a change (user decision loop16: stamped = TOD's executed press)."""
         if sb is None or not (changed or (sent and action == "click" and _stamp_side(sb, frame))):
             return
+        if (action == "drag" and tb is not None and tb.kind == "region" and tb.caption == REGION_CAPS["stow_papers"]
+                and src_desc.split(" (TOD", 1)[0] in CLUTTER_IDS):
+            # loop20 run 002309 t55-79: the stowed flyer read 'unread' on the counter and went back to the desk (B3)
+            # 12 times; the stow is a history fact for the state block, never a paper identity
+            self.stowed.append((tick, src_desc.split(" (TOD", 1)[0]))
         if action == "click":
             side = _stamp_side(sb, frame)
             if side and self.handed_back is not None:
@@ -2046,7 +2053,7 @@ class Entrant:
                 "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
                 "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp,
                 "waiting_docs": self.waiting_docs, "mark_side": self.mark_side, "hb_drop": self.hb_drop,
-                "verdict_carried": self.verdict}
+                "verdict_carried": self.verdict, "stowed": list(self.stowed)}
 
     def verdict_mem(self) -> dict:
         """TOD's own readings for this entrant, for the verdict question's text (manual.verdict_question)."""

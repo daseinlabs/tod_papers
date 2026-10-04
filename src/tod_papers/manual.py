@@ -148,7 +148,8 @@ K. DESK CLUTTER (comes FIRST: before B, C, D, E, F and G, and before reading or 
    instead of the passport. Order: (1) the state block says it lies UNDER THE OPEN STAMP TRAY BAR: close the tray
    first (drag the tray tab, left end of the open stamp bar, onto the "right edge of the desk" target);
    (2) DRAG the slip or flyer (clicking does nothing) onto the "counter shelf left of the desk" target;
-   (3) continue with the matching step (C opens the tray again). A flyer may also go back to the entrant together
+   (3) continue with the matching step (C opens the tray again). A slip or flyer you stowed stays on the shelf: the
+   state block names it; never drag it back to the desk. A flyer may also go back to the entrant together
    with the rest of their papers after the stamped passport was handed back (G2).
 E0. A paper that is NOT the passport (the rulebook, the bulletin, a transcript; a citation slip or flyer: step K)
    lies under a stamp (the state
@@ -942,9 +943,13 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     for d in facts.get("docs_named") or []:
         where = "counter shelf" if d["where"] == "counter" else "desk"
         if d["id"] == UNREAD:
+            st = facts.get("stowed") or []
             lines.append(f"- Paper on the {where} ({d['pos']}): UNREAD (what it is could not be read: best identity "
                          f"{d.get('raw_id', '?')} at only p={d['p']:.2f}). It is not known to be a ticket, flyer or "
-                         "passport" + ("; on the desk it can be read" if where == "counter shelf" else ""))
+                         "passport" + ((f"; at tick {st[-1][0]} you put the {st[-1][1]} away on this shelf (step K) "
+                                        "-- a stowed paper stays there, do not drag it back to the desk")
+                                       if where == "counter shelf" and st else
+                                       "; on the desk it can be read" if where == "counter shelf" else ""))
             continue
         tail = (" -- not needed on Days 1-3; to clear the desk drop it on the 'counter shelf left of the desk' target"
                 if d["id"] in ("rulebook", "bulletin") and d["where"] == "desk" and d["p"] >= 0.6
@@ -1250,7 +1255,8 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     # gate) or TOD's entry ticket goes to the desk once the passport is open there (no tick cap: the identity gate
     # keeps a stowed slip from looping it, it is named on the desk)
     if (yes(state, "document_open_on_desk") and any(
-            d["where"] == "counter" and d["id"] in (UNREAD, "entry_ticket") for d in f.get("docs_named") or [])):
+            d["where"] == "counter" and (d["id"] == "entry_ticket" or (d["id"] == UNREAD and not f.get("stowed")))
+            for d in f.get("docs_named") or [])):
         return "B3", "drag the unread / ticket paper on the counter -> desk so it can be read"
     if yes(state, "stamp_tray_open") or f.get("tray_open_px"):
         wrong = [s_ for s_, v in (f.get("strip") or {}).items() if v.get("doc") and v["doc"] not in ("passport", UNREAD)]
