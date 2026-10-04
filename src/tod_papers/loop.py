@@ -635,6 +635,7 @@ def add_tod_facts(facts: dict, state: dict, df: dict, sinfo: dict | None) -> Non
 CLUTTER_IDS = ("citation", "flyer")   # papers that are never stamped / checked (manual step K)
 CLUTTER_P = 0.5
 CLUTTER_SIZE = {"flyer": (150, 100)}   # full native size (Pink Vice flyer, runs 041004 / 035532); visible box may be cut
+PP_GONE_STILL_P = 0.8   # loop25: a 'still_here' below this does not outweigh "no passport named" after a passport drop
 
 
 def clutter_facts(named: list[dict], tray_open: bool) -> list[dict]:
@@ -2123,7 +2124,7 @@ class Entrant:
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
 
-    def observe(self, tick: int, state: dict, papers: bool = False, day: str = "1") -> None:
+    def observe(self, tick: int, state: dict, papers: bool = False, day: str = "1", pp_named: bool | None = None) -> None:
         """Start-of-tick update from request 1 (`papers`: TOD named a paper of the entrant's -- passport, ticket,
         flyer or an unread one -- on the desk or counter). The hand-back is TOD's PASSPORT_RETURNED_Q answer on this
         frame (audit B20), not a tick window."""
@@ -2131,6 +2132,13 @@ class Entrant:
         self.nodocs_ticks = self.nodocs_ticks + 1 if (person and man.yes(state, "no_documents_presented", man.NO_DOCS_P)
                                                       ) else 0
         ra = man.returned_answer(state)
+        if (ra == "still_here" and pp_named is False and self.pp_drop is not None and tick - self.pp_drop == 1
+                and (self.stamp_clicks or self.mark_side) and state["passport_returned"]["p"] < PP_GONE_STILL_P):
+            # loop25 run 043045 t110-118 (Lena Kariska, DENIED t109): TOD dragged the stamped passport onto her (screen
+            # changed, gt given DENIED), next frame TOD named no passport anywhere but answered 'still_here' 0.72 ->
+            # step F asked for the hand-back of a passport that was gone; TOD dragged the flyer/rulebook onto the strip
+            # 5x. TOD's own paper naming (no passport) right after its passport drop on the person = returned.
+            ra = "returned"
         if ra == "returned" and person and self.handed_back is None and (
                 self.hb_drop is not None or self.stamp_clicks or self.mark_side):
             # TOD: the passport is no longer here -> this entrant is done; the next one must not inherit the readings
@@ -2264,6 +2272,11 @@ class Entrant:
 ENTRANT_PAPER_IDS = ("passport", "entry_ticket", "flyer", man.UNREAD)
 
 
+def passport_named(state: dict, df: dict) -> bool:
+    """TOD named a paper on the desk / counter the passport this frame (any p)."""
+    return any(d["id"] == "passport" for d in name_docs(state, df))
+
+
 def entrant_papers(state: dict, df: dict) -> bool:
     """TOD named (or could not name) a paper of the entrant's on the desk or counter (G2 'papers still here')."""
     return any(d["id"] in ENTRANT_PAPER_IDS for d in name_docs(state, df))
@@ -2359,7 +2372,7 @@ def offline(args) -> int:
         gate_inspection(state, asked, df)
         s_prev = state
         ent = s_ent if seq else Entrant()
-        ent.observe(otick, state, papers=entrant_papers(state, df), day=oday)
+        ent.observe(otick, state, papers=entrant_papers(state, df), day=oday, pp_named=passport_named(state, df))
         if seq and len(ent.log) != s_resets:
             s_resets = len(ent.log)
             s_cyc.reset()
@@ -2704,7 +2717,7 @@ def run(args) -> int:
             if screen == "day_end" and (ent.country or ent.stamp_clicks or ent.handed_back is not None):
                 # the day is over (Day 2 ends at the bombing mid-entrant): nothing of this entrant carries into the next day
                 ent.reset(tick, "day_end screen")
-            ent.observe(tick, state, papers=entrant_papers(state, df), day=day)
+            ent.observe(tick, state, papers=entrant_papers(state, df), day=day, pp_named=passport_named(state, df))
             if len(ent.log) != n_resets:   # new entrant: stall / pick / refusal counters are entrant-scoped
                 n_resets = len(ent.log)
                 refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0

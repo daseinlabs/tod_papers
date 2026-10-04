@@ -91,6 +91,9 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
    (passport / ticket / flyer / unread) still named on the desk or counter while the person stays -> G2
    (`waiting_docs`); `still_here` -> the drop was not a hand-back. HANDBACK_STAY / HANDBACK_DOCS_STAY and the
    Day-3 "no passport, ticket left" combination rule were removed.
+   loop25: the tick right after a drop of the paper TOD named the passport onto the person (pp_drop), with a
+   stamp on record, TOD naming no passport anywhere outweighs a `still_here` below PP_GONE_STILL_P = 0.8 -> returned
+   (run 043045 t110-118: Lena Kariska handed back, `still_here` 0.72, step F asked for a gone passport 8 ticks).
 9. `passport_sides` (strip, loop20): the passport is under a head when TOD's `passport_under_<side>` p >= 0.5 OR
    TOD's identity of the paper over that strip is "passport" (p >= 0.5) AND the pixel test finds paper on the strip
    (run 233434 t22: strip "not passport" 0.73, identity passport 0.90 -> correct APPROVED press refused). A paper
