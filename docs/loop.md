@@ -470,5 +470,10 @@ stop; 161058 Uvilia: 71 ticks).
 - An executed stow records its spot (`STOWED_SPOTS`); a flyer / citation lying on it is not in the way, an unread desk
   paper on it is `stowed` (never step B / B3, OCR dropped from the request-2 desk text).
 - An entrant paper (any doc not a flyer / citation) dropped on the put-away spot is refused (no input, logged).
+- loop25 (run 041004 t84-97): the spot keeps `STOW_BAR_GAP` (3 px) below the open bar footprint (TRAY_BAR, excluded in
+  both tray states) and is sized at the flyer's full 150x100 (`CLUTTER_SIZE`); a flyer showing >= 85% of its full height
+  is not 'cut' by the bar; a paper touches a strip only with >= 3 px vertical overlap; a stowed paper is put away even
+  when the open bar overlaps it (only a strip / the passport puts it back in the way); a sliver < 40% of a stowed spot
+  does not match it.
 - Now-block: K says "Drag THE FLYER itself ... not the paper on the counter shelf"; any step with a flyer / citation
   within 12 native px of an entrant paper adds "drag the passport (the booklet), not the flyer card".

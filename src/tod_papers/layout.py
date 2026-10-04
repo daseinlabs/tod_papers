@@ -889,7 +889,8 @@ def clear_desk_spot(docs: list[dict], is_tray_open: bool, size=OPEN_PASSPORT, in
             "check": passport_obstruction(box, obst)}
 
 
-STOW_SIDE_WEIGHT = 0.2   # an inspector's paper (bulletin / rulebook) under the stowed flyer: avoided, not forbidden
+STOW_BAR_GAP = 3         # stow spot top >= this many native px below the open bar's bottom edge
+STOW_SIDE_WEIGHT = 0.2  # an inspector's paper (bulletin / rulebook) under the stowed flyer: avoided, not forbidden
 
 
 def stow_spot(size, keep_clear: list, others: list, inspect_button: bool = False) -> dict:
@@ -900,7 +901,9 @@ def stow_spot(size, keep_clear: list, others: list, inspect_button: bool = False
     papers) at a low weight. The paper (size w x h, native) lies fully inside the desk; among the cheapest positions
     the far-left / top-left one wins. Returns {'box', 'center', 'cost'}."""
     w, h = int(size[0]), int(size[1])
-    obst = [([TRAY_BAR[0], DESK[1], TRAY_BAR[2], TRAY_BAR[3]], 1.0),   # bar + strips + knob row, open or closed
+    # TRAY_BAR is the OPEN bar's footprint (it covers the strips + knob row); excluded in both tray states, plus a
+    # STOW_BAR_GAP below its edge (loop25 run 041004 t84: spot top at y 213, the bar edge 212 -> read 'under the bar')
+    obst = [([TRAY_BAR[0], DESK[1], TRAY_BAR[2], TRAY_BAR[3] + STOW_BAR_GAP], 1.0),
             (list(BY_NAME["tray_tab"].box), 1.0), (list(BY_NAME["tray_tab_open"].box), 1.0)]
     if inspect_button:
         obst.append((list(BY_NAME["inspect_toggle"].box), 1.0))

@@ -634,6 +634,7 @@ def add_tod_facts(facts: dict, state: dict, df: dict, sinfo: dict | None) -> Non
 
 CLUTTER_IDS = ("citation", "flyer")   # papers that are never stamped / checked (manual step K)
 CLUTTER_P = 0.5
+CLUTTER_SIZE = {"flyer": (150, 100)}   # full native size (Pink Vice flyer, runs 041004 / 035532); visible box may be cut
 
 
 def clutter_facts(named: list[dict], tray_open: bool) -> list[dict]:
@@ -655,20 +656,25 @@ def clutter_facts(named: list[dict], tray_open: bool) -> list[dict]:
                         "under_bar": False, "on_passport": False, "in_way": False})
             continue
         strips = [sd for sd, (x1, x2) in layout.STRIP_X.items()
-                  if min(c, x2) - max(a, x1) >= 0.4 * (x2 - x1) and b <= sy2 and e >= sy1]
+                  # loop25 (dry run 041004 t94): a flyer whose top touches the strip's bottom edge (y 212) is not on it
+                  if min(c, x2) - max(a, x1) >= 0.4 * (x2 - x1) and min(e, sy2) - max(b, sy1) >= 3]
         bar = max(0, min(c, bx2) - max(a, bx1)) * max(0, min(e, sy1) - max(b, by1)) / area
         on_pp = any(p != d["native"] and _iou_t(p, d["native"]) >= 0.1 for p in pps)
         # loop20 run 235653 t64-78: the flyer's visible box started AT the bar's bottom edge (y 212 = STRIP_Y[0]), its
         # top hidden under the open bar -> bar overlap 0, 'on the APPROVED strip', drags grabbed the bar edge, 5
         # refusals. A paper cut off by the bar edge counts as under the bar.
-        cut = bool(b <= by2 + 2 and min(c, bx2) - max(a, bx1) > 0)
+        # loop25 (run 041004 t88-96): a flyer put away right below the bar showed its full 100 px height with its top
+        # at the bar edge (y 212) -> 'cut', under the bar, K1 vetoed the stamp press 5x. Full height visible = not cut.
+        full_h = CLUTTER_SIZE.get(d["id"], (0, 0))[1]
+        cut = bool(b <= by2 + 2 and min(c, bx2) - max(a, bx1) > 0 and not (full_h and e - b >= 0.85 * full_h))
         under = bool(tray_open and (bar >= 0.3 or cut))
         st = stowed_spot(d["native"])
         out.append({"id": d["id"], "p": d["p"], "native": d["native"], "where": "desk", "strips": strips,
                     "under_bar": under, "on_passport": on_pp,
                     # loop20 (user): any citation / flyer on the desk is in the working area -> step K first;
-                    # loop23: one lying on the spot an executed stow put it on is put away (never K again)
-                    "in_way": not (st and not strips and not under and not on_pp),
+                    # loop23: one lying on the spot an executed stow put it on is put away (never K again);
+                    # loop25: also when the open bar overlaps it -- only a strip / the passport makes it in the way
+                    "in_way": not (st and not strips and not on_pp),
                     "stowed_tick": st["tick"] if st else None})
     return out
 
@@ -1019,7 +1025,8 @@ def stow_target(frame: np.ndarray, facts: dict | None, desk_info: dict | None):
               and list(d.get("native") or d["box"]) not in mine and list(d.get("native") or d["box"]) not in [k for k, _ in keep]]
     if way:
         a, b, c, e = way[0]["native"]
-        size = (c - a, e - b)
+        fw, fh = CLUTTER_SIZE.get(way[0]["id"], (0, 0))   # loop25: a paper cut by the bar / another paper -> full size
+        size = (max(c - a, fw), max(e - b, fh))
     else:
         size = STOW_DEFAULT_SIZE
     spot = layout.stow_spot(size, keep, others, bool(sinfo.get("inspect_button")))
@@ -1041,8 +1048,10 @@ def stowed_spot(native) -> dict | None:
     for s in reversed(STOWED_SPOTS):
         b = s["box"]
         inter = layout._ov(list(native), b)
-        if inter and inter >= STOW_MATCH * min((native[2] - native[0]) * (native[3] - native[1]),
-                                               (b[2] - b[0]) * (b[3] - b[1])):
+        na, sa = (native[2] - native[0]) * (native[3] - native[1]), (b[2] - b[0]) * (b[3] - b[1])
+        # loop25 (run 041004 t94): a 10 px slice of the entry ticket under the APPROVED head matched the t54 spot
+        # -> 'put away'; a sliver under 40% of the spot is not the stowed paper
+        if inter and inter >= STOW_MATCH * min(na, sa) and na >= 0.4 * sa:
             return s
     return None
 
