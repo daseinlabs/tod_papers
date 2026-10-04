@@ -7,7 +7,7 @@ Modules (`src/tod_papers/`):
 | `extract.py` | `extract(frame_bgr) -> list[Box]`. Box = `(x1,y1,x2,y2,text,kind,conf,parent)`, client-relative physical px. |
 | `som.py` | `annotate(frame, boxes, max_marks=60) -> (annotated, {id: Box})`. Numbered tags + outlines, ids in reading order. |
 | `loop.py` | The agent. Up to three TOD requests per tick, one image each: request 1 (state, plain frame), request 1b (paper identities, Day 2/3 readings, the verdict; plain frame), request 2 (action, SoM frame). Executes TOD's input via `io_win.click/drag`. |
-| `manual.py` | The Papers, Please playing guide sent in full with every action request, the state / verdict / identity questions, the state block, the click-only / drag-only convention (stated as text; only logged). |
+| `manual.py` | The Papers, Please rules (static, ~2.4k chars) + the per-tick "what applies now" block sent with every action request, the state / verdict / identity questions, the state block, the click-only / drag-only convention (stated as text; only logged). |
 | `overlay.py` | Writes `viz_NNNN.png`: source-probability heatmap (red fill) + target probability (blue outline) + legend. |
 
 ## Decision path: what TOD decides and what code does (loop15, 2026-10-03)
@@ -53,6 +53,12 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
    nothing"; run 012545 t40-58: DENIED pressed 11x, ink under the bar read 'none', no hand-back).
    Request-2 text budget (loop21, `manual.build`): last 15 actions, lines <= 140 chars, desk OCR capped, the part
    after the manual <= `STATE_BUDGET` 7000 chars (oldest history dropped first); `text_chars` in the tick json.
+   Loop22 manual rewrite: the static booth manual (`manual.BOOTH_MANUAL` + `DAY_RULE_TEXT[day]`, ~2.4k chars, was
+   17.1k) is RULES only -- what is where, the input line, today's admission rule, the per-entrant goal, 3 time
+   wasters; no lettered steps. What applies now is `manual.now_block()`: 1-4 plain sentences after the state block,
+   chosen by `situation()` and worded from TOD's own answers (verdict, strip, presses, clutter, hand-back); only the
+   matching situation is stated, never a step letter. `situation()` letters stay for logs / cycle signature.
+   Non-booth screens get `manual.OTHER_SCREENS` (~1k chars).
    A tray toggle loop (>= 3 open/close in 8 ticks without a press) strikes the CLOSING tab through via
    `stuck.ban` before request 2 (4 ticks) with the reason in RULED OUT and a `TRAY LOOP:` line at the top of the
    history. The hand-back target is offered once a stamp press of TOD's executed for this entrant (or in G2 / step N);
@@ -64,7 +70,7 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
    (each element's option text ends with its input as a screen fact from its class, `manual.affordance_text`:
    "— click (press to stamp)", "— click", "— drag"), `target`. `decide` executes TOD's answers: no tab re-pick, no tab-target rewrite,
    no desk re-drop re-pick. A convention mismatch is logged (`convention_mismatch`, note); a click on a drag
-   element (paper, tray tab) is executed as chosen; a drag on a press-only element is a click (input conventions
+   element (paper, tray tab, lever) is a drag to TOD's target; a drag on a press-only element is a click (input conventions
    below). A citation/flyer dropped onto a strip / the tray edge / (citation) the entrant is
    REFUSED (no input, logged), never redirected.
 7. **Guards that remain** (they refuse or exclude, never pick): stamp press (`press_gate`, loop18) refused unless
@@ -100,7 +106,11 @@ TOD's pick is the ELEMENT; actuating it is the input layer's job. `decide`:
   `input_convention="drag->click (press-only element)"` and `convention_mismatch`; TOD's own answer stays in
   `tod_pick` (run 211624: 20 APPROVED stamp drags vs 6 clicks). The stamp-press guard (passport under that stamp)
   applies to the click.
-- papers and the tray tab keep TOD's action (click or drag), a mismatch is only logged.
+- mirror (loop22): `action=click` on a drag-only element -- papers, the tray tab, the lever -- is executed as a drag
+  to TOD's own `target` pick, logged `input_convention="click->drag (drag-only element)"`; TOD still chooses element
+  and target (dry run 004042 t5-30 on the rewritten manual: 4 conversions, 0 paper clicks left as clicks).
+- Empty window: the rule line and the now-block say "click the loudspeaker ...; waiting achieves nothing"; no
+  "(clicking it does nothing)" phrase remains (dry run: horn on 8/8 empty-window ticks).
 
 ### Strip drop geometry (loop16)
 

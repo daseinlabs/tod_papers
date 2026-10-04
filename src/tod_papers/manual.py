@@ -8,20 +8,20 @@ it gets two requests (loop.py):
    tray out? ...) plus the inspection decisions (issuing country, expiry,
    photo). Nothing here comes from detector labels; TOD reads the image.
 2. ACTION, on the Set-of-Mark frame: `build(state, history, day, bans)` --
-   the WHOLE manual below (every situation -> next-step rule, click vs drag,
-   stamp alignment, hand-back, page turning, day rules, what each desk element
-   does), followed by a "what is currently true on screen" block built from
-   request 1's answers, and the last 30 actions. The manual is static; only the
-   state block and the history change between ticks. No rule is pre-selected
-   for TOD: it matches the situation itself.
+   the static RULES (booth layout, input convention, today's admission rule,
+   the per-entrant goal, time wasters; ~2.4k chars, loop22), then the "what is
+   currently true on screen" block from request 1's answers, a "what applies
+   now" block (`now_block`: 1-4 plain sentences for the one situation that
+   matches, worded from TOD's own answers, no step letters), the desk OCR and
+   the last actions.
 
 The verdict (APPROVED / DENIED / cannot_decide_yet) is TOD's own answer to
 `verdict_question` (request 1b): today's rule as text plus TOD's own earlier
 readings of the entrant's papers, labelled as such. No code computes a verdict
 (the old needed_stamp / wrong_stamp / undecided_stamp were removed, audit A1-A4).
 
-`situation(state)` names the manual step that applies to a state. It is for
-logs and dry-run evaluation only and is never sent to TOD.
+`situation(state)` names the step that applies to a state (logs, cycle
+signature); its letter is never sent to TOD, only now_block's sentence.
 
 `input_class(box, booth)` is the click-only / drag-only convention the manual
 states. loop.py only logs a mismatch with TOD's `action` answer; it never
@@ -59,225 +59,68 @@ DAY_RULES = {
 # the one input-convention line: manual section 2 and the request-2 `action` question say it identically (B26)
 INPUT_LINE = "Click for stamps/buttons/horn/page corners, drag for papers and the tray tab."
 
-MANUAL = """\
-PAPERS, PLEASE -- HOW TO WORK THE BORDER BOOTH WITH THE MOUSE
+# the booth manual: RULES only (loop22 rewrite: the old 17k-char section 4 was a prose script of ~25 lettered steps
+# and pushed request 2 into HTTP 413). What applies NOW is stated per tick by now_block() from TOD's own answers.
+BOOTH_MANUAL = """\
+PAPERS, PLEASE -- BORDER BOOTH RULES
+You are the border inspector. Each turn: CLICK one numbered element, DRAG one numbered element onto a numbered
+drop target, or WAIT (while something moves, or when nothing should be done).
 
-You are the border inspector. Every input is either a CLICK on one numbered element or a DRAG of one
-numbered element onto a numbered drop target. Each turn you choose the input (click, drag or wait), the element
-and, for a drag, the drop target. Choose "wait" when nothing should be done.
+1. WHAT IS WHERE
+- Top strip: the border yard. The LOUDSPEAKER (horn) on the booth roof calls the next person.
+- Left: the booth WINDOW with the person. Under it the grey-green COUNTER SHELF where they put their papers.
+  Handing a paper back = dropping it ON THE PERSON, not on the shelf.
+- Lower right: your dark DESK; papers are read there. The shelf left of the desk puts papers away.
+- STAMP TRAY: a grey tab at the desk's right edge; dragged left it opens a bar with a red DENIED (left) and a
+  green APPROVED (right) stamp. A stamp marks only the paper in the dark strip directly under THAT stamp.
+- INSPECT MODE (desk darkened, red dotted frame): papers and stamps do not work; the red button at the lower right
+  switches it.
 
-1. WHAT IS WHERE ON THE BOOTH SCREEN
-- Top strip: the border yard seen from above (the queue of people on the left, guards, the road). Just
-  above the booth window, on the booth roof, sits a dark box with a LOUDSPEAKER (horn). Clicking the
-  loudspeaker calls the next person in the queue.
-- Left side, below the yard: the BOOTH WINDOW. When an entrant is being served you see a person from the
-  chest up behind the glass. A yellow SHUTTER LEVER sits at the top-right corner of the window frame.
-- Under the window: the grey-green COUNTER SHELF. The entrant puts their documents here. To hand documents
-  back, drop them on the PERSON in the window, not on the shelf.
-- Under the counter shelf: a row of small drawers and readouts (date, rulebook drawer, weight). The date
-  readout shows today's date. They are not needed to process an entrant.
-- Right of the window, the whole lower right of the screen: your dark dotted DESK. Documents are read here.
-  Faint text near its bottom says DRAG DOCUMENTS HERE.
-- Right edge of the desk: a small grey TAB sticks out. It is the handle of the STAMP TRAY. When the tray
-  is out, its tab is at the LEFT end of the grey stamp bar ("stamp tray tab (left end of the open stamp
-  bar)").
-- When the stamp tray is out, a grey bar crosses the upper desk with two big stamps on it: a red DENIED
-  stamp (left) and a green APPROVED stamp (right), each with a dark round knob on top (the stamp head).
-  Each stamp is ONE element: clicking anywhere on it (knob or red/green body) presses it.
-  Under the bar runs a dark strip with the words ALIGN VISA BENEATH STAMP: that strip is where a passport
-  must lie for a stamp to mark it. A stamp only marks what lies in the strip directly under THAT stamp.
+2. INPUT: {input}
 
-2. CLICK OR DRAG
-""" + INPUT_LINE + """ (Each numbered element's text ends with its input: "— click" or "— drag".)
+3. TODAY'S RULES
+{rules}
+Arstotzkans never need an entry ticket. A reading the rule needs that is not read yet is no reason to approve or
+deny: get that paper read first.
 
-3. DROP TARGETS (marked regions, used only as the end point of a drag)
-- "stamp landing strip (under the APPROVED stamp head)" / "(under the DENIED stamp head)": the part of the
-  dark strip directly beneath that stamp. Drop the passport here so the stamp lands on it.
-- "the entrant at the booth window -- drop documents ON THE PERSON to hand them back": the person standing
-  in the booth window. Dropping a document on the person gives it back; they say "Thank you." and leave.
-  Offered whenever a person is at the window. Dropping a document on the counter shelf under the window
-  does NOT hand it back -- it just lies there.
-- "desk (drop documents here to read them)": free desk space to the left of the stamp tray. Drop documents
-  here to open and read them, or to move a bulletin/rulebook out of the way.
-- "right edge of the desk (drag the tray tab here to put the stamp tray away)": offered while the tray is
-  out. Dragging the tray tab here closes the tray.
-- "counter shelf left of the desk -- drop the rulebook, bulletin, a flyer or a citation slip here to put it away": an
-  open rulebook or bulletin dropped here closes and leaves the desk; a citation slip or flyer dropped here is out of
-  the way. None of them is needed on Days 1-3. Offered whenever such a paper is on the desk.
+4. GOAL FOR EACH ENTRANT
+- Window empty -> click the loudspeaker (horn) to call the next person; waiting achieves nothing.
+- Bring every paper the person hands over onto the desk where it can be read; read before deciding.
+- The stamp you press is the one your own verdict names, with the passport lying under that stamp. One press.
+- Then return every paper to the person: the entry ticket first, the passport LAST (they leave once it is back).
+- Anything on the desk that is not theirs (flyer, citation slip, rulebook, bulletin) goes to the shelf first;
+  it is never stamped or handed over alone.
+- A person who hands over no documents gets no stamp: interrogate via inspect mode (rulebook on the desk ->
+  Basic Rules page -> inspect button -> the rule line -> the empty counter -> the INTERROGATE prompt).
 
-4. PROCESSING ONE ENTRANT -- FIND THE FIRST LINE THAT MATCHES WHAT IS CURRENTLY TRUE
-A. Nobody is at the window and no document is on the counter or desk: click the loudspeaker on the booth
-   roof to call the next person. The loudspeaker ONLY works when the window is empty and the desk is clear;
-   while a person stands at the window it does nothing (it is then not even offered). The person then walks up to the window by themselves; if someone is
-   already walking up, wait.
-B. A person is at the window and their passport lies on the counter shelf under the window: drag the
-   passport down to the desk ("desk" target) to open it. Clicking it does nothing. From Day 3 a foreigner
-   also hands over an ENTRY TICKET (small slip): drag it to the desk as well so its date can be read.
-   A paper the state block calls UNREAD ("document on the counter -- unread": nobody could tell what it is,
-   counter papers are too small to read) is not known to be a ticket, a flyer or anything else: drag it to the
-   "desk" target so it can be read.
-C. An open passport lies on the desk and the stamp tray is closed: read the passport (on Day 1 only the
-   issuing country at the bottom matters; from Day 2 also the EXP. date and ISS. city), then open the stamp tray by dragging the tab at the right edge of the
-   desk to the left (drop it on the "desk" target). If the state block says the passport's data page is NOT
-   readable (half hidden or clipped), the verdict cannot be decided yet: first drag the passport onto the
-   "clear desk space" target so its whole page shows.
-D. The stamp tray is open but the passport is NOT lying under a stamp head (it is off to the side, or it
-   has slid up behind the tray so only an edge shows): stamps only mark a document lying directly beneath
-   the stamp heads, in the dark strip under the tray. First decide APPROVED or DENIED (section 5; the state
-   block shows your own verdict answer), then
-   drag the PASSPORT (not the entry ticket) to the stamp landing strip under THAT stamp. The verdict cannot be
-   decided while the passport's data page is not readable: if the state block says "Passport data page
-   readable: no", the next move is the passport onto the "clear desk space" target, NOT onto a stamp strip. Both strips are valid landing places:
-   the APPROVED strip and the DENIED strip each work; put the passport under the stamp you intend to use.
-   Do not drag the stamps; they are clicked. Do not drop the passport onto the tray bar itself: it slides
-   behind the tray where no stamp reaches it.
-D2. RECOVERY: the entrant's passport is no longer visible anywhere on the desk or the counter shelf (it
-   slid behind the open stamp tray, so the desk looks empty while the person is still at the window). If
-   the passport is on the counter shelf, that is rule B, not D2: leave the tray open and drag the passport
-   to the desk. Only for a hidden passport: close the stamp tray by
-   dragging its tab (left end of the open stamp bar) back to the RIGHT (drop it on the "right edge of the
-   desk" target). The hidden passport
-   reappears; then continue with C.
-K. DESK CLUTTER (comes FIRST: before B, C, D, E, F and G, and before reading or deciding): the state block names an
-   M.O.A. CITATION slip or a flyer (the pink "The Pink Vice" card) lying anywhere on the desk -- on a stamp
-   landing strip, under the open stamp tray bar (also when only its lower part shows below the bar), on the
-   passport or elsewhere on the desk -- or an entry
-   ticket LEFT BEHIND by an entrant who has already gone (nobody at the window: it can no longer be handed back,
-   so it is stowed like a slip, never dragged onto the window). None is the
-   entrant's document to check: never stamp it, never hand a citation to the entrant, never hand a flyer back
-   instead of the passport. Order: (1) the state block says it lies UNDER THE OPEN STAMP TRAY BAR: close the tray
-   first (drag the tray tab, left end of the open stamp bar, onto the "right edge of the desk" target);
-   (2) DRAG the slip or flyer (clicking does nothing) onto the "counter shelf left of the desk" target;
-   (3) continue with the matching step (C opens the tray again). A slip or flyer you stowed stays on the shelf: the
-   state block names it; never drag it back to the desk. A flyer may also go back to the entrant together
-   with the rest of their papers after the stamped passport was handed back (G2).
-E0. A paper that is NOT the passport (the rulebook, the bulletin, a transcript; a citation slip or flyer: step K)
-   lies under a stamp (the state
-   block says "the RULEBOOK ... lies under the DENIED stamp, not the passport"): stamping it is useless and
-   will be refused. Drag the rulebook or bulletin onto the "counter shelf left of the desk" target (other
-   papers to the "desk" target), then drag the PASSPORT (from the
-   counter shelf or the desk) to the strip under the stamp you need. The rulebook is never needed on Day 1.
-E. The stamp tray is open, the passport lies under a stamp head (the state block says "The passport is
-   under: APPROVED" or "DENIED"), and it is NOT stamped yet (no stamp ink is read on it, see F): decide with
-   section 5, then click the stamp the passport is lying under; if you want the
-   other decision, first drag the passport to the other strip -- and if another paper (the entry ticket) lies
-   under the stamp you need, first drag that paper to the "desk" target (E0). Never click the stamp of the
-   decision you do not want, not even because the passport lies under it. The stamp you can press is the one your
-   own verdict names (the other stamp is struck through, and both are while your verdict is cannot_decide_yet;
-   your stamp is also struck through until the passport lies under it: drag the passport there first);
-   change your verdict if you disagree. ONE click. If the state block says a paper (the
-   entry ticket) lies across the open passport, first drag that paper off it onto the "clear desk space" /
-   "desk" target so the passport lies clear, then drag the passport by its own visible part. Clicking the stamp the passport is
-   NOT under stamps nothing (the press is refused). Decide only when every reading today's rule needs is known
-   -- the state block lists your own readings (issuing country, and from Day 2 the EXP. date and ISS. city, on
-   Day 3 the entry ticket of a foreigner). If one is not read yet (your verdict was cannot_decide_yet), do not
-   stamp: drag the passport (or the ticket) to the "desk" target so it can be read, then put the passport under
-   the stamp you need.
-H. INSPECT MODE (the state block says "Inspect mode is ON": desk darkened, red dotted frame, red text
-   HIGHLIGHT DISCREPANCIES): documents cannot be moved and stamps cannot be used while it is on. Click the red
-   inspect-mode button at the lower right of the desk once to leave it, then continue with the matching step.
-   Inspect mode is not needed on Days 1-3 except in step N (no passport presented): the button is only offered
-   while inspect mode is on or in step N, and in step N you stay in inspect mode until the interrogation is done.
-F. The passport IS STAMPED: the state block says "Stamp pressed: APPROVED at tick N" or "DENIED at tick N" (your
-   press on the stamp the passport lay under was executed). The state block also shows the stamp-ink reading of
-   the passport page as a fact: if it says no ink is visible and you see no mark either, the press may have missed
-   -- you may press that stamp once more. Otherwise STOP clicking stamps and hand the papers back by dragging them onto the person at the window ("the
-   entrant at the booth window -- drop documents ON THE PERSON to hand them back"). ORDER: the entrant leaves
-   the moment the PASSPORT is back, and any paper still on the desk is left behind. So FIRST drag every OTHER
-   paper of the entrant's (the entry ticket from Day 3) onto the person, one per turn; the stamped PASSPORT goes
-   back LAST. While the state block names an entry ticket on the desk or the counter shelf, hand that back, not
-   the passport. The open stamp tray does not have to be closed first; drag a paper by the part that is visible.
-F2. WRONG STAMP: the state block says which stamp was pressed. If it was stamped APPROVED but the
-   rule (section 5) says DENIED, click DENIED once more -- a DENIED stamp overrules APPROVED -- then hand it
-   back. If it was stamped DENIED but should have been APPROVED, it cannot be fixed (DENIED always wins and
-   an APPROVED stamp on top does not count): hand it back as it is. The first two mistakes of each day are
-   only warnings.
-N. NO DOCUMENTS: the state block says "The person at the window has handed over no documents: yes". There is
-   nothing to stamp: this entrant is sent away WITHOUT a stamp; the stamp tray tab is not offered.
-   Waiting does not help (the day does not go on until you ask for the passport). Ask for it with inspect
-   mode, one input per tick, reading the state block like in C/D/E:
-   N1. "Rulebook page open on the desk: NOT_OPEN": drag the rulebook from its slot below the counter onto the
-       DESK (target "desk (drop documents here to read them)"). Not onto the counter shelf left of the desk: that
-       puts the rulebook away again.
-   N2. Rulebook open on another page: click its page corner until the page is BASIC_RULES.
-   N3. Rulebook on BASIC_RULES, inspect mode off: click the red inspect-mode button.
-   N4. Inspect mode ON, no interrogate prompt: click the rule line "Entrant must have a passport", then click
-       the EMPTY counter shelf.
-   N5. "An INTERROGATE prompt is visible: yes": click it. The entrant answers and leaves on their own (or
-       hands over a passport -- then continue with B). Then go back to A.
-G2. The state block says the entrant is STILL at the window waiting for the rest of their documents: drag
-   each paper of theirs still on the desk or the counter shelf (entry ticket ...) onto the entrant. If nobody
-   is at the window any more, the entrant has gone: a paper of theirs still lying there is left behind and is
-   stowed (step K), not handed back.
-G. After the documents were handed back (the state block says so) the person leaves by themselves; wait
-   while they walk away. When the window is empty and nothing is on the counter: go back to A and click the
-   loudspeaker to call the next person.
-An entrant is finished only after their passport is stamped AND handed back. Clicking the loudspeaker
-while someone is still at the window does nothing.
+5. THINGS THAT WASTE TIME
+- Dragging a stamp (stamps are clicked); re-pressing a stamp that already printed.
+- Dropping papers under the tray bar (they hide behind it).
+- Opening and closing the tray back and forth.
+"""
 
-5. DECIDING: APPROVED OR DENIED
-- Day 1, 1982.11.23: the ONLY rule is the issuing country (printed in large letters at the bottom of the
-  passport, e.g. ARSTOTZKA). Issuing country ARSTOTZKA -> APPROVED. Any other country -> DENIED.
-  Expiry date is NOT a Day 1 rule; do not deny anyone on Day 1 for expiry.
-- Day 2, 1982.11.24 (expiry and city checks start today): foreigners may enter too. APPROVED if not
-  expired (expiry after 1982.11.24) and the ISS. (issuing) city belongs to the
-  passport's country; otherwise DENIED. Valid issuing cities (rulebook Regional Map): ARSTOTZKA: Orvech
-  Vonor, East Grestin, Paradizna; ANTEGRIA: St. Marmero, Glorian, Outer Grouse; IMPOR: Enkyo, Haihan,
-  Tsunkeido; KOLECHIA: Yurko City, Vedor, West Grestin; OBRISTAN: Skal, Lorndaz, Mergerous; REPUBLIA: True
-  Glorian, Lesrenadi, Bostan; UNITED FEDERATION: Great Rapid, Shingleton, Korista City.
-- Day 3, 1982.11.25: Arstotzkans need a valid passport only. Foreigners also need an entry ticket dated
-  1982.11.25; no ticket or a different date -> DENIED.
-A reading the rule needs that is not read yet (country, EXP. date, ISS. city, a foreigner's ticket on Day 3) is
-  not a reason to approve or to deny: the verdict cannot be decided yet; get the paper read first (desk target).
-The first entrant of day 1 is the tutorial; follow the same rule (his passport is Arstotzkan -> APPROVED).
+DAY_RULE_TEXT = {
+    "1": "Day 1 (1982.11.23): only Arstotzkans may enter. Issuing country (large letters at the bottom of the "
+         "passport) ARSTOTZKA -> APPROVED; any other country -> DENIED. Expiry, city and tickets are not checked.",
+    "2": "Day 2 (1982.11.24): foreigners may enter too, with a valid passport: not expired (EXP. after 1982.11.24) "
+         "and the ISS. city listed in the rulebook for its country; otherwise DENIED.",
+    "3": "Day 3 (1982.11.25): every passport must be valid: not expired (EXP. after 1982.11.25) and the ISS. city "
+         "listed in the rulebook for its country. Foreigners also need an ENTRY TICKET VALID ON 1982.11.25; no "
+         "ticket or another date -> DENIED.",
+}
 
-6. BULLETIN, RULEBOOK AND MULTI-PAGE PAPERS
-- The bulletin (Ministry of Admission sheet) and the rulebook can lie open on the desk. If one covers the
-  passport or the place you need to work, drag it aside to the left part of the desk ("desk" target). They
-  are not needed to process day-1 entrants.
-- An M.O.A. CITATION slip (printed after a mistake) is the inspector's, not the entrant's: never stamp it, never
-  hand it to the entrant. On the desk it is stowed first (step K); on the counter shelf leave it.
-- A flyer an entrant puts down with their papers (the pink "The Pink Vice" card) has no rule value and is not a
-  document to check: never stamp it. On the desk it is stowed first (step K: counter shelf left of the
-  desk); after the stamped passport went back it may instead go back WITH the entrant's other papers.
-- Multi-page papers (the bulletin shows "3/4" at its bottom) turn pages when you click their bottom-right
-  corner. Do not drag a page corner.
-
-7. OTHER SCREENS
+OTHER_SCREENS = """\
+PAPERS, PLEASE -- SCREENS OUTSIDE THE BOOTH
+Each turn: CLICK one numbered element, or WAIT while a screen fades.
 - Main menu (title screen): click STORY.
-- Day-select screen ("Select day to continue or start a new game"): a row of day tiles near the top left.
-  The goal is the LATEST day available: click the tile with the highest DAY number (on a fresh save the only
-  tile is DAY 1 / NEW). It is a tile, not a button. Never click BACK,
-  QUIT, or the trash/delete icon on this screen: BACK returns to the main menu and undoes progress, the
-  trash icon deletes the save. If no day tile is drawn yet, choose wait.
-  Clicking a tile opens a box under the tiles (the day's name, money, family) with CONTINUE and CANCEL text:
-  click CONTINUE to load that day (the upper of the two short lines at the bottom of the box; OCR may misspell
-  it, e.g. 'COHTIHUE'). Clicking a tile, or the box's own "Day N" title, does nothing while the box is open.
-- After the day tile, the intro, newspaper and bulletin screens advance with NEXT, then WALK TO WORK takes
-  you to the booth. Full-screen text without a button: click the text.
-- End of day (the family budget screen: SAVINGS, SALARY, RENT, HEAT, FOOD, MEDICINE ..., a total, SLEEP): the
-  total at the bottom is your money after tonight. If it would be NEGATIVE (a minus sign, e.g. "$-5") you are
-  arrested for debt and the game is over. Click HEAT, FOOD (and MEDICINE) one at a time to untick them until
-  the total is zero or more, then click SLEEP. RENT cannot be unticked. If the total is not negative, click
-  SLEEP right away.
-- While something is moving (the person walking in, a screen fading), choose wait.
-
-8. MISTAKES SEEN BEFORE (do not repeat)
-- Dropping the passport on "empty space" under the tray: it hid behind the tray and was never stamped.
-- Dragging the APPROVED/DENIED stamps around: nothing happens; stamps are clicked.
-- Clicking APPROVED while the passport was above the tray instead of under the stamp: no mark landed.
-- Clicking the loudspeaker over and over while the entrant was still at the window.
-- Clicking the clock/date drawer: it does nothing useful.
-- Run 20261002_083908: the passport was stamped DENIED at tick 9, then the stamps were clicked 10 more
-  times instead of handing it back. Once the stamp press is on record, hand the passport back.
-- Run 20261002_083908: the stamp was chosen while the issuing country was not yet visible (it read "other"
-  with only the visa page in view). Stamp only once the country name has been read.
-- Leaving the passport hidden behind the open tray and clicking the loudspeaker: nothing happens; close
-  the tray (drag its tab right) to get the passport back (rule D2).
-- Run 20261002_092612: the stamped passport was dropped on the counter shelf 5 times; it just lay there and
-  the entrant never took it. Drop it ON THE PERSON in the window instead.
-- Clicking the stamp the passport is NOT under: the stamp comes down on the empty strip and nothing is
-  marked. Click the stamp the passport is lying under, or drag the passport to the other strip first.
+- Day select ("Select day to continue or start a new game"): click the day tile with the HIGHEST day number (a fresh
+  save has only DAY 1 / NEW). Never click BACK, QUIT or the trash icon (BACK undoes progress, trash deletes the
+  save). If no tile is drawn yet, wait. A clicked tile opens a box with CONTINUE and CANCEL: click CONTINUE (the
+  upper short line; OCR may misspell it, e.g. 'COHTIHUE').
+- Intro, newspaper and bulletin screens: NEXT; then WALK TO WORK goes to the booth. Text without a button: click it.
+- End of day (SAVINGS, RENT, HEAT, FOOD ..., a total, SLEEP): a NEGATIVE total ("$-5") means arrest for debt.
+  Click HEAT, FOOD (and MEDICINE) one at a time to untick them until the total is zero or more, then SLEEP
+  (RENT cannot be unticked). A total of zero or more: click SLEEP right away.
 """
 
 # --------------------------------------------------------------------------
@@ -1002,21 +845,18 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     rp = state.get("rulebook_page")
     if rp:
         lines.append(f"- Rulebook page open on the desk: {rp['value'].upper()} (p={rp['p']:.2f})")
-    if no_passport(state, facts):
-        lines.append("- The person has presented no documents: there is nothing to stamp; they are sent away "
-                     "without a stamp. Ask for the passport with inspect mode (step N)")
     for d in facts.get("docs_named") or []:
         where = "counter shelf" if d["where"] == "counter" else "desk"
         if d["id"] == UNREAD:
             st = facts.get("stowed") or []
             lines.append(f"- Paper on the {where} ({d['pos']}): UNREAD (what it is could not be read: best identity "
                          f"{d.get('raw_id', '?')} at only p={d['p']:.2f}). It is not known to be a ticket, flyer or "
-                         "passport" + ((f"; at tick {st[-1][0]} you put the {st[-1][1]} away on this shelf (step K) "
-                                        "-- a stowed paper stays there, do not drag it back to the desk")
+                         "passport" + ((f"; at tick {st[-1][0]} you put the {st[-1][1]} away on this shelf "
+                                        "-- it stays there")
                                        if where == "counter shelf" and st else
                                        "; on the desk it can be read" if where == "counter shelf" else ""))
             continue
-        tail = (" -- not needed on Days 1-3; to clear the desk drop it on the 'counter shelf left of the desk' target"
+        tail = (" -- the inspector's, not needed for this entrant"
                 if d["id"] in ("rulebook", "bulletin") and d["where"] == "desk" and d["p"] >= 0.6
                 and not (d["id"] == "rulebook" and no_passport(state, facts)) else "")   # step N reads it on the desk
         cl = next((c for c in facts.get("clutter") or [] if c["native"] == d.get("native")), None)
@@ -1031,9 +871,12 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
             why.append("EXP. date not read")
         lines.append("- Passport data page readable: no (" + "; ".join(why) + "); the 'clear desk space' target "
                      "moves it so the whole page shows")
+    by_side: dict[str, list] = {}
     for t, side in facts.get("stamp_clicks") or []:
-        lines.append(f"- Stamp pressed: {side.upper()} at tick {t} (your press, the passport lay under the {side.upper()} "
-                     "stamp; the passport counts as stamped from then on)")
+        by_side.setdefault(side.upper(), []).append(t)
+    for side, ts in by_side.items():
+        lines.append(f"- Stamp pressed: {side} at tick{'s' if len(ts) > 1 else ''} {', '.join(map(str, ts[-4:]))} "
+                     "(your press with the passport under it: it counts as stamped)")
     for t, side in facts.get("missed_stamps") or []:
         lines.append(f"- The {side.upper()} stamp was clicked at tick {t} while the passport lay under the other "
                      "stamp: nothing was stamped")
@@ -1043,23 +886,14 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
             lines.append(f"- Under the {side.upper()} stamp: " + (
                 _pp_phrase(facts["strip"][side]) if side in pu else under_phrase(facts, side)))
         lines.append("- The passport is under: " + (" and ".join(x.upper() for x in pu) if pu else "none")
-                     + ". Only the stamp your verdict of this tick names is offered; a press on a stamp the passport "
-                       "is not under is refused")
-        wrong = [s_ for s_ in ("denied", "approved") if (facts["strip"][s_].get("doc") or "passport") != "passport"
-                 and s_ not in pu]
-        if wrong:
-            lines.append(f"- A paper that is NOT the passport lies under the {' and '.join(w.upper() for w in wrong)} "
-                         "stamp (a stamp press there is refused): drag it to the \"desk\" target first to clear "
-                         "that strip (E0)")
+                     + " (only the stamp your verdict names is offered)")
     pop = facts.get("paper_on_passport")
     if pop:
-        lines.append(f"- A paper ({pop['id'].upper()}) lies across the open passport on the desk (it covers "
-                     f"{int(round(100 * pop['covered']))}% of the passport's box); the 'clear desk space off the "
-                     "passport' target takes it off the passport")
+        lines.append(f"- A paper ({pop['id'].upper()}) lies across the open passport on the desk (covers "
+                     f"{int(round(100 * pop['covered']))}% of it)")
     tr = ticket_to_return(state, facts)
     if stamped(state, facts) and tr:
-        lines.append(f"- The entrant's ENTRY TICKET still lies on the {tr} (the entrant leaves as soon as the "
-                     "passport is returned)")
+        lines.append(f"- The entrant's ENTRY TICKET still lies on the {tr}")
     v = tod_verdict(state, facts)
     if v:
         lines.append(f"- Your verdict for this entrant (your own answer, {v['where']}): {v['value'].upper()} "
@@ -1068,11 +902,9 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     if facts.get("waiting_docs"):
         said = f"you said 'returned', p={ra['p']:.2f}" if ra else "your answer on an earlier tick"
         lines.append(f"- The entrant's passport has been handed back ({said}) and the entrant is STILL at the window "
-                     "with papers of theirs on the desk or counter shelf: they wait for the rest of their documents "
-                     "(step G2)")
+                     "with papers of theirs on the desk or counter shelf")
     elif facts.get("handed_back") is not None:
-        lines.append(f"- Documents were handed back at tick {facts['handed_back']}: this entrant is finished and "
-                     "leaves by themselves; call the next person once the window is empty")
+        lines.append(f"- Documents were handed back at tick {facts['handed_back']}: this entrant is finished")
     open_ok = yes(state, "passport_open_readable")
     c = state.get("issuing_country")
     if c:
@@ -1103,10 +935,8 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         a_ = state["entry_ticket_dated_today"]
         lines.append(f"- Entry ticket (your reading, this frame): {a_['value']}"
                      + (f" ({a_['from']})" if a_.get("from") else "") + f" (p={a_['p']:.2f})")
-    elif open_ok and day not in ("2", "3"):  # Day 1: expiry is not a rule
-        lines.append("- (Day 1: expiry is not checked; only the issuing country decides)")
-    d = DAY_RULES.get(day)
-    lines.append(f"- Day: {day} -- {d}" if d else "- Day: not yet known (treat as day 1 until a later date shows)")
+    lines.append(f"- Day: {day} (today {today})" if day in DAY_RULES
+                 else "- Day: not yet known (treat as day 1 until a later date shows)")
     return "\n".join(lines)
 
 
@@ -1158,40 +988,128 @@ def entrant_line(facts: dict | None) -> str | None:
     return "THIS ENTRANT SO FAR: " + "; ".join(bits) if bits else None
 
 
-def _sections() -> dict:
-    import re
-    parts = re.split(r"\n(?=\d\. )", MANUAL)
-    out = {0: parts[0]}
-    for p in parts[1:]:
-        out[int(p.split(".", 1)[0])] = p
-    return out
-
-
-def _day_rule_section(sec5: str, day: str) -> str:
-    """Section 5 with only today's bullet (the other days' rules are not in force)."""
-    d = day if day in DAY_RULES else "1"
-    lines = sec5.rstrip("\n").split("\n")
-    head, keep, cur = [lines[0]], [], None
-    for ln in lines[1:]:
-        if ln.startswith("- Day "):
-            cur = ln[6]
-        elif ln.startswith("A reading"):
-            cur = "all"   # the cannot-decide-yet line holds on every day
-        elif not ln.startswith("  "):
-            cur = "tail1"
-        if cur in (d, "all") or (cur == "tail1" and d == "1"):
-            keep.append(ln)
-    return "\n".join(head + keep) + "\n"
-
-
 def manual_text(booth: bool, day: str) -> str:
-    """The manual sections for this screen family (run 054238: 3.8k-word request 2 = 5.5 s per TOD call;
-    measured 2.3 s at 2k words, 1.3 s at 1k). Booth: sections 1-6 and 8 with today's rule only; other screens:
-    section 7. No step is pre-selected inside a section."""
-    S = _sections()
+    """The static manual: booth RULES with today's admission rule only (<= 3k chars), or the other-screens text.
+    Nothing situation-specific: that is now_block(), built per tick from TOD's own answers."""
     if not booth:
-        return S[0] + "\n" + S[7]
-    return "\n".join([S[0], S[1], S[2], S[3], S[4], _day_rule_section(S[5], day), S[6], S[8]])
+        return OTHER_SCREENS
+    d = day if day in DAY_RULE_TEXT else "1"
+    return BOOTH_MANUAL.format(input=INPUT_LINE, rules=DAY_RULE_TEXT[d])
+
+
+_CLUTTER_NOW = {"citation": "an M.O.A. citation slip", "flyer": "a flyer (The Pink Vice card)",
+                "entry_ticket": "an entry ticket", "rulebook": "the rulebook", "bulletin": "the bulletin"}
+_SHELF = "the 'counter shelf left of the desk' target"
+_TRAY_CLOSE = "drag the tray tab onto the 'right edge of the desk' target"
+
+
+def _verdict_now(state: dict, facts: dict) -> str:
+    v = tod_verdict(state, facts)
+    if not v:
+        return "Your verdict: not given yet"
+    w = "this tick" if v["where"] == "this frame" else v["where"]
+    return f"Your verdict ({w}): {v['value'].upper()} p={v['p']:.2f}"
+
+
+def _cap(s: str) -> str:
+    return s[:1].upper() + s[1:]
+
+
+def now_block(state: dict, day: str, facts: dict | None = None) -> str:
+    """'WHAT APPLIES NOW': 1-4 plain sentences for the one situation `situation()` matches, worded from TOD's own
+    answers (state + entrant memory). No step letters; no other situation is listed (loop22)."""
+    f = facts or {}
+    step, _ = situation(state, day, f)
+    vside = verdict_side(state, f)
+    vtxt = _verdict_now(state, f)
+    sc = f.get("stamp_clicks") or []
+    out: list[str] = []
+    if step.startswith("N"):
+        out.append("The person has handed over no documents: there is nothing to stamp. Ask for the passport with "
+                   "inspect mode.")
+        out.append({"N1": "The rulebook is not open: drag it from its slot onto the 'desk' target (not the shelf).",
+                    "N2": "The rulebook is open on another page: click its page corner until Basic Rules shows.",
+                    "N3": "The rulebook shows Basic Rules: click the red inspect-mode button.",
+                    "N4": "Inspect mode is on: click the rule line 'Entrant must have a passport', then the empty "
+                          "counter shelf.",
+                    "N5": "An INTERROGATE prompt is visible: click it; the person answers and leaves (or hands over "
+                          "a passport)."}[step])
+    elif step == "H":
+        out.append("Inspect mode is on: papers and stamps do not work. Click the red inspect-mode button to leave it.")
+    elif step in ("K", "K1"):
+        cl = next(c for c in f.get("clutter") or [] if c["in_way"])
+        what = _CLUTTER_NOW.get(cl["id"], cl["id"])
+        if cl.get("left_behind"):
+            out.append(f"{_cap(what)} was left behind by an entrant who has gone: it cannot be handed back.")
+        else:
+            where = ("on the " + " and ".join(x.upper() for x in cl["strips"]) + " strip" if cl.get("strips") else
+                     "on the passport" if cl.get("on_passport") else "on the desk")
+            out.append(f"{_cap(what)} lies {where}; it is not the entrant's document to check -- never stamp it or "
+                       "hand it over alone.")
+        out.append(f"It lies under the open stamp tray bar: first {_TRAY_CLOSE}, then put it on {_SHELF}."
+                   if step == "K1" else f"Drag it onto {_SHELF} first.")
+    elif step == "G2":
+        out.append("The passport is back and the entrant is still at the window waiting for the rest of their "
+                   "papers: drag each paper of theirs still on the desk or counter shelf onto the person.")
+    elif step == "G":
+        out.append(f"Papers handed back at tick {f.get('handed_back')}: this entrant is finished and leaves by "
+                   "themselves; wait.")
+    elif step == "A":
+        out.append("The window is empty: click the loudspeaker to call the next person; waiting achieves nothing "
+                   "(nobody comes until you call).")
+    elif step in ("F", "F0", "F2"):
+        t_, sd_ = sc[-1]
+        out.append(f"You pressed {sd_.upper()} at tick {t_}: the passport counts as stamped; do not press again.")
+        if step == "F2":
+            out.append(f"{vtxt}: one DENIED press overrules APPROVED; then hand the papers back.")
+        elif step == "F0":
+            out.append(f"Return the entry ticket (on the {ticket_to_return(state, f)}) to the person first, then the "
+                       "passport: drop each ON THE PERSON at the window.")
+        else:
+            out.append("Hand the papers back: drag the passport ON THE PERSON at the window (any other paper of "
+                       "theirs first; the person leaves once the passport is back).")
+    elif step == "6":
+        out.append("A bulletin or the rulebook covers the passport: drag it aside to the 'desk' target.")
+    elif step == "B3":
+        out.append("A paper of the entrant's still lies on the counter shelf and has not been read (it may be the "
+                   "entry ticket): drag it to the 'desk' target so it can be read.")
+    elif step == "E0":
+        pu = f.get("passport_under") or []
+        bad = [s_ for s_, v in (f.get("strip") or {}).items() if v.get("doc") and v["doc"] not in ("passport", UNREAD)]
+        side = vside if vside in bad else bad[0]
+        out.append(f"The {f['strip'][side]['doc'].upper()} lies under the {side.upper()} stamp, not the passport (a "
+                   "press there is refused): drag it to the 'desk' target to clear that strip.")
+        out.append(vtxt + (f"; the passport lies under {' and '.join(x.upper() for x in pu)}." if pu else "."))
+    elif step == "E?":
+        out.append(f"{vtxt} -- not decided: a reading today's rule needs is missing. Do not stamp; drag the passport "
+                   "(or the ticket) to the 'desk' target so it can be read.")
+    elif step == "E-":
+        pu = " and ".join(x.upper() for x in f.get("passport_under") or [])
+        out.append(f"{vtxt}. The passport lies under {pu}: drag it to the strip under the {vside.upper()} stamp.")
+    elif step == "E":
+        out.append(f"{vtxt}. The passport lies under {vside.upper()}: press the {vside.upper()} stamp once.")
+    elif step == "D":
+        out.append("The stamp tray is open and the passport is not under a stamp. " + vtxt + "."
+                   + (f" Drag the PASSPORT (not the ticket) to the strip under the {vside.upper()} stamp." if vside
+                      else " The passport goes under the stamp your verdict names once it is decided."))
+    elif step == "D2":
+        out.append(f"The stamp tray is open but the passport is not in view (it slid behind the tray): {_TRAY_CLOSE} "
+                   "to uncover it.")
+    elif step == "B":
+        out.append("A paper lies on the counter shelf: drag it onto the 'desk' target so it can be read.")
+    elif step == "C":
+        if (f.get("desk_target") or {}).get("target") == "desk_clear":
+            out.append("The passport's data page is not readable yet: drag the passport onto the 'clear desk space' "
+                       "target so the whole page shows.")
+        else:
+            out.append("The passport is open on the desk and the tray is closed: read it, then open the stamp tray "
+                       "(drag the tab at the desk's right edge onto the 'desk' target).")
+    else:
+        out.append("A person is at the window but none of their papers was seen yet: wait for them to put them down.")
+    if f.get("paper_on_passport") and step not in ("K", "K1"):
+        out.append(f"A {f['paper_on_passport']['id'].upper()} lies across the open passport: the 'clear desk space "
+                   "off the passport' target takes it off.")
+    return "WHAT APPLIES NOW (from your own answers above):\n" + "\n".join(f"- {x}" for x in out)
 
 
 def build(state: dict, history, day: str, ban_lines: list[str] | None = None, facts: dict | None = None) -> str:
@@ -1202,7 +1120,7 @@ def build(state: dict, history, day: str, ban_lines: list[str] | None = None, fa
     full_hist = [hist_line(x) for x in list(history)[-HIST_MAX:]]
     booth = (facts or {}).get("booth", True)
     man_t = manual_text(booth, day)
-    fixed = [state_block(state, day, facts) if booth else
+    fixed = [state_block(state, day, facts) + "\n\n" + now_block(state, day, facts) if booth else
              f"- Screen: {state.get('screen', {}).get('value')} (p={state.get('screen', {}).get('p', 0):.2f})",
              desk_text_block(facts, cap=True) if booth else ""]
 
@@ -1249,24 +1167,17 @@ CLUTTER_NAMES = {"citation": "an M.O.A. CITATION slip", "flyer": "a flyer (The P
 
 
 def clutter_phrase(c: dict, tray_open: bool) -> str:
-    """State-block tail for a citation slip / flyer (loop.clutter_facts: where it lies, whether it is in the way)."""
+    """State-block tail (a fact, no instruction: now_block says what to do) for a citation slip / flyer."""
     if c.get("left_behind"):
-        return (" -- LEFT BEHIND: its entrant has already left (nobody is at the window), so it cannot be handed "
-                "back any more. It is desk clutter now: drag it onto the 'counter shelf left of the desk' target "
-                "(step K), never onto the window")
-    who = (" -- the inspector's CITATION slip, NOT the entrant's document: never stamp it, never hand it to the entrant"
-           if c["id"] == "citation" else
-           " -- the entrant's FLYER, not a document to check: never stamp it, never hand it back instead of the passport")
+        return " -- LEFT BEHIND by an entrant who has gone"
+    who = " -- the inspector's citation slip, not the entrant's" if c["id"] == "citation" else         " -- a flyer, not a document to check"
     if not c["in_way"]:
-        return who + "; it lies out of the way (leave it)"
+        return who + "; out of the way"
     if c["under_bar"] and tray_open:
-        return (who + ". It lies UNDER THE OPEN STAMP TRAY BAR: close the tray first (drag the tray tab onto the "
-                "'right edge of the desk' target), then drag it onto the 'counter shelf left of the desk' target (step K)")
-    where = (f"ON THE {' and '.join(x.upper() for x in c['strips'])} landing strip"
-             + ("s" if len(c["strips"]) > 1 else "") if c["strips"]
+        return who + "; it lies UNDER THE OPEN STAMP TRAY BAR"
+    where = (f"on the {' and '.join(x.upper() for x in c['strips'])} strip" if c["strips"]
              else "on the passport" if c["on_passport"] else "on the desk")
-    return who + (f". It lies {where}: drag it onto the 'counter shelf left of the desk' target NOW (step K comes "
-                  "before every other booth step)")
+    return who + f"; it lies {where}"
 
 
 def clutter_step(state: dict, f: dict):

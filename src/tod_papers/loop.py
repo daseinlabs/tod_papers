@@ -1870,7 +1870,8 @@ def decide(res, P: dict) -> dict:
     TOD's `source` pick (audit A5/B26): a mismatch with the element's click/drag convention (manual section 2) is
     logged in `note` / `convention_mismatch`. One input convention (loop16): `drag` on a press-only element is
     executed as a click (`input_convention` "drag->click (press-only element)", TOD's answer kept in tod_pick);
-    a click on a drag element (paper, tray tab) is executed as TOD chose. Pure: no I/O."""
+    its mirror (loop22): `click` on a drag-only element (paper, tray tab, lever) is executed as a drag to TOD's own
+    `target` pick (`input_convention` "click->drag (drag-only element)"). Pure: no I/O."""
     src = str(res["source"].value)
     act = str(res["action"].value) if "action" in res.answers else None
     if src == WAIT_KEY or not src.isdigit() or act == "wait":
@@ -1889,7 +1890,12 @@ def decide(res, P: dict) -> dict:
         conv, note, action = "drag->click (press-only element)", mismatch, "click"
         return dict(action="click", src=src, tgt="none", note=note, tod_pick=tod_pick, convention_mismatch=mismatch,
                     input_convention=conv, veto=None, p_src=float(res["source"].probabilities.get(src, 0.0)))
-    if cls in ("click", "drag") and cls != action:
+    if cls == "drag" and action == "click" and "target" in res.answers:
+        # mirror of the press-only rule (loop22): a paper / the tray tab / the lever is drag-only; a click on it does
+        # nothing in the game, so it is executed as a drag to TOD's own `target` pick. TOD chose element and target.
+        mismatch = f"TOD chose click #{src}; that element is drag-only (executed as a drag to TOD's target)"
+        conv, note, action = "click->drag (drag-only element)", mismatch, "drag"
+    elif cls in ("click", "drag") and cls != action:
         mismatch = f"TOD chose {action} #{src}; by the convention that element is {cls}-only (executed as TOD chose)"
         note = mismatch
     if action == "drag" and "target" not in res.answers:
@@ -1916,7 +1922,7 @@ def decide(res, P: dict) -> dict:
         if tb_.caption in bad:
             veto = f"refused: {cid} #{src} onto '{short(tb_.caption, 40)}' (step K: never stamped / handed back)"
     return dict(action=action, src=src, tgt=tgt, note=note, tod_pick=tod_pick, convention_mismatch=mismatch,
-                veto=veto, p_src=float(res["source"].probabilities.get(src, 0.0)))
+                input_convention=conv, veto=veto, p_src=float(res["source"].probabilities.get(src, 0.0)))
 
 
 @dataclass
