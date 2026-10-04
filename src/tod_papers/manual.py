@@ -601,7 +601,11 @@ def verdict_question(day: str, mem: dict) -> dict:
                             + VERDICT_RULES[d] + "\nYOUR OWN EARLIER READINGS of this entrant's papers (answers you "
                             "gave on earlier ticks; check them against the picture, the papers may be visible now):\n"
                             + "\n".join(lines) + "\nApply today's rule. If a reading the rule needs is not read yet "
-                            "and is not readable in this picture either, answer cannot_decide_yet.",
+                            "and is not readable in this picture either, answer cannot_decide_yet."
+                            + ("\nA paper still lying on the counter shelf (below the window, not yet dragged onto the "
+                               "desk) has not been read and may be the entry ticket: while any paper lies on the "
+                               "counter, 'no entry ticket' is not a final reading -- answer cannot_decide_yet."
+                               if d == "3" else ""),
             "criteria": {"approved": "APPROVED: the entrant's papers meet today's rule",
                          "denied": "DENIED: the entrant's papers break today's rule",
                          "cannot_decide_yet": "a reading today's rule needs (country, EXP. date, ISS. city or, for a "
