@@ -397,7 +397,11 @@ def cycle_signature(screen: str, state: dict, step: str, action: str, src_desc: 
 def cycle_progress(ent: "Entrant") -> tuple:
     """Progress = the loop's own entrant bookkeeping: resets so far (processed count), passport placed under a
     stamp, stamp presses, hand-back, waiting for the rest of the papers."""
-    return (len(ent.log), bool(ent.last_under), len(ent.stamp_clicks), ent.handed_back, ent.waiting_docs)
+    return (len(ent.log), bool(ent.last_under), len(ent.stamp_clicks), ent.handed_back, ent.waiting_docs,
+            ent.nodocs_stage, ent.nodocs_rule_tick is not None)   # loop26: a step-N sub-step reached is progress
+
+
+NODOCS_RULE_RE = re.compile(r"must\s*have\s*a\s*pass", re.I)   # loop26: Basic Rules line for step N4
 
 
 def cycle_callout(hit: dict) -> str:
@@ -466,6 +470,7 @@ def probe_context(prev_facts: dict | None, prev_state: dict | None) -> dict:
             # the passport lies under a stamp head (a loop restart loses the press memory)
             "ask_ink": bool(pressed or pf.get("mark_side") or pf.get("passport_under")),
             # PASSPORT_RETURNED_Q (audit B20): after a drop on the person, a press or ink, or once handed back
+            "nodocs_on": bool(pf.get("nodocs_on")),   # loop26: step-N sub-state questions stay asked
             "ask_returned": bool(man.yes(ps, "person_at_window") and (
                 pressed or pf.get("mark_side") or pf.get("hb_drop") is not None
                 or pf.get("handed_back") is not None or pf.get("waiting_docs")))}
@@ -505,7 +510,7 @@ def state_probe(tod: TodClient, frame: np.ndarray, args, day: str = "unknown", i
         return tod.ask(q, text=man.STATE_TEXT, image_data_url=encode_image(small, args.send_format, args.jpeg_quality))
     if day in DAY_RULES:
         del q["day"]   # the day only changes on the day-end / bulletin screens, where it is asked
-    q.update(man.state_questions(today, inspect, prev))
+    q.update(man.state_questions(today, inspect, prev, nodocs_on=bool((ctx or {}).get("nodocs_on"))))
     q.pop("passport_open_readable", None)   # the inspection gate also opens on open-on-desk / the paper identity
     if not tray_px or (facts or {}).get("tray_open_px") is False:
         for k in man.STRIP_KEYS:   # no stamp bar on the pixels: nothing can lie under a stamp head
@@ -1762,6 +1767,10 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     nopp = bool(booth and facts is not None and man.no_passport(state, facts))
     if facts is not None:
         facts["no_passport"] = nopp
+    # loop26: from N3 on the rulebook is already open on BASIC RULES: its slot is not offered and its elements on the
+    # desk are click-only (inspect button, then the rule line, then the empty counter -- no rulebook drags)
+    nstep = man.situation(state, day if day in DAY_RULES else "1", facts)[0] if nopp else ""
+    rb_placed = nstep >= "N3"
     if nopp:
         # step N reads the rulebook on the DESK; the stow shelf puts it away (Jorji dry-run: TOD dropped the rulebook
         # on 'counter shelf left of the desk' instead of the desk). The desk stays a drop target.
@@ -1779,7 +1788,8 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         # the paper stores below the counter (bulletin, rulebook slot, transcript printer) are not needed on Days 1-3
         # and only add papers to the desk (run 044332 t48-52: a fresh bulletin dragged onto the stamp strips;
         # run 005956 t18-31: 14 bulletin-storage drags)
-        hide_n = ("horn", "bulletin") + (() if nopp else ("rulebook", "transcript"))   # step N needs the rulebook
+        hide_n = ("horn", "bulletin") + ((("rulebook",) if rb_placed else ()) if nopp
+                                         else ("rulebook", "transcript"))   # step N needs the rulebook (N1/N2)
         nb = [b for b in boxes if getattr(b, "name", "") not in hide_n and b.caption != "speaker/horn"]
         if len(nb) < len(boxes) and facts is not None:
             facts["horn_hidden"] = True
@@ -1788,6 +1798,20 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         # run 021438 t3: TOD clicked the red inspect button; inspect mode froze every drag for 8 ticks. Days 1-3 need
         # no inspect mode, so the button is offered only while TOD says inspect mode is on (to leave it)
         boxes = [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"]
+    if rb_placed:
+        # loop26: N3-N5 keep BASIC RULES open -- the rulebook's page corners (turn the page away) are not offered
+        dx1_, dy1_, dx2_, dy2_ = layout.scale_box(layout.DESK, W, H)
+        boxes = [b for b in boxes if not (b.kind == "page_corner" and dx1_ <= b.center[0] <= dx2_
+                                          and dy1_ <= b.center[1] <= dy2_)]
+        # N3 (inspect mode off): a rule line click does nothing; N4b: the rule line is selected already. Only N4
+        # offers the rulebook's lines (click-only below)
+        if nstep != "N4":
+            rbs = [d["box"] for d in (facts or {}).get("docs_named") or [] if d["id"] == "rulebook"]
+            boxes = [b for b in boxes if getattr(b, "name", "") in layout.BY_NAME or not any(
+                x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 for x1, y1, x2, y2 in rbs)]
+    if nopp and nstep != "N4b":
+        # loop26: the empty counter is clicked only after the rule line was selected in inspect mode (N4b)
+        boxes = [b for b in boxes if getattr(b, "name", "") != "counter_empty"]
     rp_now = (state.get("rulebook_page") or {}).get("value", "not_open")
     if nopp and not man.yes(state, "inspect_mode_on") and rp_now not in ("not_open", "basic_rules"):
         # loop24 step N2: the rulebook's next-page corner + the CONTENTS entries (rulebook_nav) replace vision's page
@@ -1875,6 +1899,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     dn_all = (facts or {}).get("docs_named") or []
     same_paper = paper_groups(dn_all)
     free_ids = set()   # step-N rulebook: pages dragged, corners/rule lines clicked -> no single input stated
+    click_ids = set()   # loop26: N3-N5 rulebook elements (already placed): click-only
     for i, b in idmap.items():   # name each paper by TOD's request-1 identity answer (geometry: centre inside)
         if b.kind in ("region", "background"):
             continue
@@ -1890,6 +1915,8 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
                     desc[str(i)] = f"{d['id']} (TOD {d['p']:.2f}) — {rest}"
                 if nopp and d["id"] == "rulebook":
                     free_ids.add(i)   # step N: rulebook pages and rule lines are clicked (page corner, inspect-mode rule)
+                    if rb_placed:
+                        click_ids.add(i)
                 elif d["id"] != "other" or b.kind == "text":   # a texted 'other' paper is still a paper (run
                     doc_ids.add(i)                          # 090830 t22-43: the Pink Vice flyer clicked 8x)   # run 114927 t30-86: the counter passport was labelled 'rubber stamp' (click-only)
                     # a single-sheet paper's page corner is only another drag handle on it (passport: 29 of 93
@@ -1900,7 +1927,9 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     # each element's option text ends with its input, a screen fact from its class (audit B26: TOD dragged
     # click-only stamps/horn 22-34x per launch). It describes the element; TOD's `action` answer is still executed.
     for i, b in idmap.items():
-        if b.kind != "region" and i not in free_ids:
+        if i in click_ids:
+            desc[str(i)] = f"{desc[str(i)]} — click"
+        elif b.kind != "region" and i not in free_ids:
             aff = man.affordance_text(b, _cls(b, booth, i in doc_ids))
             if aff:
                 desc[str(i)] = f"{desc[str(i)]} — {aff}"
@@ -1971,6 +2000,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     send = _small_for_send(annotated, args)
     url = encode_image(send, args.send_format, args.jpeg_quality)
     return dict(annotated=annotated, idmap=idmap, desc=desc, banned_ids=banned_ids, doc_ids=doc_ids, src_ids=src_ids,
+                click_ids=click_ids,
                 tgt_ids=tgt_ids, regions=region_info, booth=booth, questions=questions, state_text=state_text,
                 text_info=text_info, image_url=url, image_kb=round(len(url) * 3 / 4 / 1024, 1), clutter_src=clutter_src,
                 flyer_back=flyer_back,
@@ -2048,7 +2078,8 @@ def decide(res, P: dict) -> dict:
         why = "" if (src == WAIT_KEY or not src.isdigit()) else f"TOD action=wait (source #{src} not used)"
         return dict(action="wait", src=src, tgt="none", note=why, tod_pick=("wait", src), convention_mismatch=None,
                     p_src=float(res["source"].probabilities.get(src, 0.0)))
-    cls = _cls(P["idmap"].get(int(src)), P["booth"], int(src) in P.get("doc_ids", ()))
+    cls = ("click" if int(src) in P.get("click_ids", ()) else
+           _cls(P["idmap"].get(int(src)), P["booth"], int(src) in P.get("doc_ids", ())))
     action = act if act in ("click", "drag") else ("drag" if cls == "drag" else "click")
     tod_pick = (action, src)
     note, mismatch, conv = "", None, None
@@ -2126,6 +2157,9 @@ class Entrant:
     stowed: list = field(default_factory=list)   # [(tick, 'flyer'|'citation')] executed step-K drops on the stow shelf
     pp_drop: int | None = None   # tick of the last drag of a paper TOD named the passport onto the person
     nodocs_ticks: int = 0   # loop24: consecutive ticks TOD said 'no documents' with a person at the window
+    nodocs_on: bool = False   # loop26: step N held for this entrant; kept while 'no documents' >= NO_DOCS_KEEP_P
+    nodocs_stage: str = ""    # loop26: furthest step-N sub-step reached (progress for the stall / cycle rules)
+    nodocs_rule_tick: int | None = None   # loop26: executed click on the 'must have a passport' line in inspect mode
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
@@ -2135,6 +2169,7 @@ class Entrant:
         self.mark_side, self.verdict = None, None
         self.stowed = []
         self.pp_drop = None
+        self.nodocs_on, self.nodocs_stage, self.nodocs_rule_tick = False, "", None
         self.reset_tick = tick
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
@@ -2146,6 +2181,12 @@ class Entrant:
         person = man.yes(state, "person_at_window")
         self.nodocs_ticks = self.nodocs_ticks + 1 if (person and man.yes(state, "no_documents_presented", man.NO_DOCS_P)
                                                       ) else 0
+        if self.nodocs_on and not person:
+            # the memory lasts while the person stands there (a single dip below NO_DOCS_KEEP_P, run 045949 t139
+            # 0.396, only pauses step N for that tick: manual.no_passport)
+            self.nodocs_on, self.nodocs_stage, self.nodocs_rule_tick = False, "", None
+        if not man.yes(state, "inspect_mode_on", 0.3):
+            self.nodocs_rule_tick = None   # the rule-line selection lives only inside inspect mode
         ra = man.returned_answer(state)
         if (ra == "still_here" and pp_named is False and self.pp_drop is not None and tick - self.pp_drop == 1
                 and (self.stamp_clicks or self.mark_side) and state["passport_returned"]["p"] < PP_GONE_STILL_P):
@@ -2192,8 +2233,18 @@ class Entrant:
                 and (self.country is None or c["p"] >= self.country["p"] or c["value"] == self.country["value"])):
             self.country = {"value": c["value"], "p": c["p"], "tick": tick}
         ci = state.get("issuing_city")
-        if (ci and ci["p"] >= (CARRY_COUNTRY_P if ci["value"] in man._ALL_CITIES else man.DENY_P)
-                and (self.city is None or ci["p"] >= self.city["p"] or ci["value"] == self.city["value"])):
+        city_changed = False
+        if ci and ci["p"] >= (CARRY_COUNTRY_P if ci["value"] in man._ALL_CITIES else man.DENY_P) and (
+                self.city is None or ci["value"] == self.city["value"] or ci["p"] >= self.city["p"]
+                or ci["p"] >= man.DENY_P):
+            # loop26 (run 045949 t76-78, Prasanna): 'East Grestin' t76 -> APPROVED 0.81 stored; t77-78 read 'Eist
+            # Grestin' 0.86 -> the stale APPROVED was pressed -> citation. A newer confident reading replaces the old
+            # one, and a verdict stored before a changed city reading is dropped (TOD is asked again)
+            if (self.city is not None and ci["value"] != self.city["value"] and self.verdict is not None
+                    and self.verdict["tick"] < tick):
+                self.discarded = {"tick": tick, "verdict": self.verdict, "why": "city reading changed"}
+                self.verdict = None
+            city_changed = self.city is not None and ci["value"] != self.city["value"]
             self.city = {"value": ci["value"], "p": ci["p"], "tick": tick}
         e = state.get("exp_read")   # TOD's pick among the OCR dates (request 1b)
         if e and e["p"] >= 0.5 and (self.exp is None or e["p"] >= self.exp["p"]):
@@ -2202,6 +2253,10 @@ class Entrant:
         if ms:   # TOD's stamp-ink reading (STAMP_INK_Q) is the 'stamped' sign (audit B19)
             self.mark_side = {**ms, "tick": tick}
         v = state.get("verdict")
+        if city_changed and v:
+            # this tick's verdict was asked with the old city in its text: it is not stored (or pressed); next tick asks
+            self.discarded = {"tick": tick, "verdict": state.pop("verdict"), "why": "city reading changed"}
+            v = None
         if v and v["p"] >= man.VERDICT_P:
             self.verdict = {"value": v["value"], "p": v["p"], "tick": tick}
         for k in man.CHECK_KEYS:   # Day 2/3 checks, carried like the country (the page is hidden once under a stamp)
@@ -2230,6 +2285,9 @@ class Entrant:
             self.stowed.append((tick, src_desc.split(" (TOD", 1)[0]))
             if STOW_PLAN.get("box"):   # loop23: the derived desk spot it went to (all day: it stays put away)
                 STOWED_SPOTS.append({"tick": tick, "id": self.stowed[-1][1], "box": list(STOW_PLAN["box"])})
+        if (action == "click" and man.yes(state, "inspect_mode_on") and self.nodocs_on
+                and NODOCS_RULE_RE.search(getattr(sb, "text", "") or "")):
+            self.nodocs_rule_tick = tick   # loop26 N4 -> N4b: the passport rule line is selected
         if action == "click":
             side = _stamp_side(sb, frame)
             if side and self.handed_back is not None:
@@ -2259,11 +2317,18 @@ class Entrant:
             if src_desc.startswith("passport (TOD"):
                 self.pp_drop = tick   # loop23: the PASSPORT itself was dropped on the person (missed-press gate)
 
+    def step_seen(self, step: str) -> None:
+        """loop26: step N (any sub-step) held this tick -> the sequence stays on for this entrant (observe ends it)."""
+        if step.startswith("N"):
+            self.nodocs_on = True
+            self.nodocs_stage = max(self.nodocs_stage, step)
+
     def facts(self, tick: int, df: dict) -> dict:
         return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
                 "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
                 "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp,
                 "waiting_docs": self.waiting_docs, "mark_side": self.mark_side, "hb_drop": self.hb_drop, "pp_drop": self.pp_drop, "nodocs_ticks": self.nodocs_ticks,
+                "nodocs_on": self.nodocs_on, "nodocs_rule_tick": self.nodocs_rule_tick,
                 "verdict_carried": self.verdict, "stowed": list(self.stowed)}
 
     def verdict_mem(self) -> dict:
@@ -2405,6 +2470,7 @@ def offline(args) -> int:
         D = decide(res, P)
         fill_derived(res, D)
         step = man.situation(state, oday if oday in DAY_RULES else "1", facts)
+        ent.step_seen(step[0])
         s_prev_f = facts
         cyc_rec = None
         if seq:
@@ -2748,6 +2814,7 @@ def run(args) -> int:
                               "mark_side": ent.mark_side, "verdict": ent.verdict, "hb_drop": ent.hb_drop}
             rec["clutter"] = facts.get("clutter")
             step = man.situation(state, day if day in DAY_RULES else "1", facts)
+            ent.step_seen(step[0])
             sline = state_line(state)
             rec.update(state=_clean_state(state), state_line=sline,
                        manual_step_for_state=list(step))  # diagnostic only, never sent to TOD
@@ -2759,7 +2826,7 @@ def run(args) -> int:
                 stop_run = stop_run + 1 if (screen in stop_screens and sure) else 0
                 if stop_run >= args.stop_consecutive:
                     stop_reason = f"screen in {sorted(stop_screens)} for {stop_run} consecutive ticks"
-            key = (screen, man.state_summary(state, facts))
+            key = (screen, man.state_summary(state, facts), step[0] if step[0].startswith("N") else "")
             # step 7 (cutscene / day_end / menu screens: the Day 2 bombing ends the day mid-entrant) repeats the same
             # click on purpose; the stall / pick / repeat / cycle stops skip it (bounded by NONBOOTH_STOP instead)
             nonbooth = step[0] == "7"

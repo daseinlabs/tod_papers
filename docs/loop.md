@@ -340,6 +340,14 @@ the rulebook's destination). While it holds: tray tab, stamps and the stow shelf
 desk', it puts the rulebook away) are not offered; the rulebook slot, transcript printer, inspect button, the
 desk and layout.py's click-only `counter_empty` element (pixel test: nothing on the shelf; Day 2+) are;
 rulebook elements are not drag-only, and the rulebook gets no "put it away" hint.
+Loop26 persistence: once step N held for an entrant (`Entrant.nodocs_on`; also started by the rulebook open on
+BASIC RULES with no paper of theirs, p >= 0.5) it holds while no_documents stays >= NO_DOCS_KEEP_P (0.4) and the
+person is there, with no fresh 3-tick streak; the sub-state questions stay asked. N4 is split: N4 click the rule
+line (offered click-only), N4b (an executed click on a 'must have a passport' line in inspect mode) click
+`counter_empty`. From N3 on the rulebook slot and the desk page corners are not offered, the rulebook's lines only
+in N4, `counter_empty` only in N4b. The furthest sub-step reached counts as progress for the stall / cycle rules.
+A changed ISS. city reading drops the stored verdict (and that tick's), and a city not spelled as in the rulebook
+list gets "city 'x' is not in the rulebook for C" in the state block.
 Offline `--sequential` carries entrant memory, history, exclusions and the cycle guard across consecutive
 frames of one run (each decision counts as executed and changed).
 

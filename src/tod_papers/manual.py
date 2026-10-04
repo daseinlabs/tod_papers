@@ -174,6 +174,7 @@ NO_DOCS_KEYS = ("rulebook_page", "interrogate_prompt_visible")   # step N sub-st
 NO_DOCS_DATES = (DAY_DATES["3"],)   # days 1-3: only Jorji (Day 3) presents no documents
 NO_DOCS_TICKS = 3   # loop24: consecutive 'no documents' ticks before step N (entrants put papers down a tick late)
 NO_DOCS_P = 0.6   # p(no_documents_presented) for step N; also drops the passport-inspection questions
+NO_DOCS_KEEP_P = 0.4   # loop26: once step N started for this entrant it holds while TOD's answer stays >= this
 RULEBOOK_PAGES = {"not_open": "the rulebook is not lying open on the desk (closed in its slot, or not visible)",
                   "contents": "it is open on the CONTENTS page (list of sections)",
                   "basic_rules": "it is open on the BASIC RULES page (rule lines such as 'Entrant must have a "
@@ -198,7 +199,8 @@ def no_docs_questions() -> dict:
     }
 
 
-def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS, prev: dict | None = None) -> dict:
+def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS, prev: dict | None = None,
+                    nodocs_on: bool = False) -> dict:
     """The facts the manual is keyed on, asked as one TOD request over the plain
     frame. All noul except issuing_country (choice). `inspect` selects which
     inspection questions are asked (loop.py gates them on the desk OCR). `prev` = last tick's TOD answers
@@ -307,7 +309,9 @@ def state_questions(today: str = DAY_DATES["1"], inspect: tuple = INSPECT_KEYS, 
             "and nothing of theirs is on the desk",
             "no - the person has handed over a passport or other papers (on the counter or on the desk), or no "
             "person is at the window")
-    if prev is not None and yes(prev, "no_documents_presented", NO_DOCS_P):
+    # loop26 (run 045949 t137-144): 'no documents' dipped to 0.40-0.58 between sub-steps; while the step-N sequence
+    # is on for this entrant (Entrant.nodocs_on) its sub-state questions stay asked
+    if prev is not None and (yes(prev, "no_documents_presented", NO_DOCS_P) or nodocs_on):
         q.update(no_docs_questions())
         inspect = ()   # no passport to inspect: those answers would be meaningless
     return {k: v for k, v in q.items() if k not in INSPECT_KEYS or k in inspect}
@@ -970,6 +974,12 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         ci = known_city(state, facts)
         lines.append(f"- Passport ISS. city (your reading, {ci[2]}, p={ci[1]:.2f}): {ci[0]}" if ci
                      else "- Passport ISS. city: not read yet")
+        kc_ = known_country(state, facts)
+        if ci and kc_ and kc_[0] in ISSUING_CITIES and ci[0] not in ISSUING_CITIES[kc_[0]]:
+            # loop26 (run 045949 t77-78, Prasanna): 'Eist Grestin' read 0.86, approved on t76's 'East Grestin' ->
+            # citation. The rulebook's list is a screen fact; the spelling either is on it or it is not.
+            lines.append(f"- city '{ci[0]}' is not in the rulebook for {kc_[0]} (rulebook: "
+                         f"{', '.join(ISSUING_CITIES[kc_[0]])})")
     for k, c in ((facts.get("checks_carried") or {}).items() if day in ("2", "3") else ()):
         if k not in state:
             lines.append(f"- {_CHECK_LABEL[k]}: {'yes' if c['value'] else 'no'} (your reading at tick {c['tick']}, "
@@ -1083,8 +1093,9 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
         out.append({"N1": "The rulebook is not open: drag it from its slot onto the 'desk' target (not the shelf).",
                     "N2": n2_text(state, f),
                     "N3": "The rulebook shows Basic Rules: click the red inspect-mode button.",
-                    "N4": "Inspect mode is on: click the rule line 'Entrant must have a passport', then the empty "
-                          "counter shelf.",
+                    "N4": "Inspect mode is on: click the rule line 'Entrant must have a passport' in the rulebook.",
+                    "N4b": "Inspect mode is on and the rule line is selected: click the empty counter shelf in front "
+                           "of the person.",
                     "N5": "An INTERROGATE prompt is visible: click it; the person answers and leaves (or hands over "
                           "a passport)."}[step])
     elif step == "H":
@@ -1320,12 +1331,19 @@ def no_passport(state: dict, facts: dict | None = None) -> bool:
         # with a stamp press / passport drop on record has presented documents.
         return False
     slip = bool(game_slip(facts))
-    if not slip and f.get("nodocs_ticks", NO_DOCS_TICKS) < NO_DOCS_TICKS:
+    # loop26 (run 045949 t137-144, Jorji): N2 turned the rulebook to BASIC RULES, then 'no documents' read 0.58 /
+    # 0.52 / 0.40 / 0.48 -> step '?' / K, the flyer and rulebook were dragged around, the 3-tick streak restarted.
+    # Once the sequence started for this entrant (Entrant.nodocs_on: step N held on an earlier tick) it holds while
+    # TOD's answer stays >= NO_DOCS_KEEP_P; the rulebook open on BASIC RULES with no paper of theirs also starts it.
+    active = bool(f.get("nodocs_on"))
+    rules_open = (state.get("rulebook_page") or {}).get("value") == "basic_rules"
+    if not (slip or active or rules_open) and f.get("nodocs_ticks", NO_DOCS_TICKS) < NO_DOCS_TICKS:
         # loop24 (run 040242 t41, Ava Pardal): 'no documents' 0.82 on the tick she arrived, before her papers reached
         # the counter -> N1 dragged the rulebook out over her flyer -> 5 refused put-away drags. Step N needs the
         # answer on NO_DOCS_TICKS consecutive ticks (or the game's slip)
         return False
-    if (not yes(state, "no_documents_presented", 0.5 if slip else NO_DOCS_P) or not yes(state, "person_at_window")
+    nd_p = NO_DOCS_KEEP_P if active else 0.5 if (slip or rules_open) else NO_DOCS_P
+    if (not yes(state, "no_documents_presented", nd_p) or not yes(state, "person_at_window")
             or yes(state, "document_on_counter_shelf")):
         return False
     return not any((d["id"] == "passport" and d["p"] >= 0.5) or d["id"] == "entry_ticket"
@@ -1344,7 +1362,9 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         if yes(state, "interrogate_prompt_visible"):
             return "N5", "click the interrogate prompt"
         if yes(state, "inspect_mode_on"):
-            return "N4", "inspect mode: click the passport rule line, then the empty counter shelf"
+            if (facts or {}).get("nodocs_rule_tick") is not None:
+                return "N4b", "inspect mode: click the empty counter shelf (rule line selected)"
+            return "N4", "inspect mode: click the passport rule line"
         if rp == "basic_rules":
             return "N3", "click the inspect-mode button"
         if rp == "not_open":
