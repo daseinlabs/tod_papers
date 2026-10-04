@@ -1083,6 +1083,63 @@ def stow_target(frame: np.ndarray, facts: dict | None, desk_info: dict | None):
                caption=REGION_CAPS["stow_papers"])
 
 
+def stow_hygiene(regions: list, facts: dict | None) -> dict:
+    """loop27 (run 061133 t77-83, Graham Young): TOD dragged the put-away flyer off its spot back onto the desk, then
+    the counter passport onto the put-away spot 5x (refused) -> stop. Option hygiene, TOD still picks among what is
+    offered: (1) a flyer / citation lying on its put-away spot (clutter stowed_tick set, not in the way) is struck
+    through (hidden_by: stowed) -- unless it overlaps a paper TOD named the passport / entry ticket / unread (then it is
+    offered with 'move it off the <x>'); (2) the put-away spot is offered only while a non-stowed flyer / citation is in
+    the working area (stow_target); (3) while the put-away spot is offered the entrant's papers are not (the target
+    question is shared by every source; the passport / ticket never get the put-away spot): the flyer / citation in the
+    way goes first (manual K). Returns {key: {'boxes', 'keep', 'why', 'line'}} in frame px."""
+    f = facts or {}
+    named = f.get("docs_named") or []
+    clutter = f.get("clutter") or []
+
+    def fbox(native):
+        d = next((d for d in named if d.get("native") and list(d["native"]) == list(native)), None)
+        return list(d["box"]) if d else None
+    ents = [(d["id"], list(d["box"])) for d in named if d.get("native") and not d.get("stowed")
+            and d["id"] in ("passport", "entry_ticket", man.UNREAD)]
+    way = [b for b in (fbox(c["native"]) for c in clutter if c.get("in_way") and c.get("native")) if b]
+    out, covering = {}, []
+    st_boxes, st_ticks = [], []
+    for c in clutter:
+        if c.get("in_way") or c.get("stowed_tick") is None or c.get("where") != "desk":
+            continue
+        b = fbox(c["native"])
+        if not b:
+            continue
+        cov = next((eid for eid, eb in ents if _ov_frac(b, eb) >= 0.1), None)
+        if cov:
+            covering.append(tuple(b) + ("entry ticket" if cov == "entry_ticket" else
+                                        "unread paper" if cov == man.UNREAD else cov,))
+            continue
+        st_boxes.append(b)
+        st_ticks.append(f"{c['id']} (put away at tick {c['stowed_tick']})")
+    f["stowed_covering"] = covering
+    if st_boxes:
+        out["stowed"] = {"boxes": st_boxes, "keep": [eb for _, eb in ents] + way, "why": "hidden_by: stowed",
+                         "line": "Not offered (hidden_by: stowed): " + ", ".join(st_ticks) + " -- it lies on its "
+                                 "put-away spot and is not needed again."}
+    if any(r.caption == REGION_CAPS["stow_papers"] for r in regions) and ents:
+        out["put_away_first"] = {"boxes": [eb for _, eb in ents], "keep": way, "why": "hidden_by: put_away_first",
+                                 "line": "The entrant's papers are not offered this tick (hidden_by: put_away_first): "
+                                         "the flyer / citation slip in the working area goes to the put-away spot "
+                                         "first."}
+    return out
+
+
+def _ov_frac(a, b) -> float:
+    """Intersection of frame boxes a, b over the smaller box's area."""
+    iw = min(a[2], b[2]) - max(a[0], b[0])
+    ih = min(a[3], b[3]) - max(a[1], b[1])
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    sm = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    return iw * ih / max(1, sm)
+
+
 def stowed_spot(native) -> dict | None:
     """The stowed spot (STOWED_SPOTS) a paper box lies on, or None."""
     if not native:
@@ -1908,8 +1965,21 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     hidden = stamp_hidden(boxes, frame, state, facts) if booth else {}
     if facts is not None:
         facts["stamp_hidden"] = {s_: why for s_, why in hidden.items()}
+    hyg = stow_hygiene(regions, facts) if booth else {}
+    if facts is not None and hyg:
+        facts["stow_hidden"] = {k_: v_["why"] for k_, v_ in hyg.items()}
+
+    def _hyg(b) -> str | None:
+        if getattr(b, "name", "") in layout.BY_NAME or b.kind == "region":
+            return None
+        cx_, cy_ = b.center
+        for v_ in hyg.values():
+            if any(x1 <= cx_ <= x2 and y1 <= cy_ <= y2 for x1, y1, x2, y2 in v_["boxes"]) and not any(
+                    x1 <= cx_ <= x2 and y1 <= cy_ <= y2 for x1, y1, x2, y2 in v_.get("keep", ())):
+                return v_["why"]
+        return None
     banned = (lambda b: (stuck is not None and stuck.banned(tick, b) is not None)
-              or (_stamp_side(b, frame) in hidden))
+              or (_stamp_side(b, frame) in hidden) or _hyg(b) is not None)
     annotated, idmap = annotate(frame, list(boxes) + regions, max_marks=args.max_marks - 1 + len(regions),
                                 excluded=banned)
     if not booth:  # text/cutscene screens without a button are advanced by clicking the screen itself
@@ -1972,6 +2042,17 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         sd = _stamp_side(b, frame)
         if sd in hidden:
             banned_ids[str(i)] = _Fail("click", b, desc[str(i)], why=hidden[sd])
+    for i, b in idmap.items():
+        why_ = _hyg(b)
+        if why_ is not None:
+            banned_ids[str(i)] = _Fail("drag", b, desc[str(i)], why=why_)
+    for v_ in hyg.values():
+        ban_lines.append(v_["line"])
+    for i, b in idmap.items():   # loop27: a put-away paper that covers a needed paper (exception) says so
+        cx_, cy_ = b.center
+        for x1, y1, x2, y2, what in (facts or {}).get("stowed_covering") or ():
+            if x1 <= cx_ <= x2 and y1 <= cy_ <= y2 and getattr(b, "name", "") not in layout.BY_NAME:
+                desc[str(i)] = f"{desc[str(i)]} — move it off the {what}"
     for sd, why in hidden.items():
         ban_lines.append(f"The {sd.upper()} stamp is not offered this tick ({why}): " + (
             "drag the passport to the strip under it first" if "passport_not_under" in why else
