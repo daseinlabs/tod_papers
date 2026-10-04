@@ -806,7 +806,7 @@ def name_docs(state: dict, df: dict) -> list[dict]:
             out.append({**d, "id": man.UNREAD, "raw_id": a["value"], "p": a["p"], "sliver": True})
             continue
         if a["p"] < man.IDENTITY_MIN_P:
-            # identity gate (ticket_flyer_identity notes section 6): a near-uniform answer is no identity. The
+            # identity gate: a near-uniform answer is no identity. The
             # paper is 'unread' and never counts as a ticket, flyer or passport for any step
             out.append({**d, "id": man.UNREAD, "raw_id": a["value"], "p": a["p"]})
             st = stowed_spot(d.get("native")) if d.get("where") == "desk" else None

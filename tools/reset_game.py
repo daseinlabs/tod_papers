@@ -39,7 +39,7 @@ from tod_papers import loop  # noqa: E402
 
 EXE_NAME = "PapersPlease.exe"
 STEAM_URL = "steam://rungameid/239030"
-SAVE_DIR = os.path.join(os.environ.get("APPDATA", r"%APPDATA%"), "3909", "PapersPlease")
+SAVE_DIR = os.path.join((os.environ.get("APPDATA") or os.path.expanduser(r"~\AppData\Roaming")), "3909", "PapersPlease")
 PROGRESS_GLOBS = ("save_*.sav", "stash.sav", "headers.sav", "names.sav", "stats.sav")
 NATIVE = (570, 320)
 EXPECTED = (2280, 1280)

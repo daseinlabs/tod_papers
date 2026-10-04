@@ -145,8 +145,8 @@ DOC_KINDS = {"passport": "the entrant's passport (a small booklet, or its open p
 # photo_matches_person is no longer asked (answers sat at p 0.4-0.68 all session; budget of 16 questions). The
 # expiry check is TOD's reading of the EXP. year and month, compared with today's date by the rule (section 5).
 # loop8: EXP. date and ISS. city are no longer request-1 questions; they are request-1b choices over the desk OCR
-# (inspection_doc_questions below; eval day2_readings notes: expiry 3/30 -> 28/30, city 26/30 -> 30/30).
-# loop11: photo_matches_person retired entirely (photo_eval notes: no wording separates match/mismatch).
+# (inspection_doc_questions below; Day 2 reading eval: expiry 3/30 -> 28/30, city 26/30 -> 30/30).
+# loop11: photo_matches_person retired entirely (photo eval: no wording separates match/mismatch).
 INSPECT_KEYS = ("issuing_country",)
 CHECK_KEYS = ("entry_ticket_dated_today",)
 DENY_P = 0.75              # p a check answer needs before it can deny an entrant
@@ -378,7 +378,7 @@ DOC_KINDS_TEXT = {
     "citation": "an M.O.A. CITATION slip reading CITATION / Protocol Violated / WARNING ISSUED / NO PENALTY",
     "other": "none of these, or not a paper",
 }
-# identity gate (ticket_flyer_identity notes): textless counter papers came back at p <= 0.32 on every tick
+# identity gate: textless counter papers came back at p <= 0.32 on every tick
 # (chance 0.125) and were still used as 'entry ticket' / 'flyer' (182519 t118-119, t125-134). An identity answer
 # below this p is 'unread': the paper is a document on the counter/desk, never a ticket, flyer or passport for any step.
 IDENTITY_MIN_P = 0.4

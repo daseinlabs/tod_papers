@@ -1,8 +1,8 @@
 # Agent loop (src/tod_papers/loop.py) -- Python 3.13.7, Windows 11, CUDA 12.6
 # venv: .venv-loop, layered on .venv-extract via a .pth file:
 #   py -3.13 -m venv .venv-loop
-#   echo .\.venv-extract\Lib\site-packages > .venv-loop\Lib\site-packages\zz_extract.pth
-#   echo .\src > .venv-loop\Lib\site-packages\tod_papers_src.pth
+#   echo %CD%\.venv-extract\Lib\site-packages > .venv-loop\Lib\site-packages\zz_extract.pth
+#   echo %CD%\src > .venv-loop\Lib\site-packages\tod_papers_src.pth
 #   .venv-loop\Scripts\python -m pip install --no-deps -r requirements-loop.txt
 #
 # --- installed directly into .venv-loop (IO layer; numpy etc. come from .venv-extract) ---

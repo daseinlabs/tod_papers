@@ -31,9 +31,8 @@ deploy/.zone.*
 deploy/.name
 deploy/.name.*
 
-# internal notes (never public)
+# local notes (never commit)
 private/
-
 
 # ground-truth reader: Il2CppDumper binary + dump output (never commit)
 .tools/
