@@ -1769,6 +1769,13 @@ class Entrant:
             self.verdict = {"value": v["value"], "p": v["p"], "tick": tick}
         for k in man.CHECK_KEYS:   # Day 2/3 checks, carried like the country (the page is hidden once under a stamp)
             v = man.check_answer(state.get(k))
+            old = self.checks.get(k)
+            # run 210453 t14-19 (Bergstrom, gt APPROVED): ticket read VALID ON today (0.95), then TOD dragged it onto
+            # the stamp strip out of view and 'no_ticket' overwrote the reading -> verdict cannot_decide/denied. A
+            # ticket TOD has read stays read for this entrant; 'no ticket in view' does not undo it.
+            if (v is not None and state[k]["value"] == "no_ticket" and old
+                    and old.get("raw") in ("dated_today", "other_date")):
+                v = None
             if v is not None:
                 self.checks[k] = {"value": v, "raw": state[k]["value"], "from": state[k].get("from"),
                                   "p": state[k]["p"], "tick": tick}

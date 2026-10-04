@@ -982,7 +982,13 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
         if k not in state:
             lines.append(f"- {_CHECK_LABEL[k]}: {'yes' if c['value'] else 'no'} (your reading at tick {c['tick']}, "
                          f"p={c['p']:.2f})")
-    if day == "3" and "entry_ticket_dated_today" in state:
+    tc = (facts.get("checks_carried") or {}).get("entry_ticket_dated_today") or {}
+    if (day == "3" and (state.get("entry_ticket_dated_today") or {}).get("value") == "no_ticket"
+            and tc.get("raw") in ("dated_today", "other_date")):   # a read ticket stays read (loop.Entrant.update)
+        lines.append(f"- Entry ticket (your reading at tick {tc['tick']}, p={tc['p']:.2f}): {tc['raw']}"
+                     + (f" ({tc['from']})" if tc.get("from") else "")
+                     + "; it is not in view now (moved or covered), the reading still holds")
+    elif day == "3" and "entry_ticket_dated_today" in state:
         a_ = state["entry_ticket_dated_today"]
         lines.append(f"- Entry ticket (your reading, this frame): {a_['value']}"
                      + (f" ({a_['from']})" if a_.get("from") else "") + f" (p={a_['p']:.2f})")
