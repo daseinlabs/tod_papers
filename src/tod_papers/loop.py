@@ -2612,6 +2612,11 @@ class Entrant:
                      sent: bool = False) -> None:
         """`sent`: the input was executed (not vetoed / skipped). A stamp press that was sent is recorded whether or
         not the pixel check saw a change (user decision loop16: stamped = TOD's executed press)."""
+        if (sb is not None and sent and action == "click" and man.yes(state, "inspect_mode_on") and self.nodocs_on
+                and NODOCS_RULE_RE.search(getattr(sb, "text", "") or "")):
+            # loop30 (run 101937 t150-178, Jorji): the rule-line click in inspect mode changed < 1% of the frame
+            # ('not changed') -> N4b never started, TOD clicked the line 5x and waited 20 ticks. A sent click counts.
+            self.nodocs_rule_tick = tick
         if sb is None or not (changed or (sent and action == "click" and _stamp_side(sb, frame))):
             return
         if (action == "drag" and tb is not None and tb.kind == "region" and tb.caption == REGION_CAPS["stow_papers"]
