@@ -1106,8 +1106,8 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
         out.append({"N4": "Inspect mode is on. Click the rule 'Entrant must have a passport', then the empty counter.",
                     "N4a": "Inspect mode is on, but the rule 'Entrant must have a passport' is not visible on the "
                            "desk. Click the red inspect-mode button to leave inspect mode.",
-                    "N4b": "Inspect mode is on and the rule 'Entrant must have a passport' is selected. Click the "
-                           "empty counter.",
+                    "N4b": "Inspect mode is on and the rule 'Entrant must have a passport' is selected. Now click "
+                           "the empty counter where the documents should be.",
                     "N5": "Inspect mode is on. Click the INTERROGATE prompt."}[step])
     elif step.startswith("N"):
         out.append("The person has handed over no documents: there is nothing to stamp. Ask for the passport with "
@@ -1471,6 +1471,9 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         # The rule line must be on screen (prepare: facts['nodocs_rule_visible'], OCR of the frame).
         hidden_rule = (facts or {}).get("nodocs_rule_visible") is False
         if yes(state, "inspect_mode_on"):
+            if (facts or {}).get("nodocs_counter_tick") is not None:
+                # loop31: the counter click after the rule line was sent -> the game's interrogate prompt is next
+                return "N5", "click the interrogate prompt (rule line + empty counter selected)"
             if (facts or {}).get("nodocs_rule_tick") is not None:
                 return "N4b", "inspect mode: click the empty counter shelf (rule line selected)"
             if hidden_rule:

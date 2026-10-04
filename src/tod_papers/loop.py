@@ -1810,6 +1810,8 @@ _RB_TPL = []
 
 NODOCS_HEAD_RE = re.compile(r"entrant\s*must\s*have|must\s*have\s*a\s*$", re.I)   # loop28: rule line, 1st OCR row
 INTERROGATE_RE = re.compile(r"interrog", re.I)
+RB_TEXT_RE = re.compile(r"\bRULES\b|REGULATIONS|Ministry\s*[o0]f\s*Admission|must\s*have\s*a|Basic\s*Rules|"
+                        r"CONTENTS|documents\s*must|require\s*an\s*entry", re.I)   # loop31: rulebook's printed text
 
 
 def _rule_text_boxes(boxes: list) -> list:
@@ -1821,7 +1823,51 @@ def _rule_text_boxes(boxes: list) -> list:
     return sorted(out, key=lambda b: (b.area, b.kind != "text"))
 
 
-def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H: int) -> tuple[list, dict]:
+RULE_LINE_MAX_H = 0.09   # loop31: a rule-line option taller than this share of the frame is a page box, not a line
+NODOCS_MEM: dict = {"pre_texts": set()}   # loop31: texts on screen at the N4b counter click (N5 finds what is new)
+
+
+def _refine_rule_line(frame, b, info: dict):
+    """loop31 (run 101937 t150-172, Jorji): the remote extractor gave 'Entrant must have a passport' the whole left
+    page's box (953x633 px); its centre is the spine, the click never selected the line (no highlight, 6 clicks).
+    A box taller than RULE_LINE_MAX_H is re-read with local OCR over its crop and the line's own rows are used."""
+    if frame is None or b.h <= RULE_LINE_MAX_H * frame.shape[0]:
+        return b
+    H, W = frame.shape[:2]
+    s = max(1, round(W / layout.NATIVE_W))
+    try:
+        t0 = time.perf_counter()
+        crop = cv2.resize(frame, (W // s, H // s), interpolation=cv2.INTER_NEAREST)[
+            b.y1 // s:b.y2 // s, b.x1 // s:b.x2 // s].copy()
+        lines = ex._ocr_boxes(crop, s)
+        info["refine_ms"] = round((time.perf_counter() - t0) * 1e3)
+    except Exception as e:
+        info["refine_error"] = repr(e)[:80]
+        return b
+    ox, oy = (b.x1 // s) * s, (b.y1 // s) * s
+    lines = [Box(l.x1 + ox, l.y1 + oy, l.x2 + ox, l.y2 + oy, l.text, "text", l.conf) for l in lines if l.text]
+    full = [l for l in lines if NODOCS_RULE_RE.search(l.text)]
+    heads = sorted((l for l in lines if NODOCS_HEAD_RE.search(l.text)), key=lambda l: l.y1)
+    if full:
+        parts = full[:1]
+    elif heads:
+        h_ = heads[0]
+        parts = [h_] + sorted((l for l in lines if l is not h_ and re.search(r"pass", l.text, re.I)
+                               and 0 <= l.y1 - h_.y1 <= 2.5 * max(h_.h, 1) and l.x1 < h_.x2 and l.x2 > h_.x1),
+                              key=lambda l: l.y1)[:1]
+    else:
+        info["refine"] = "no rule line in local OCR"
+        print(f"           N4 rule box {b.x1},{b.y1},{b.x2},{b.y2} is a page box; local OCR found no rule line")
+        return b
+    m = Box(min(l.x1 for l in parts), min(l.y1 for l in parts), max(l.x2 for l in parts), max(l.y2 for l in parts),
+            "Entrant must have a passport", "text", max(l.conf for l in parts), caption=b.caption)
+    info["refine"] = [m.x1, m.y1, m.x2, m.y2]
+    print(f"           N4 rule box {b.x1},{b.y1},{b.x2},{b.y2} -> line {m.x1},{m.y1},{m.x2},{m.y2} (local OCR)")
+    return m
+
+
+def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H: int,
+                         frame=None) -> tuple[list, dict]:
     """loop28 (run 070003 t143-158, Jorji): in inspect mode step N offers exactly one click -- N4 the rule line
     'Entrant must have a passport' (its two OCR rows 'Entrant must have a' / 'passport' merged into one option),
     N4b the empty counter, N5 the INTERROGATE prompt. No inspect button (step H), no other paper. Falls back to the
@@ -1834,7 +1880,7 @@ def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H:
         full = [b for b in txt if NODOCS_RULE_RE.search(b.text)]
         if full:
             info["rule"] = full[0].text
-            return [full[0]], info
+            return [_refine_rule_line(frame, full[0], info)], info
         heads = sorted((b for b in txt if NODOCS_HEAD_RE.search(b.text)), key=lambda b: b.y1)
         if heads:
             h_ = heads[0]
@@ -1845,7 +1891,7 @@ def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H:
                     max(b.y2 for b in parts), "Entrant must have a passport", "text", max(b.conf for b in parts),
                     caption=h_.caption)
             info["rule"] = " / ".join(b.text for b in parts)
-            return [m], info
+            return [_refine_rule_line(frame, m, info)], info
     elif nstep == "N4a":   # loop28: the rule line is not on screen -- leave inspect mode (N3a moves the rulebook)
         tg = [b for b in boxes if getattr(b, "name", "") == "inspect_toggle"]
         if tg:
@@ -1857,6 +1903,7 @@ def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H:
             x1, y1, x2, y2 = layout.scale_box(e.box, W, H)
             ce = [layout.LBox(x1, y1, x2, y2, "", e.kind, 1.0, caption=e.desc, name=e.name, affordance=e.affordance)]
             info["counter_empty"] = "layout"
+        NODOCS_MEM["pre_texts"] = {(b.text or "").strip().lower() for b in boxes if b.text}
         return ce[:1], info
     elif nstep == "N5":
         # not a line of a paper TOD named (run 074339 t152+: the game's slip reads '... use INSPECT mode to interrogate.')
@@ -1866,6 +1913,24 @@ def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H:
         if pr:
             info["prompt"] = pr[0].text
             return pr[:1], info
+        # loop31: no 'interrog' text read -> the largest text box that appeared since the counter click
+        pre = NODOCS_MEM.get("pre_texts") or set()
+        new = sorted((b for b in boxes if b.text and (b.text or "").strip().lower() not in pre
+                      and getattr(b, "name", "") not in layout.BY_NAME and b.kind != "region"
+                      and not any(x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 for x1, y1, x2, y2 in papers)),
+                     key=lambda b: -b.area)
+        print(f"           N5: no interrogate text in OCR; new text boxes since the counter click: "
+              f"{[b.text[:30] for b in new[:4]]}")
+        if new:
+            info["prompt_new"] = new[0].text
+            return new[:1], info
+        # nothing new on screen: wait two ticks for the prompt, then the counter again (the click may have missed)
+        ct = (facts or {}).get("nodocs_counter_tick")
+        if ct is not None and (facts or {}).get("tick", ct) - ct <= 2:
+            info["prompt_wait"] = True
+            return [], info
+        info["counter_again"] = True
+        return nodocs_inspect_boxes(boxes, "N4b", facts, W, H, frame)[0], info
     info["fallback"] = True
     return [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"], info
 
@@ -2075,13 +2140,20 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
             rbs = [d["box"] for d in (facts or {}).get("docs_named") or [] if d["id"] == "rulebook"]
             boxes = [b for b in boxes if getattr(b, "name", "") in layout.BY_NAME or not any(
                 x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 for x1, y1, x2, y2 in rbs)]
+            # loop31 (run 101937 t123-126, Jorji): TOD's rulebook identity had no box -> the book's panels stayed
+            # offered and were dragged shut onto the right edge 4x. Its own printed text names it as well.
+            nb_ = [b for b in boxes if getattr(b, "name", "") in layout.BY_NAME or b.kind == "region"
+                   or not RB_TEXT_RE.search(b.text or "")]
+            if len(nb_) < len(boxes):
+                print(f"           step {nstep}: {len(boxes) - len(nb_)} rulebook box(es) by text not offered")
+            boxes = nb_
     if nopp and nstep != "N4b":
         # loop26: the empty counter is clicked only after the rule line was selected in inspect mode (N4b)
         boxes = [b for b in boxes if getattr(b, "name", "") != "counter_empty"]
     if nopp and nstep in ("N4", "N4a", "N4b", "N5"):
         # loop28 (run 070003 t143-158): inside inspect mode only the next step-N element is offered (never the
         # inspect button: TOD left inspect mode at t144 / t148 / t150 ...)
-        boxes, ni_info = nodocs_inspect_boxes(boxes, nstep, facts, W, H)
+        boxes, ni_info = nodocs_inspect_boxes(boxes, nstep, facts, W, H, frame)
         if facts is not None:
             facts["nodocs_inspect"] = ni_info
     rp_now =(state.get("rulebook_page") or {}).get("value", "not_open")
@@ -2472,6 +2544,7 @@ class Entrant:
     nodocs_on: bool = False   # loop26: step N held for this entrant; kept while 'no documents' >= NO_DOCS_KEEP_P
     nodocs_stage: str = ""    # loop26: furthest step-N sub-step reached (progress for the stall / cycle rules)
     nodocs_rule_tick: int | None = None   # loop26: executed click on the 'must have a passport' line in inspect mode
+    nodocs_counter_tick: int | None = None   # loop31: executed N4b click on the empty counter (rule line selected)
     ticket_read: int | None = None   # loop30: tick TOD read an entry ticket (dated) for this entrant; kept over the
     #                                  hand-back reset -> the ticket is still owed while the person stays (G2)
 
@@ -2485,6 +2558,7 @@ class Entrant:
         self.stowed = []
         self.pp_drop = None
         self.nodocs_on, self.nodocs_stage, self.nodocs_rule_tick = False, "", None
+        self.nodocs_counter_tick = None
         self.nopaper_ticks = 0
         self.ticket_read = keep_ticket
         self.reset_tick = tick
@@ -2513,8 +2587,10 @@ class Entrant:
             # the memory lasts while the person stands there (a single dip below NO_DOCS_KEEP_P, run 045949 t139
             # 0.396, only pauses step N for that tick: manual.no_passport)
             self.nodocs_on, self.nodocs_stage, self.nodocs_rule_tick = False, "", None
+            self.nodocs_counter_tick = None
         if not man.yes(state, "inspect_mode_on", 0.3):
             self.nodocs_rule_tick = None   # the rule-line selection lives only inside inspect mode
+            self.nodocs_counter_tick = None
         ra = man.returned_answer(state)
         if (ra == "still_here" and pp_named is False and self.pp_drop is not None and tick - self.pp_drop == 1
                 and (self.stamp_clicks or self.mark_side) and state["passport_returned"]["p"] < PP_GONE_STILL_P):
@@ -2617,6 +2693,10 @@ class Entrant:
             # loop30 (run 101937 t150-178, Jorji): the rule-line click in inspect mode changed < 1% of the frame
             # ('not changed') -> N4b never started, TOD clicked the line 5x and waited 20 ticks. A sent click counts.
             self.nodocs_rule_tick = tick
+        if (sb is not None and (sent or changed) and action == "click" and self.nodocs_on
+                and self.nodocs_rule_tick is not None
+                and getattr(sb, "name", "") == "counter_empty"):
+            self.nodocs_counter_tick = tick   # loop31 N4b -> N5: the counter click after the rule line
         if sb is None or not (changed or (sent and action == "click" and _stamp_side(sb, frame))):
             return
         if (action == "drag" and tb is not None and tb.kind == "region" and tb.caption == REGION_CAPS["stow_papers"]
@@ -2673,6 +2753,7 @@ class Entrant:
                 "waiting_docs": self.waiting_docs, "mark_side": self.mark_side, "hb_drop": self.hb_drop, "pp_drop": self.pp_drop, "nodocs_ticks": self.nodocs_ticks,
                 "nodocs_hist": list(self.nodocs_hist), "nopaper_ticks": self.nopaper_ticks,
                 "nodocs_on": self.nodocs_on, "nodocs_rule_tick": self.nodocs_rule_tick,
+                "nodocs_counter_tick": self.nodocs_counter_tick,
                 "verdict_carried": self.verdict, "stowed": list(self.stowed),
                 "ticket_owed": self.handed_back is not None and self.ticket_read is not None}
 
