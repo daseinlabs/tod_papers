@@ -1824,7 +1824,6 @@ def _rule_text_boxes(boxes: list) -> list:
 
 
 RULE_LINE_MAX_H = 0.09   # loop31: a rule-line option taller than this share of the frame is a page box, not a line
-NODOCS_MEM: dict = {"pre_texts": set()}   # loop31: texts on screen at the N4b counter click (N5 finds what is new)
 
 
 def _refine_rule_line(frame, b, info: dict):
@@ -1866,6 +1865,18 @@ def _refine_rule_line(frame, b, info: dict):
     return m
 
 
+def nodocs_fixtures(W: int, H: int, names=("counter_empty", "inspect_toggle")) -> list:
+    """loop31: step N's fixed click targets (layout.py screen fixtures), with honest captions."""
+    caps = {"counter_empty": "empty counter", "inspect_toggle": "inspect mode button",
+            "microphone": "microphone -- INTERROGATE: click after DISCREPANCY DETECTED"}
+    out = []
+    for name in names:
+        e = layout.BY_NAME[name]
+        x1, y1, x2, y2 = layout.scale_box(e.box, W, H)
+        out.append(layout.LBox(x1, y1, x2, y2, "", e.kind, 1.0, caption=caps[name], name=e.name, affordance="click"))
+    return out
+
+
 def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H: int,
                          frame=None) -> tuple[list, dict]:
     """loop28 (run 070003 t143-158, Jorji): in inspect mode step N offers exactly one click -- N4 the rule line
@@ -1897,40 +1908,19 @@ def nodocs_inspect_boxes(boxes: list, nstep: str, facts: dict | None, W: int, H:
         if tg:
             return tg[:1], info
     elif nstep == "N4b":
-        ce =[b for b in boxes if getattr(b, "name", "") == "counter_empty"]
-        if not ce:   # the inspect highlight on the counter can fail the pixel test: the layout element itself
-            e = layout.BY_NAME["counter_empty"]
-            x1, y1, x2, y2 = layout.scale_box(e.box, W, H)
-            ce = [layout.LBox(x1, y1, x2, y2, "", e.kind, 1.0, caption=e.desc, name=e.name, affordance=e.affordance)]
-            info["counter_empty"] = "layout"
-        NODOCS_MEM["pre_texts"] = {(b.text or "").strip().lower() for b in boxes if b.text}
-        return ce[:1], info
+        # loop31 (user order): the empty counter and the inspect button are fixed screen fixtures (layout.py)
+        return nodocs_fixtures(W, H), info
     elif nstep == "N5":
-        # not a line of a paper TOD named (run 074339 t152+: the game's slip reads '... use INSPECT mode to interrogate.')
-        papers = [d["box"] for d in (facts or {}).get("docs_named") or [] if d.get("box")]
-        pr = [b for b in boxes if b.text and INTERROGATE_RE.search(b.text) and not man.NO_DOCS_HINT_RE.search(b.text)
-              and not any(x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 for x1, y1, x2, y2 in papers)]
-        if pr:
-            info["prompt"] = pr[0].text
-            return pr[:1], info
-        # loop31: no 'interrog' text read -> the largest text box that appeared since the counter click
-        pre = NODOCS_MEM.get("pre_texts") or set()
-        new = sorted((b for b in boxes if b.text and (b.text or "").strip().lower() not in pre
-                      and getattr(b, "name", "") not in layout.BY_NAME and b.kind != "region"
-                      and not any(x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 for x1, y1, x2, y2 in papers)),
-                     key=lambda b: -b.area)
-        print(f"           N5: no interrogate text in OCR; new text boxes since the counter click: "
-              f"{[b.text[:30] for b in new[:4]]}")
-        if new:
-            info["prompt_new"] = new[0].text
-            return new[:1], info
-        # nothing new on screen: wait two ticks for the prompt, then the counter again (the click may have missed)
+        # loop31 (docs/game.md Jorji): after the counter click the game shows DISCREPANCY DETECTED; ~2 s later the
+        # microphone is the INTERROGATE button -> the microphone is the only option once DISCREPANCY is read or 2
+        # ticks have passed since the counter click (wait before that)
         ct = (facts or {}).get("nodocs_counter_tick")
-        if ct is not None and (facts or {}).get("tick", ct) - ct <= 2:
-            info["prompt_wait"] = True
-            return [], info
-        info["counter_again"] = True
-        return nodocs_inspect_boxes(boxes, "N4b", facts, W, H, frame)[0], info
+        disc = any(b.text and re.search(r"DISCREPANCY", b.text, re.I) for b in boxes)
+        if disc or ct is None or (facts or {}).get("tick", ct) - ct >= 2:
+            info["discrepancy_read"] = disc
+            return nodocs_fixtures(W, H, ("microphone",)), info
+        info["mic_wait"] = True
+        return [], info
     info["fallback"] = True
     return [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"], info
 

@@ -1108,7 +1108,7 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
                            "desk. Click the red inspect-mode button to leave inspect mode.",
                     "N4b": "Inspect mode is on and the rule 'Entrant must have a passport' is selected. Now click "
                            "the empty counter where the documents should be.",
-                    "N5": "Inspect mode is on. Click the INTERROGATE prompt."}[step])
+                    "N5": "Inspect mode is on, the rule and the empty counter are selected (DISCREPANCY DETECTED). Click the microphone at the lower left under the counter: it is the INTERROGATE button. The person answers and leaves; nothing to stamp or hand back."}[step])
     elif step.startswith("N"):
         out.append("The person has handed over no documents: there is nothing to stamp. Ask for the passport with "
                    "inspect mode.")
@@ -1125,8 +1125,8 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
                     "N4": "Inspect mode is on: click the rule line 'Entrant must have a passport' in the rulebook.",
                     "N4b": "Inspect mode is on and the rule line is selected: click the empty counter shelf in front "
                            "of the person.",
-                    "N5": "An INTERROGATE prompt is visible: click it; the person answers and leaves (or hands over "
-                          "a passport)."}[step])
+                    "N5": "DISCREPANCY DETECTED: click the microphone (lower left, under the counter) -- it is the "
+                          "INTERROGATE button; the person answers and leaves by himself."}[step])
     elif step == "H":
         out.append("Inspect mode is on: papers and stamps do not work. Click the red inspect-mode button to leave it.")
     elif step in ("K", "K1"):
@@ -1473,7 +1473,7 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
         if yes(state, "inspect_mode_on"):
             if (facts or {}).get("nodocs_counter_tick") is not None:
                 # loop31: the counter click after the rule line was sent -> the game's interrogate prompt is next
-                return "N5", "click the interrogate prompt (rule line + empty counter selected)"
+                return "N5", "click the microphone = INTERROGATE (rule line + empty counter selected)"
             if (facts or {}).get("nodocs_rule_tick") is not None:
                 return "N4b", "inspect mode: click the empty counter shelf (rule line selected)"
             if hidden_rule:

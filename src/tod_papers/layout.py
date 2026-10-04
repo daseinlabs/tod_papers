@@ -134,6 +134,11 @@ LAYOUT: list[Element] = [
     # ---------------- later-day controls (not seen on Day 1-3 frames) ----------------
     Element("inspect_toggle", "object", "red inspect-mode button at the lower right of the desk -- click it "
             "to enter or leave inspect mode", "click", (535, 280, 565, 315), "booth+inspect_button", False),
+    # loop31 (docs/game.md Jorji, TAS interrogateMissingDoc (175,610) in its 1156x680 window = native 83,289; run
+    # 111501 t141: the speaker grill lower left under the counter): after DISCREPANCY DETECTED it is the INTERROGATE
+    # button. Offered by step N only.
+    Element("microphone", "object", "microphone -- INTERROGATE: click after DISCREPANCY DETECTED", "click",
+            (75, 270, 105, 312), "never", False),
     Element("scanner", "object", "scanner / fingerprint panel on the left booth wall", "click",
             (0, 125, 12, 180), "never", False),
     # ---------------- menus ----------------
