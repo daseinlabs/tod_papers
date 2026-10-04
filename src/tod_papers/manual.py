@@ -671,17 +671,82 @@ def _yn(state: dict, k: str) -> str:
 NO_DOCS_HINT_RE = re.compile(r"NO DOCUMENTS|INSPECT mode|to interrogate", re.I)
 
 
-def desk_text_block(facts: dict | None) -> str:
+DESK_LINE_MAX = 120    # loop21: request-2 desk OCR line cap (chars)
+DESK_TEXT_MAX = 600    # loop21: request-2 desk OCR block cap (chars of OCR)
+HIST_MAX = 15          # loop21: request-2 history lines (run 004042 t115: 29k chars -> TOD 413 state_too_long)
+HIST_LINE_MAX = 140    # loop21: chars per history line
+STATE_BUDGET = 7000    # loop21: hard cap (chars) on the request-2 text after the manual (state + desk + history + ruled out); the Day-3 booth manual alone is ~17k, so the whole text stays <= ~24k (413 at ~29k with the image, run 004042 t115)
+
+
+def short_text(t: str, n: int) -> str:
+    return t if len(t) <= n else t[: n - 3] + "..."
+
+
+_HIST_ABBR = (("passport under ", "under "), (" pressed t", " t"), ("ink read ", "ink "),
+              ("doc on counter", "doc counter"), ("passport on desk", "pp desk"), ("tray open", "tray"))
+
+
+def hist_line(x: str, n: int = HIST_LINE_MAX) -> str:
+    """One history line cut to n chars: tick | what was true | input | element short name | effect."""
+    f = x.split(" | ")
+    if len(f) < 5:
+        return short_text(x, n)
+    tk, ssum, inp, eff = f[0], f[1], f[2], f[-1]
+    el = " | ".join(f[3:-1])
+
+    def nm(e: str) -> str:   # element short name: the label before its TOD p / OCR / description tail
+        e = e.strip().strip("'").rstrip(".")
+        for pre in ("drop target - ", "object — ", "text — ", "object � ", "text � ",
+                    "no element - "):
+            if e.startswith(pre):
+                e = e[len(pre):]
+        if e.startswith("stamp landing strip (under the "):
+            e = ("APPROVED" if e[31:33] == "AP" else "DENIED" if e[31:33] == "DE" else "?") + " strip"
+        mt = re.match(r"(\w+) \(TOD (\d\.\d+)\)", e)
+        if mt:   # 'passport (TOD 0.94) -- SER ...' -> 'passport 0.94'
+            return f"{mt.group(1)} {mt.group(2)}"
+        e = e.replace(" — ", ": ").replace(" � ", ": ")
+        for sep in (" -- ", " ("):
+            if sep in e and e.index(sep) > 3:
+                e = e[: e.index(sep)]
+        return short_text(e.rstrip(" -:"), 34)
+    if " -> " in el:
+        a, b = el.split(" -> ", 1)
+        el = f"{nm(a)} -> {nm(b)}"
+    else:
+        el = nm(el)
+    eff = short_text(eff, 26)
+    for a, b in _HIST_ABBR:
+        ssum = ssum.replace(a, b)
+    room = n - len(f"{tk} |  | {inp} | {el} | {eff}")
+    return f"{tk} | {short_text(ssum, max(room, 10))} | {inp} | {el} | {eff}"[:n]
+
+
+def desk_text_block(facts: dict | None, cap: bool = False) -> str:
     """'READABLE TEXT ON THE DESK' -- the OCR'd text of every document on the desk
-    (extraction output, sent to both requests)."""
+    (extraction output, sent to both requests). cap (request 2, loop21 413 fix): the OCR of a paper TOD stowed
+    (step K) is dropped, each line is cut to DESK_LINE_MAX and the block to ~DESK_TEXT_MAX chars of OCR."""
     facts = facts or {}
-    lines = facts.get("desk_text") or []
+    full = list(facts.get("desk_text") or [])
+    lines = full
+    if cap:
+        if facts.get("stowed"):
+            gone = {t for d in facts.get("docs") or [] if d.get("where") == "counter" for t in d.get("text") or []}
+            lines = [t for t in lines if t not in gone]
+        kept, n = [], 0
+        for t in lines:
+            t = short_text(t, DESK_LINE_MAX)
+            if n + len(t) > DESK_TEXT_MAX:
+                break
+            kept.append(t)
+            n += len(t)
+        lines = kept
     if not lines:
         return "READABLE TEXT ON THE DESK (OCR of the documents on the desk): none"
     out = ["READABLE TEXT ON THE DESK (OCR of the documents on the desk, top to bottom; pixel font, may "
            "contain misreads):"]
     out += [f"- {t}" for t in lines]
-    hint = [t for t in lines if NO_DOCS_HINT_RE.search(t)]
+    hint = [t for t in full if NO_DOCS_HINT_RE.search(t)]
     if hint:   # the game's own slip: 'THIS ENTRANT HAS NO DOCUMENTS / To proceed, use INSPECT mode to interrogate'
         out.append("GAME HINT ON SCREEN (OCR): " + " / ".join(hint))
     return "\n".join(out)
@@ -1081,8 +1146,13 @@ def entrant_line(facts: dict | None) -> str | None:
     cc = facts.get("country_carried")
     if cc:
         bits.append(f"passport read as {cc['value']} at tick {cc['tick']} (p={cc['p']:.2f})")
+    by_side: dict[str, list] = {}
     for t, side in facts.get("stamp_clicks") or []:
-        bits.append(f"stamped {side.upper()} at tick {t}")
+        by_side.setdefault(side.upper(), []).append(t)
+    for side, ts in by_side.items():   # loop21: one bit per side (t114: 11 repeated 'stamped APPROVED at tick N')
+        ts_s = ", ".join(str(t) for t in ts[-4:])
+        bits.append(f"stamped {side} at tick{'s' if len(ts) > 1 else ''} {ts_s}"
+                    + (f" ({len(ts)} presses)" if len(ts) > 4 else ""))
     if facts.get("handed_back") is not None:
         bits.append(f"handed back at tick {facts['handed_back']}")
     return "THIS ENTRANT SO FAR: " + "; ".join(bits) if bits else None
@@ -1125,29 +1195,49 @@ def manual_text(booth: bool, day: str) -> str:
 
 
 def build(state: dict, history, day: str, ban_lines: list[str] | None = None, facts: dict | None = None) -> str:
-    """Request-2 text: the whole manual + what is true now + desk text + last actions."""
-    hist = list(history)
-    h = "\n".join(f"- {x}" for x in hist) if hist else "- (none yet; this is the first action)"
-    el = entrant_line(facts)
-    if el:
-        h = f"{el}\n{h}"
-    head = f"LAST {len(hist)} ACTIONS" if hist else "LAST ACTIONS"
-    if (facts or {}).get("cycle_note"):   # the loop's cycle guard (loop.CycleDetector)
-        h = f"CYCLE: {facts['cycle_note']}\n{h}"
-    if (facts or {}).get("tray_note"):    # tray toggle loop: the closing tab is excluded (loop.prepare, audit A5)
-        h = f"{facts['tray_note']}\n{h}"
-    nb = (facts or {}).get("menu_bounces") or 0
-    if nb >= 2:
-        h = (f"You have gone back and forth between the main menu and day select {nb} times. BACK undoes "
-             f"progress; pick a day tile.\n{h}")
+    """Request-2 text: the whole manual + what is true now + desk text + last actions. loop21 (run 004042 t115,
+    TOD 413 state_too_long at 29k chars): the last HIST_MAX actions, each cut to HIST_LINE_MAX chars; the part
+    after the manual is held to STATE_BUDGET chars by dropping the oldest history lines (`facts['text_chars']`,
+    `facts['state_chars']`, `facts['hist_kept']` are logged in the tick json)."""
+    full_hist = [hist_line(x) for x in list(history)[-HIST_MAX:]]
     booth = (facts or {}).get("booth", True)
-    parts = [manual_text(booth, day), state_block(state, day, facts) if booth else
+    man_t = manual_text(booth, day)
+    fixed = [state_block(state, day, facts) if booth else
              f"- Screen: {state.get('screen', {}).get('value')} (p={state.get('screen', {}).get('p', 0):.2f})",
-             desk_text_block(facts) if booth else "",
-             f"{head} (oldest first; tick | what was true | input | element | effect):\n{h}"]
-    if ban_lines:
-        parts.append("RULED OUT FOR NOW (tried without effect):\n" + "\n".join(f"- {s}" for s in ban_lines))
-    return "\n\n".join(parts)
+             desk_text_block(facts, cap=True) if booth else ""]
+
+    def hist_part(hist: list[str]) -> str:
+        h = "\n".join(f"- {x}" for x in hist) if hist else "- (none yet; this is the first action)"
+        el = entrant_line(facts)
+        if el:
+            h = f"{short_text(el, 400)}\n{h}"
+        head = f"LAST {len(hist)} ACTIONS" if hist else "LAST ACTIONS"
+        if (facts or {}).get("cycle_note"):   # the loop's cycle guard (loop.CycleDetector)
+            h = f"CYCLE: {short_text(facts['cycle_note'], 400)}\n{h}"
+        if (facts or {}).get("tray_note"):    # tray toggle loop: the closing tab is excluded (loop.prepare, audit A5)
+            h = f"{short_text(facts['tray_note'], 400)}\n{h}"
+        nb = (facts or {}).get("menu_bounces") or 0
+        if nb >= 2:
+            h = (f"You have gone back and forth between the main menu and day select {nb} times. BACK undoes "
+                 f"progress; pick a day tile.\n{h}")
+        return f"{head} (oldest first; tick | what was true | input | element | effect):\n{h}"
+
+    hist, bans = full_hist, list(ban_lines or [])
+    while True:
+        ruled = ("RULED OUT FOR NOW (tried without effect):\n" + "\n".join(f"- {short_text(x, 300)}" for x in bans)
+                 if bans else "")
+        rest = "\n\n".join(fixed + [hist_part(hist)] + ([ruled] if ruled else []))
+        if len(rest) <= STATE_BUDGET or not (hist or len(bans) > 3):
+            break
+        if hist:
+            hist = hist[1:]   # guard: drop the oldest action until the budget holds
+        else:
+            bans = bans[:-1]  # then ruled-out lines beyond the first 3
+    if facts is not None:
+        facts["state_chars"] = len(rest)
+        facts["text_chars"] = len(man_t) + 2 + len(rest)
+        facts["hist_kept"] = len(hist)
+    return man_t + "\n\n" + rest
 
 
 # --------------------------------------------------------------------------

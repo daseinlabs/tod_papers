@@ -1784,11 +1784,13 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     if facts is not None:
         facts["booth"] = booth
     state_text = man.build(state, history, day, ban_lines, facts)
+    text_info = {"text_chars": len(state_text),
+                 "state_chars": (facts or {}).get("state_chars"), "hist_kept": (facts or {}).get("hist_kept")}
     send = _small_for_send(annotated, args)
     url = encode_image(send, args.send_format, args.jpeg_quality)
     return dict(annotated=annotated, idmap=idmap, desc=desc, banned_ids=banned_ids, doc_ids=doc_ids, src_ids=src_ids,
                 tgt_ids=tgt_ids, regions=region_info, booth=booth, questions=questions, state_text=state_text,
-                image_url=url, image_kb=round(len(url) * 3 / 4 / 1024, 1), clutter_src=clutter_src,
+                text_info=text_info, image_url=url, image_kb=round(len(url) * 3 / 4 / 1024, 1), clutter_src=clutter_src,
                 flyer_back=flyer_back,
                 tray_flips=(facts or {}).get("tray_flips", 0), region_src=region_src,
                 prep_ms=round((time.perf_counter() - t0) * 1e3, 1))
@@ -2238,7 +2240,7 @@ def offline(args) -> int:
             "inspect_asked": list(asked), "desk_facts": df,
             "manual_step_for_state (diagnostic, not sent)": step, "regions": P["regions"],
             "target_source": {n: v["target_source"] for n, v in P["regions"].items()},
-            "state_text": P["state_text"], "state_text_words": len(P["state_text"].split()),
+            "text_chars": P["text_info"], "state_text": P["state_text"], "state_text_words": len(P["state_text"].split()),
             "criteria": P["desc"],
             "answers": {q: {"choice": a.value, "probabilities": a.probabilities} for q, a in res.answers.items()},
             "action_top3": top(res["action"].probabilities),
@@ -2580,6 +2582,9 @@ def run(args) -> int:
             rec["target_source"] = {n: v["target_source"] for n, v in P["regions"].items()}
             t1 = time.perf_counter()
             try:
+                rec["text_chars"] = P["text_info"]   # loop21: logged before the ask (a 413 tick keeps it)
+                print(f"[tick {tick:03d}] text_chars={P['text_info']['text_chars']} "
+                      f"state={P['text_info']['state_chars']} hist={P['text_info']['hist_kept']}")
                 res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
             except TodCreditExhausted as e:
                 stop_reason = "TOD credit exhausted (402)"
