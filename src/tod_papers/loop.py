@@ -663,10 +663,13 @@ def clutter_facts(named: list[dict], tray_open: bool) -> list[dict]:
         # refusals. A paper cut off by the bar edge counts as under the bar.
         cut = bool(b <= by2 + 2 and min(c, bx2) - max(a, bx1) > 0)
         under = bool(tray_open and (bar >= 0.3 or cut))
+        st = stowed_spot(d["native"])
         out.append({"id": d["id"], "p": d["p"], "native": d["native"], "where": "desk", "strips": strips,
                     "under_bar": under, "on_passport": on_pp,
-                    # loop20 (user): any citation / flyer on the desk is in the working area -> step K first
-                    "in_way": True})
+                    # loop20 (user): any citation / flyer on the desk is in the working area -> step K first;
+                    # loop23: one lying on the spot an executed stow put it on is put away (never K again)
+                    "in_way": not (st and not strips and not under and not on_pp),
+                    "stowed_tick": st["tick"] if st else None})
     return out
 
 
@@ -723,6 +726,9 @@ def name_docs(state: dict, df: dict) -> list[dict]:
             # identity gate (ticket_flyer_identity notes section 6): a near-uniform answer is no identity. The
             # paper is 'unread' and never counts as a ticket, flyer or passport for any step
             out.append({**d, "id": man.UNREAD, "raw_id": a["value"], "p": a["p"]})
+            st = stowed_spot(d.get("native")) if d.get("where") == "desk" else None
+            if st:   # loop23: an unread desk paper on the spot a stow put a flyer / slip on is that put-away paper
+                out[-1]["stowed"] = {"tick": st["tick"], "id": st["id"]}
         else:
             out.append({**d, "id": a["value"], "p": a["p"]})
     return out
@@ -922,7 +928,7 @@ def static_regions(frame: np.ndarray, tray_is_open: bool):
     at the window (hand back) and the desk. Returns (regions, {name: 'static'})."""
     H, W = frame.shape[:2]
     names = (["stamp_landing_denied", "stamp_landing_approved", "tray_stow"] if tray_is_open else [])
-    names += ["hand_back", "desk", "stow_papers"]
+    names += ["hand_back", "desk"]   # loop23: the stow spot is derived per frame (stow_target), not the fixed counter
     out = []
     for name in names:
         x1, y1, x2, y2 = layout.scale_box(layout.BY_NAME[_STATIC_REGION[name]].box, W, H)
@@ -975,6 +981,64 @@ def desk_target(frame: np.ndarray, facts: dict | None, state: dict):
             "passport_from": (src or {}).get("where"), "passport_box_now": cur,
             "at_spot": bool(cur is not None and layout._iou4(cur, spot["box"]) >= CLEAR_SPOT_IOU)}
     return box, info
+
+
+STOW_DEFAULT_SIZE = (110, 80)   # native: a put-away spot sized for a flyer card when no clutter paper is in the way
+STOW_PLAN: dict = {}            # this tick's stow spot {'box' (native)}: read by Entrant.after_action on a stow drop
+STOWED_SPOTS: list = []         # [{'tick', 'id', 'box'}] native spots where an executed stow put a paper (all day)
+STOW_ENTRANT_W = 5.0           # the entrant's papers (passport, ticket, unread) are never covered by a stowed paper
+STOW_MATCH = 0.3                # a clutter / unread desk paper whose box overlaps a stowed spot this much is put away
+
+
+def stow_target(frame: np.ndarray, facts: dict | None, desk_info: dict | None):
+    """loop23 (run 023151 t41-82: the fixed stow target was the counter where the passport + ticket arrive; K and B
+    alternated, the flyer came back with the passport): the put-away spot is derived per frame by layout.stow_spot --
+    the far-left desk clear of the counter, the tray bar / strips, the tabs and every entrant paper (passport, ticket,
+    unread) plus the planned passport spot. Sized for the clutter paper in the way. Returns a Box (frame px) or None."""
+    sinfo = (facts or {}).get("static") or {}
+    if "docs" not in sinfo:
+        return None
+    H, W = frame.shape[:2]
+    named = (facts or {}).get("docs_named") or []
+    way = [c for c in (facts or {}).get("clutter") or [] if c.get("in_way") and c.get("native")]
+    if not way:
+        # dry run 023151 t43-44: offered with nothing to put away, TOD dropped the entrant's counter paper on it
+        return None
+    mine = [list(c["native"]) for c in way]
+    keep = [(list(d["native"]), STOW_ENTRANT_W) for d in named if d.get("native") and d["id"] in ("passport", "entry_ticket", man.UNREAD)
+            and not d.get("stowed") and list(d["native"]) not in mine]
+    if desk_info and desk_info.get("passport_box_planned"):
+        keep.append((list(desk_info["passport_box_planned"]), 1.0))
+    others = [list(d.get("native") or d["box"]) for d in sinfo.get("docs") or [] if d.get("where") == "desk"
+              and list(d.get("native") or d["box"]) not in mine and list(d.get("native") or d["box"]) not in [k for k, _ in keep]]
+    if way:
+        a, b, c, e = way[0]["native"]
+        size = (c - a, e - b)
+    else:
+        size = STOW_DEFAULT_SIZE
+    spot = layout.stow_spot(size, keep, others, bool(sinfo.get("inspect_button")))
+    STOW_PLAN.clear()
+    STOW_PLAN.update(box=spot["box"], cost=spot["cost"], tick=(facts or {}).get("tick"))
+    if facts is not None:
+        facts["stow_spot"] = dict(STOW_PLAN)
+    nx, ny = spot["center"]
+    sx, sy = W / layout.NATIVE_W, H / layout.NATIVE_H
+    hw = DESK_TARGET_HALF
+    return Box(int((nx - hw) * sx), int((ny - hw) * sy), int((nx + hw) * sx), int((ny + hw) * sy), "", "region", 0.0,
+               caption=REGION_CAPS["stow_papers"])
+
+
+def stowed_spot(native) -> dict | None:
+    """The stowed spot (STOWED_SPOTS) a paper box lies on, or None."""
+    if not native:
+        return None
+    for s in reversed(STOWED_SPOTS):
+        b = s["box"]
+        inter = layout._ov(list(native), b)
+        if inter and inter >= STOW_MATCH * min((native[2] - native[0]) * (native[3] - native[1]),
+                                               (b[2] - b[0]) * (b[3] - b[1])):
+            return s
+    return None
 
 
 def _other_desk_papers(facts: dict | None, src: dict) -> list:
@@ -1116,8 +1180,8 @@ REGION_CAPS = {
     "desk_clear": "clear desk space (move the passport so its page is fully visible)",
     "desk_aside": "clear desk space off the passport (drop the paper lying across the passport here)",
     "tray_stow": "right edge of the desk (drag the tray tab here to put the stamp tray away)",
-    "stow_papers": "counter shelf left of the desk -- drop the rulebook, bulletin, a flyer or a citation slip here to put "
-                   "it away (off the desk)",
+    "stow_papers": "put-away spot on the desk FOR THE FLYER / CITATION SLIP ONLY -- never the entrant's passport or "
+                   "entry ticket (those go to the desk to be read)",
 }
 
 
@@ -1592,6 +1656,12 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
             region_src["desk_aside"] = "derived_frame"
             pop["aside_box_planned"] = asp["box"]
             facts["paper_on_passport"] = pop
+    st_box = stow_target(frame, facts, desk_info) if booth else None
+    if st_box is None:
+        STOW_PLAN.clear()
+    else:
+        regions = [r for r in regions if r.caption != REGION_CAPS["stow_papers"]] + [st_box]
+        region_src["stow_papers"] = "derived_frame"
     if booth and facts is not None and facts.get("waiting_docs"):
         # G2: the remaining papers go to the entrant; the stow shelf (also 'counter shelf ...') took the ticket twice
         # in run 092521 t217-218 while the entrant waited for it
@@ -1921,6 +1991,11 @@ def decide(res, P: dict) -> dict:
             bad.add(REGION_CAPS["hand_back"])
         if tb_.caption in bad:
             veto = f"refused: {cid} #{src} onto '{short(tb_.caption, 40)}' (step K: never stamped / handed back)"
+    elif (action == "drag" and tb_ is not None and tb_.caption == REGION_CAPS["stow_papers"]
+          and int(src) in P.get("doc_ids", ()) and src not in P.get("clutter_src", ())):
+        # loop23 dry run 023151 t49-50: the entrant's counter paper (passport) dropped on the put-away spot -- the
+        # spot takes a flyer / citation only. Refused (no input, logged); TOD's target is never replaced
+        veto = f"refused: entrant paper #{src} onto the put-away spot (flyer / citation slip only)"
     return dict(action=action, src=src, tgt=tgt, note=note, tod_pick=tod_pick, convention_mismatch=mismatch,
                 input_convention=conv, veto=veto, p_src=float(res["source"].probabilities.get(src, 0.0)))
 
@@ -2041,6 +2116,8 @@ class Entrant:
             # loop20 run 002309 t55-79: the stowed flyer read 'unread' on the counter and went back to the desk (B3)
             # 12 times; the stow is a history fact for the state block, never a paper identity
             self.stowed.append((tick, src_desc.split(" (TOD", 1)[0]))
+            if STOW_PLAN.get("box"):   # loop23: the derived desk spot it went to (all day: it stays put away)
+                STOWED_SPOTS.append({"tick": tick, "id": self.stowed[-1][1], "box": list(STOW_PLAN["box"])})
         if action == "click":
             side = _stamp_side(sb, frame)
             if side and self.handed_back is not None:

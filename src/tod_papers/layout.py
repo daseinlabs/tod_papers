@@ -889,6 +889,40 @@ def clear_desk_spot(docs: list[dict], is_tray_open: bool, size=OPEN_PASSPORT, in
             "check": passport_obstruction(box, obst)}
 
 
+STOW_SIDE_WEIGHT = 0.2   # an inspector's paper (bulletin / rulebook) under the stowed flyer: avoided, not forbidden
+
+
+def stow_spot(size, keep_clear: list, others: list, inspect_button: bool = False) -> dict:
+    """loop23 (run 023151 t41-82): where a flyer / citation slip is put away -- a clear patch of the DESK surface,
+    derived per frame: never the counter shelf (where the entrant's passport and ticket arrive), never the stamp
+    tray bar / landing strips / knob row (the bar covers them once the tray opens), the tray tabs, the inspect button
+    or `keep_clear` ([(native box, weight)]: the entrant's papers high, the planned passport spot 1.0); `others` (inspector's
+    papers) at a low weight. The paper (size w x h, native) lies fully inside the desk; among the cheapest positions
+    the far-left / top-left one wins. Returns {'box', 'center', 'cost'}."""
+    w, h = int(size[0]), int(size[1])
+    obst = [([TRAY_BAR[0], DESK[1], TRAY_BAR[2], TRAY_BAR[3]], 1.0),   # bar + strips + knob row, open or closed
+            (list(BY_NAME["tray_tab"].box), 1.0), (list(BY_NAME["tray_tab_open"].box), 1.0)]
+    if inspect_button:
+        obst.append((list(BY_NAME["inspect_toggle"].box), 1.0))
+    obst += [(list(b), wt) for b, wt in keep_clear or []] + [(list(b), STOW_SIDE_WEIGHT) for b in others or []]
+    cost = np.zeros((NATIVE_H, NATIVE_W), np.float32)
+    for (ox1, oy1, ox2, oy2), wt in obst:
+        sl = cost[max(0, int(oy1)):max(0, int(oy2)), max(0, int(ox1)):max(0, int(ox2))]
+        np.maximum(sl, wt, out=sl)
+    ii = cv2.integral(cost)
+    m = DESK_MARGIN
+    w, h = min(w, DESK[2] - DESK[0] - 2 * m), min(h, NATIVE_H - DESK[1] - 2 * m)
+    xs = np.arange(DESK[0] + m, DESK[2] - m - w + 1)
+    ys = np.arange(DESK[1] + m, NATIVE_H - m - h + 1)
+    X, Y = np.meshgrid(xs, ys)
+    total = ii[Y + h, X + w] - ii[Y, X + w] - ii[Y + h, X] + ii[Y, X]
+    best = float(total.min())
+    pref = np.where(total <= best + 1e-3, -(X + 0.5 * Y).astype(np.float32), -1e9)
+    i, j = np.unravel_index(int(np.argmax(pref)), pref.shape)
+    x1, y1 = int(X[i, j]), int(Y[i, j])
+    return {"box": [x1, y1, x1 + w, y1 + h], "center": (x1 + w // 2, y1 + h // 2), "cost": round(best, 1)}
+
+
 def passport_drop_point(spot: dict, src: dict | None, size, is_tray_open: bool, others: list | None = None,
                         grab=None) -> tuple[int, int]:
     """Cursor end point (native) that puts the passport onto `spot`. src = the passport's paper dict

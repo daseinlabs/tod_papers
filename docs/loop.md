@@ -459,3 +459,16 @@ stop; 161058 Uvilia: 71 ticks).
   `passport_stamp_ink` (approved / denied / none; the yes/no mark question sat at 0.20-0.54 on the inked Uvilia
   passport in the 163640 dry run while this choice read DENIED 0.53-0.84). Ink side p >= 0.75 -> `facts['mark_side']`: stamped from the screen alone (F, or F2 for APPROVED ink with a DENIED verdict),
   stamps hidden otherwise, the entrant offered for the hand-back. One extra question, only on those ticks.
+
+## Put-away spot for flyers / citations (loop23, 2026-10-04)
+
+- The stow target (`stow_papers`, "put-away spot on the desk FOR THE FLYER / CITATION SLIP ONLY") is derived per frame by
+  `loop.stow_target` -> `layout.stow_spot`: a patch of the desk sized like the clutter paper, off the counter shelf, the
+  tray bar + strips + knob row, both tray tabs, the inspect button, every entrant paper (passport / ticket / unread,
+  weight 5) and the planned passport spot; inspector papers (bulletin / rulebook) weight 0.2; far-left / top-left wins.
+  Offered only while a flyer / citation is in the way (no fixed counter box any more).
+- An executed stow records its spot (`STOWED_SPOTS`); a flyer / citation lying on it is not in the way, an unread desk
+  paper on it is `stowed` (never step B / B3, OCR dropped from the request-2 desk text).
+- An entrant paper (any doc not a flyer / citation) dropped on the put-away spot is refused (no input, logged).
+- Now-block: K says "Drag THE FLYER itself ... not the paper on the counter shelf"; any step with a flyer / citation
+  within 12 native px of an entrant paper adds "drag the passport (the booklet), not the flyer card".

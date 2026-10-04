@@ -573,8 +573,10 @@ def desk_text_block(facts: dict | None, cap: bool = False) -> str:
     full = list(facts.get("desk_text") or [])
     lines = full
     if cap:
-        if facts.get("stowed"):
-            gone = {t for d in facts.get("docs") or [] if d.get("where") == "counter" for t in d.get("text") or []}
+        put = [c["native"] for c in facts.get("clutter") or [] if c.get("stowed_tick") is not None]
+        gone = {t for d in facts.get("docs_named") or [] if d.get("stowed") or (put and d.get("native") in put)
+                for t in d.get("text") or []}
+        if gone:   # loop23: the OCR of a paper put away on the desk spot (was: the counter) is dropped
             lines = [t for t in lines if t not in gone]
         kept, n = [], 0
         for t in lines:
@@ -848,13 +850,12 @@ def state_block(state: dict, day: str, facts: dict | None = None) -> str:
     for d in facts.get("docs_named") or []:
         where = "counter shelf" if d["where"] == "counter" else "desk"
         if d["id"] == UNREAD:
-            st = facts.get("stowed") or []
+            st = d.get("stowed")
             lines.append(f"- Paper on the {where} ({d['pos']}): UNREAD (what it is could not be read: best identity "
-                         f"{d.get('raw_id', '?')} at only p={d['p']:.2f}). It is not known to be a ticket, flyer or "
-                         "passport" + ((f"; at tick {st[-1][0]} you put the {st[-1][1]} away on this shelf "
-                                        "-- it stays there")
-                                       if where == "counter shelf" and st else
-                                       "; on the desk it can be read" if where == "counter shelf" else ""))
+                         f"{d.get('raw_id', '?')} at only p={d['p']:.2f})" + (
+                             f"; it lies where you put the {st['id']} away at tick {st['tick']} -- it stays there"
+                             if st else ". It is not known to be a ticket, flyer or passport" +
+                             ("; on the desk it can be read" if where == "counter shelf" else "")))
             continue
         tail = (" -- the inspector's, not needed for this entrant"
                 if d["id"] in ("rulebook", "bulletin") and d["where"] == "desk" and d["p"] >= 0.6
@@ -999,7 +1000,7 @@ def manual_text(booth: bool, day: str) -> str:
 
 _CLUTTER_NOW = {"citation": "an M.O.A. citation slip", "flyer": "a flyer (The Pink Vice card)",
                 "entry_ticket": "an entry ticket", "rulebook": "the rulebook", "bulletin": "the bulletin"}
-_SHELF = "the 'counter shelf left of the desk' target"
+_SHELF = "the 'put-away spot on the desk' target (not the counter shelf, where the entrant's papers arrive)"
 _TRAY_CLOSE = "drag the tray tab onto the 'right edge of the desk' target"
 
 
@@ -1047,7 +1048,10 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
             out.append(f"{_cap(what)} lies {where}; it is not the entrant's document to check -- never stamp it or "
                        "hand it over alone.")
         out.append(f"It lies under the open stamp tray bar: first {_TRAY_CLOSE}, then put it on {_SHELF}."
-                   if step == "K1" else f"Drag it onto {_SHELF} first.")
+                   if step == "K1" else f"Drag THE {cl['id'].upper()} itself onto {_SHELF} first" + (
+                       " -- not the paper on the counter shelf (that one is the entrant's and goes to the 'desk' "
+                       "target later)." if any(d["where"] == "counter" and d["id"] != cl["id"]
+                                               for d in f.get("docs_named") or []) else "."))
     elif step == "G2":
         out.append("The passport is back and the entrant is still at the window waiting for the rest of their "
                    "papers: drag each paper of theirs still on the desk or counter shelf onto the person.")
@@ -1117,6 +1121,10 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
                        "(drag the tab at the desk's right edge onto the 'desk' target).")
     else:
         out.append("A person is at the window but none of their papers was seen yet: wait for them to put them down.")
+    near = clutter_near_entrant_paper(f) if step not in ("K", "K1") else None
+    if near:   # loop23 (023151 t41-82): the flyer card lay next to the passport and was grabbed instead of it
+        out.append(f"The {near} card lies next to the entrant's paper: drag the passport (the booklet), not the "
+                   f"{near} card.")
     if f.get("paper_on_passport") and step not in ("K", "K1"):
         out.append(f"A {f['paper_on_passport']['id'].upper()} lies across the open passport: the 'clear desk space "
                    "off the passport' target takes it off.")
@@ -1177,12 +1185,37 @@ def build(state: dict, history, day: str, ban_lines: list[str] | None = None, fa
 CLUTTER_NAMES = {"citation": "an M.O.A. CITATION slip", "flyer": "a flyer (The Pink Vice card)"}
 
 
+NEAR_PX = 12   # native px: a flyer / citation this close to an entrant paper "lies next to" it
+
+
+def clutter_near_entrant_paper(f: dict) -> str | None:
+    """'flyer' / 'citation' when a paper TOD named a flyer or citation slip (any place) lies within NEAR_PX of (or on)
+    a paper TOD named the passport / entry ticket or left unread, in the same place (desk / counter)."""
+    ents = [d for d in f.get("docs_named") or [] if d.get("native") and not d.get("stowed")
+            and d["id"] in ("passport", "entry_ticket", UNREAD)]
+    for c in f.get("clutter") or []:
+        a = c.get("native")
+        if not a:
+            continue
+        for d in ents:
+            b = d["native"]
+            if d["where"] != c["where"] or list(b) == list(a):
+                continue
+            gx = max(0, max(a[0], b[0]) - min(a[2], b[2]))
+            gy = max(0, max(a[1], b[1]) - min(a[3], b[3]))
+            if max(gx, gy) <= NEAR_PX:
+                return "citation slip" if c["id"] == "citation" else "flyer"
+    return None
+
+
 def clutter_phrase(c: dict, tray_open: bool) -> str:
     """State-block tail (a fact, no instruction: now_block says what to do) for a citation slip / flyer."""
     if c.get("left_behind"):
         return " -- LEFT BEHIND by an entrant who has gone"
     who = " -- the inspector's citation slip, not the entrant's" if c["id"] == "citation" else         " -- a flyer, not a document to check"
     if not c["in_way"]:
+        if c.get("stowed_tick") is not None:
+            return who + f"; you put it away here at tick {c['stowed_tick']} -- it stays there, never pick it again"
         return who + "; out of the way"
     if c["under_bar"] and tray_open:
         return who + "; it lies UNDER THE OPEN STAMP TRAY BAR"
@@ -1270,7 +1303,7 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     # gate) or TOD's entry ticket goes to the desk once the passport is open there (no tick cap: the identity gate
     # keeps a stowed slip from looping it, it is named on the desk)
     if (yes(state, "document_open_on_desk") and any(
-            d["where"] == "counter" and (d["id"] == "entry_ticket" or (d["id"] == UNREAD and not f.get("stowed")))
+            d["where"] == "counter" and (d["id"] == "entry_ticket" or (d["id"] == UNREAD and not d.get("stowed")))
             for d in f.get("docs_named") or [])):
         return "B3", "drag the unread / ticket paper on the counter -> desk so it can be read"
     if yes(state, "stamp_tray_open") or f.get("tray_open_px"):
@@ -1294,7 +1327,7 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
                 and not yes(state, "document_on_counter_shelf")):
             return "D2", "drag tray tab -> right edge (close tray, reveal hidden passport)"
     if ((yes(state, "document_on_counter_shelf") or any(
-            d["where"] == "counter" and d["id"] in ("passport", "entry_ticket", UNREAD) and not f.get("stowed")
+            d["where"] == "counter" and d["id"] in ("passport", "entry_ticket", UNREAD) and not d.get("stowed")
             for d in f.get("docs_named") or []))
             and not yes(state, "document_open_on_desk")):
         # loop22 (021346 t30): counter 0.27 'no' but TOD's identity answer names a paper on the counter (unread)
