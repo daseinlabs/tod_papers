@@ -1,4 +1,4 @@
-# Agent loop: extract → Set-of-Mark → TOD → click
+# The loop: extract → Set-of-Mark → TOD → click
 
 Modules (`src/tod_papers/`):
 
@@ -12,7 +12,7 @@ Modules (`src/tod_papers/`):
 
 ## Decision path: what TOD decides and what code does (loop15, 2026-10-03)
 
-Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. One tick:
+This section is the result of an internal audit of every place where code, not TOD, could pick an input. One tick:
 
 1. **Request 1** (plain frame): screen, day, person / counter / open-on-desk / tray / inspect, `passport_under_<side>`
    (always asked while the tray is open on the pixels), issuing country, Day 3 ticket choice, step-N questions,
@@ -35,7 +35,7 @@ Fixes for every A item and the listed borderlines of `tod_decides_audit notes`. 
    says to drag unread papers to the desk so they can be read. The old B3 cap (`b3_n`) is gone.
 4. **State block** (request-2 text): facts only, each TOD reading labelled "your reading"; TOD's own verdict answer
    and p ("Your verdict for this entrant (your own answer, this frame|tick N)"); "stamped" = TOD's executed
-   stamp press (loop16, user decision: "Stamp pressed: APPROVED at tick N"); the stamp-ink reading is shown as an
+   stamp press (loop16: "Stamp pressed: APPROVED at tick N"); the stamp-ink reading is shown as an
    informative fact only ("Stamp ink on the passport (informative): ...", with "the press may have missed" when a
    press is on record and no ink side was read) so TOD can see a missed press and press again. Removed:
    "Section 5 applied ... -> X", "the passport is under the wrong stamp: drag it onto X", "the next step is C",
@@ -144,7 +144,7 @@ spelling DENY_P 0.75), and `situation()` (diagnostic step letter, never sent).
 ## Running
 
 ```
-cd .
+cd <repo>
 .venv-loop\Scripts\python.exe -m tod_papers.loop --max-ticks 10
 .venv-loop\Scripts\python.exe -m tod_papers.loop --dry-run --max-ticks 3   # no input at all
 ```
@@ -452,14 +452,14 @@ about 1 citation per Day 2, inside the 2 free warnings. The manual's Day 2 rule 
 
 ## `--pause-think` (harness timing feature, off by default; loop18 invisible suspend, 2026-10-03)
 
-**Demo configuration: pause OFF.** The flag is a test-harness aid only (the user judged the suspend visually
-unacceptable for the demo); `store_true`, default off, and nothing in `src/`, `tools/` or `deploy/` turns it on.
+**Demo configuration: pause OFF.** The flag is a test-harness aid only (the suspend is visible as stutter in
+recordings); `store_true`, default off, and nothing in `src/`, `tools/` or `deploy/` turns it on.
 
 The game clock is held while TOD thinks. No input is chosen by the harness: no key, no menu, no click -- the
 game process is frozen and thawed, nothing else. Per booth tick:
 1. grab the frame (game running) -> the only frame extraction and TOD see;
 2. `io_win.suspend_game(hwnd)` (NtSuspendProcess on the game pid; a keep-alive thread thaws it 40 ms every 3 s so
-   Windows never marks it "Not Responding" -- measured in `pause_and_speed notes` section B,
+   Windows never marks it "Not Responding" -- measured with
    `tools/pause_probe.py`);
 3. extraction + request 1 / 1b / 2;
 4. `io_win.resume_game(pid)`, then TOD's input is executed and the post-wait verification runs (input is never

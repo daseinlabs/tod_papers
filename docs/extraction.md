@@ -47,8 +47,8 @@ YOLO detection, by contrast, benefits clearly from CUDA and stays on GPU.
 ## Exact install commands that worked
 
 ```
-py -3.13 -m venv .\.venv-extract
-.\.venv-extract\Scripts\python -m pip install -U pip
+py -3.13 -m venv <repo>\.venv-extract
+<repo>\.venv-extract\Scripts\python -m pip install -U pip
 # CUDA torch (cu126) — verified torch.cuda.is_available() == True on the RTX 4070:
 ... pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 #   -> torch 2.14.1+cu126, torchvision 0.29.1+cu126
@@ -62,12 +62,12 @@ Pinned set in `requirements-extract.txt`.
 
 ## Weight paths
 
-- YOLO detector: `.\models\icon_detect_model.pt`
+- YOLO detector: `<repo>\models\icon_detect_model.pt`
   (40.6 MB, from `microsoft/OmniParser-v2.0`, file `icon_detect/model.pt`; downloaded via
   `https://huggingface.co/microsoft/OmniParser-v2.0/resolve/main/icon_detect/model.pt`).
 - RapidOCR weights ship inside the `rapidocr-onnxruntime` wheel (PP-OCRv3 det/rec +
   mobile cls ONNX) — no separate download.
-- EasyOCR (if used) weights downloaded to `.\models\easyocr\`.
+- EasyOCR (if used) weights downloaded to `<repo>\models\easyocr\`.
 
 ## Minimal working `extract()` (verified to run)
 
@@ -78,7 +78,7 @@ import cv2, numpy as np
 from ultralytics import YOLO
 from rapidocr_onnxruntime import RapidOCR
 
-MODEL_PATH = r".\models\icon_detect_model.pt"
+MODEL_PATH = r"<repo>\models\icon_detect_model.pt"
 DET_CONF, IMGSZ = 0.1, 640
 
 @dataclass
@@ -293,7 +293,7 @@ Still wrong: "Arstotzkan" on the small Inspector's-booth sheet, "Hovember", "Rft
 Variants tried. No single recogniser or preprocessing got all five targets (ALIGN VISA BENEATH STAMP / APPROVED / DENIED / NEXT / ARSTOTZKA):
 
 - **PP-OCRv3 (1.2.3), any preprocessing** (nearest/area 1x, 2x/3x NN, full 4x frame, Otsu/adaptive binarisation): fails ALIGN, DENIED and NEXT.
-- **Native 1x OCR.** The scoping agent's "native 1x reads STAMP/APPROVE/DENY" result came from the synthetic frame. It is **not confirmed on real booth frames**: at 1x the detector finds only 6 of the 15 lines on `215501/raw_0003` and misses DENIED, APPROVED and ALIGN entirely. 1x does read NEXT.
+- **Native 1x OCR.** An early "native 1x reads STAMP/APPROVE/DENY" result came from a synthetic frame. It is **not confirmed on real booth frames**: at 1x the detector finds only 6 of the 15 lines on `215501/raw_0003` and misses DENIED, APPROVED and ALIGN entirely. 1x does read NEXT.
 - **PP-OCRv5 mobile.**
   - 3x nearest-neighbour: reads everything except NEXT and ENDLESS (N/H confusion).
   - 3x bilinear: reads everything except APPROVED (`RPPROUED`).
@@ -327,8 +327,8 @@ probability is below 0.25.
 
 | Condition | icon | gdino | clip | ocr (thread) | **total** |
 |---|---|---|---|---|---|
-| quiet machine (earlier in the session) | 40–48 ms | 250–370 ms | 170–230 ms | 410–810 ms | **515–815 ms** |
-| contended: game + live loop + other agents running; GPU P5 at 1050 MHz | 170–220 ms | 1.1–1.2 s | 0.55–0.65 s | 2.1–3.5 s | **2.2–3.5 s** |
+| quiet machine | 40–48 ms | 250–370 ms | 170–230 ms | 410–810 ms | **515–815 ms** |
+| contended: game + live loop + other GPU jobs running; GPU P5 at 1050 MHz | 170–220 ms | 1.1–1.2 s | 0.55–0.65 s | 2.1–3.5 s | **2.2–3.5 s** |
 | old extract.py, same contended run | 200–250 ms | – | – | 1.4–4.8 s | 1.6–5.0 s |
 
 The OCR worker is the critical path. GPU work (YOLO → GDINO → CLIP) overlaps it. The
@@ -340,8 +340,7 @@ pipeline costs about as much as the old OCR-only one did. To trim further:
 - `TOD_GDINO_SIZE=512` makes GDINO faster but gives lower lever scores.
 
 Test dumps (described criteria lists, SoM images, before/after JSON) for menu,
-newspaper, NEXT and two booth frames are in the session scratchpad `percept/`
-(`criteria_*.txt`, `som_*.jpg`, `percept_summary.json`).
+newspaper, NEXT and two booth frames were kept locally (not in the repo).
 
 ## Static layout extractor (no GPU) — `layout.py`, 2026-10-02
 
@@ -362,7 +361,7 @@ Entry points:
 - `extract.extract_static(frame)` is a new module path; `extract()` is unchanged.
 - `layout.merge_hybrid(static, vision)` returns static fixed elements plus vision's non-overlapping boxes.
 
-Comparison on 6 frames (003519 raw_0000/0014/0020/0033, 221705 raw_0030, live grab), with one TOD request-2 call per frame per variant (details in `scratchpad/static/compare.md`):
+Comparison on 6 frames (003519 raw_0000/0014/0020/0033, 221705 raw_0030, live grab), with one TOD request-2 call per frame per variant:
 
 | | vision | static | static+doc OCR |
 |---|---|---|---|
@@ -390,7 +389,7 @@ Comparison on 6 frames (003519 raw_0000/0014/0020/0033, 221705 raw_0030, live gr
 - Take documents from the vision extractor, whose panel/CLIP identity and per-paper split it does well. `merge_hybrid` drops vision boxes duplicating a static element.
 - When the GPU or remote extractor is unavailable or slow, fall back to static alone: it is still actionable at 20 ms, with only document identity lost.
 - A later cheap improvement is to label static doc boxes by template/colour (the passport cover and the rulebook guide), so the GPU is not needed at all on Days 1–3.
-- Hook (loop.py is owned by another agent, so this is not applied): `--extractor {vision,static,hybrid}` choosing between `ex.extract`, `ex.extract_static` and `layout.merge_hybrid(ex.extract_static(f), ex.extract(f))` at the two `ex.extract(frame)` call sites (offline ~l.958, run ~l.1085).
+- Hook (since applied in loop.py): `--extractor {vision,static,hybrid}` choosing between `ex.extract`, `ex.extract_static` and `layout.merge_hybrid(ex.extract_static(f), ex.extract(f))` at the two `ex.extract(frame)` call sites (offline ~l.958, run ~l.1085).
 
 ## Inspect-mode elements (missing-document interrogation), 2026-10-03
 

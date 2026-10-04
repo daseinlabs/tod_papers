@@ -33,12 +33,12 @@ gave 69 instead of 67 boxes and 53 instead of 56. It changed CLIP labels, droppe
 "APPROVED"/"DENIED" icon text on one frame and added a spurious "rubber stamp" object.
 Use `TOD_EXTRACT_FMT=jpeg` only for non-pixel-art sources.
 
-## Cloud access found on this laptop (2026-10-02)
+## Cloud access available at design time (2026-10-02)
 
 | Provider | State |
 |---|---|
-| **GCP** (`gcloud`) | Authenticated. Active account is the service account `REDACTED…`; user accounts `REDACTED`, `REDACTED` and `REDACTED` are also credentialed. Project `REDACTED`, default zone us-central1-a. **L4 quota is 16 on-demand and 16 spot** in us-central1, us-west1, us-west2 and us-west4 (1 L4 already in use in us-central1). L4 is available in us-west4-a/c, us-west1-a/b/c and us-central1-a/b/c. The Deep Learning VM family `common-cu129-ubuntu-2204-nvidia-580` exists. |
-| **Modal** (`modal` 1.4.1) | Logged in; profile and workspace `dasein`. |
+| **GCP** (`gcloud`) | Authenticated (one project). **L4 quota is 16 on-demand and 16 spot** in us-central1, us-west1, us-west2 and us-west4. L4 is available in us-west4-a/c, us-west1-a/b/c and us-central1-a/b/c. The Deep Learning VM family `common-cu129-ubuntu-2204-nvidia-580` exists. |
+| **Modal** (`modal` 1.4.1) | Logged in. |
 | AWS, Azure, RunPod, Vast, Lambda | No CLI and no credential env vars. |
 | Docker | Not installed locally (there is a `~/.docker` dir). WSL is present. |
 
@@ -127,7 +127,7 @@ Server stages are in ms, and the GPU stages run alongside OCR.
 | `20261002_003519/raw_0020` | 61 / 60 | **1.08 s** (5.93, 1.08, 1.08) | 967 | 924 | 431 | 203 | 24 | 41 | 48 | 51 | 5.4 s |
 | `20261002_003519/raw_0033` | 56 / 56 | **0.74 s** (0.83, 0.73, 0.74) | 617 | 602 | 354 | 185 | 31 | 13 | 48 | 93 | 3.5 s |
 | `20261001_221705/raw_0030` | 56 / 56 | **0.94 s** (0.94, 0.89, 0.96) | 786 | 744 | 371 | 172 | 23 | 41 | 60 | 42 | 4.2 s |
-| scratchpad `loop5/live_20261002` | 62 / 62 | **0.85 s** (0.80, 0.85, 0.87) | 727 | 698 | 356 | 168 | 24 | 16 | 60 | 44 | 3.8 s |
+| live grab 2026-10-02 | 62 / 62 | **0.85 s** (0.80, 0.85, 0.87) | 727 | 698 | 356 | 168 | 24 | 16 | 60 | 44 | 3.8 s |
 
 - **All six medians are under 1.3 s (0.74-1.26 s)**, against 3.5-9.7 s for local
   `extract()` in the same session. That is a 4-8x win, and better than the 2-4x
@@ -206,11 +206,10 @@ set TOD_EXTRACT_URL=http://127.0.0.1:8765
 deploy/gcp_l4_spot.sh stop        # when done (stops GPU billing)
 ```
 
-**Current state (2026-10-02): VM `tod-extract` is RUNNING in us-west4-a** (recorded in
-`deploy/.zone`, which `gcp_l4_spot.sh` reads). To stop it from any shell:
+The zone of the VM is recorded in `deploy/.zone` (gitignored), which `gcp_l4_spot.sh` reads. To stop it from any shell:
 
 ```
-gcloud compute instances stop tod-extract --zone=us-west4-a --project=REDACTED
+gcloud compute instances stop tod-extract --zone=us-west4-a --project=<your-project>
 ```
 
 After a preemption plus `start`, the VM gets a new IP and host key, and PuTTY's
@@ -225,7 +224,7 @@ Use `deploy/gcp_l4_spot.sh down` to delete it together with its disk, which stop
 `deploy/requirements-server.txt`). The client only needs `requests`, which is already
 installed.
 
-### loop.py change (not applied; for loop.py's owner)
+### loop.py change (applied)
 
 This is three added lines right after `from . import extract as ex` (line 45). It rebinds
 the two entry points on the module, so the `ex.warmup()` and `ex.extract(frame)` call
@@ -252,7 +251,7 @@ The loop is unchanged when `TOD_EXTRACT_URL` is unset.
 
 ```
 modal deploy deploy/modal_app.py     # builds the same Dockerfile on Modal
-set TOD_EXTRACT_URL=https://WORKSPACE--tod-extract-web.modal.run
+set TOD_EXTRACT_URL=https://<workspace>--tod-extract-web.modal.run
 ```
 
 Modal is public HTTPS, so set `TOD_EXTRACT_TOKEN` as a Modal secret and in the local env.

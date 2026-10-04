@@ -138,7 +138,7 @@ foreground. Needed because an unfocused window won't receive game input.
 
 ## Verified test procedure
 
-Harnesses in the scratchpad launch MS Paint, find its window, capture the client
+Throwaway test harnesses launch MS Paint, find its window, capture the client
 area with dxcam and mss (PNGs saved and visually confirmed — client area only,
 no chrome), then command drags/clicks and locate the resulting marks in a
 re-capture. Diagonal drag err **0.0 px**, horizontal drag err **1.0 px**, single

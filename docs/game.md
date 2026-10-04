@@ -127,7 +127,7 @@ Sources: Fandom "Official Bulletin" https://papersplease.fandom.com/wiki/Officia
 ## 6. Things that interrupt the processing loop
 
 - **Intro / cutscene:** a one-time opening sequence (labor lottery → arrive at booth) before Day 1. Click/advance through it.
-- **Day-start Bulletin screen:** every day opens with the Ministry bulletin (full-screen text stating rule changes). **Click to dismiss/continue** into the booth. The agent must re-read the ruleset here each day.
+- **Day-start Bulletin screen:** every day opens with the Ministry bulletin (full-screen text stating rule changes). **Click to dismiss/continue** into the booth. The ruleset changes here each day.
 - **Day-end "night" / home screen:** after the day, a summary shows **income vs expenses** (rent, food, heat, family). There are selectable line items (e.g. choose to **skip heat** or skip a meal to save money) and a **Continue/Next Day** button. For days 1–5 just pay everything and click **Continue** — no starvation risk. Confirm by clicking the continue/confirm control.
 - **Detain prompts:** when a discrepancy is found or a wanted person appears, a **DETAIN** button appears in inspect mode — only relevant from ~Day 5. Not required days 1–3.
 - **Scripted story entrants:** dialogue-only interrupts (e.g. **Jorji** on days 2/4) — they still resolve via the normal approve/deny flow; just extra transcript text to click through.
@@ -139,7 +139,7 @@ Sources: Fandom "Official Bulletin" https://papersplease.fandom.com/wiki/Officia
 
 - **Save location (Windows, Steam/Unity build):**
   `%APPDATA%\3909\PapersPlease\`
-  (For this machine: `%APPDATA%\3909\PapersPlease\`.) **Not present yet** — created on first launch. This is the classic 3909 savedata path (the Unity remaster keeps it); saves are **not** in Steam `userdata` / cloud for this title. Source: 3909 Support "Savedata Location" https://3909.zendesk.com/hc/en-us/articles/360057528153-Savedata-Location (reached via search; direct fetch 403s).
+  **Not present yet** — created on first launch. This is the classic 3909 savedata path (the Unity remaster keeps it); saves are **not** in Steam `userdata` / cloud for this title. Source: 3909 Support "Savedata Location" https://3909.zendesk.com/hc/en-us/articles/360057528153-Savedata-Location (reached via search; direct fetch 403s).
 - **Save files:** `headers.sav`, `names.sav`, `settings.sav`, `stats.sav`, and multiple `save_<date>.sav` (one per reached checkpoint/day). Mac: `~/Library/Application Support/3909/PapersPlease/`; Linux: `~/.local/share/3909/PapersPlease/`.
 - **Starting on a given day:** Story mode auto-saves at the start of each day. The main menu's **Continue** resumes the latest day; the game also offers **day select / "jump to day"** for days you have already reached (you cannot skip ahead to unplayed days). For deterministic automation testing, **snapshot the `AppData\Roaming\3909\PapersPlease` folder** after reaching Day N and restore it to replay that day. The `-savedir` launch arg (see §1) lets you point at an isolated save copy per run.
 
