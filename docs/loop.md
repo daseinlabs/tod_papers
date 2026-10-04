@@ -355,6 +355,13 @@ Loop28 N3a / N4a (run 074339 t138-193: BASIC RULES open with its left page under
 read): `facts['nodocs_rule_visible']` = a frame OCR box reads 'must have a pass' / 'Entrant must have'. Not visible
 -> N3a drag the rulebook onto the desk target (inspect button not offered), or in inspect mode N4a click the
 inspect button only (leave); visible -> N3 / N4 as before.
+Loop29: step N also starts when 3 of the last 4 ticks' 'no documents' answers are >= 0.5 with one >= 0.6
+(`Entrant.nodocs_hist`; run 080225 t149-159 hovered 0.52-0.70), or after 4 ticks with a person, no passport /
+ticket / unread paper named and the counter empty (`nopaper_ticks`; a left-over flyer does not count), besides
+the 3-tick streak and the game's slip. N3a's desk target is `rulebook_desk_plan`: a `clear_desk_spot` sized to
+the OPEN rulebook (226x158 native, both pages; obstacles = stamp bar / tabs / inspect button only, the dropped book
+lies on top of papers); a book cut by the booth edge is assumed to extend left; the drag keeps its grab point and
+moves by the planned offset (dry 074339 t138: visible 180..314 -> open box 182..408 x 158..316).
 A changed ISS. city reading drops the stored verdict (and that tick's), and a city not spelled as in the rulebook
 list gets "city 'x' is not in the rulebook for C" in the state block.
 Offline `--sequential` carries entrant memory, history, exclusions and the cycle guard across consecutive

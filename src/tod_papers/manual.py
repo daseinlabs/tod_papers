@@ -1370,12 +1370,14 @@ def no_passport(state: dict, facts: dict | None = None) -> bool:
     # TOD's answer stays >= NO_DOCS_KEEP_P; the rulebook open on BASIC RULES with no paper of theirs also starts it.
     active = bool(f.get("nodocs_on"))
     rules_open = (state.get("rulebook_page") or {}).get("value") == "basic_rules"
-    if not (slip or active or rules_open) and f.get("nodocs_ticks", NO_DOCS_TICKS) < NO_DOCS_TICKS:
+    start = nodocs_start(f)
+    if not (slip or active or rules_open) and not start:
         # loop24 (run 040242 t41, Ava Pardal): 'no documents' 0.82 on the tick she arrived, before her papers reached
         # the counter -> N1 dragged the rulebook out over her flyer -> 5 refused put-away drags. Step N needs the
-        # answer on NO_DOCS_TICKS consecutive ticks (or the game's slip)
+        # answer on NO_DOCS_TICKS consecutive ticks (or the game's slip, or nodocs_start)
         return False
-    nd_p = NO_DOCS_KEEP_P if active else 0.5 if (slip or rules_open) else NO_DOCS_P
+    nd_p = (NO_DOCS_KEEP_P if active else 0.5 if (slip or rules_open or start == "hist")
+            else 0.0 if start == "stand" else NO_DOCS_P)
     # loop28 (run 070003 t143-158, Jorji): inspect mode darkens the booth -- person_at_window read 0.48 and three
     # unread boxes (identity 0.26-0.33, rulebook / counter slices) appeared, step N switched off and step H left
     # inspect mode (on/off 15 ticks). While step N is active and inspect mode is on, the person counts from
@@ -1388,6 +1390,24 @@ def no_passport(state: dict, facts: dict | None = None) -> bool:
     return not any((d["id"] == "passport" and d["p"] >= 0.5) or d["id"] == "entry_ticket"
                    or (d["id"] == UNREAD and not (slip and d["where"] == "desk") and not insp)
                    for d in (facts or {}).get("docs_named") or [])
+
+
+NODOCS_STAND_TICKS = 4   # loop29: ticks a person stands with no paper of theirs named + counter empty -> step N
+
+
+def nodocs_start(f: dict) -> str:
+    """loop29 (run 080225 t130-142, Jorji: 'no documents' 0.52-0.70, never >= 0.6 on 3 straight ticks): how step N
+    may start for this entrant -- 'streak' (NO_DOCS_TICKS straight ticks >= NO_DOCS_P), 'hist' (3 of the last 4
+    ticks >= 0.5, one of them >= NO_DOCS_P), 'stand' (the person stood NODOCS_STAND_TICKS ticks with TOD naming no
+    paper of theirs anywhere and the counter empty per TOD), '' (not yet). The game's slip is checked by the caller."""
+    if f.get("nodocs_ticks", NO_DOCS_TICKS) >= NO_DOCS_TICKS:
+        return "streak"
+    h = [p for p in (f.get("nodocs_hist") or [])[-4:]]
+    if sum(p >= 0.5 for p in h) >= 3 and max(h, default=0.0) >= NO_DOCS_P:
+        return "hist"
+    if f.get("nopaper_ticks", 0) >= NODOCS_STAND_TICKS:
+        return "stand"
+    return ""
 
 
 NODOCS_INSPECT_PERSON_P = 0.3   # loop28: person_at_window floor while step N is on and inspect mode darkens the booth

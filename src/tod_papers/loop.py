@@ -994,6 +994,33 @@ DESK_TARGET_HALF = 12    # native px: the desk target is a small box centred on 
 CLEAR_SPOT_IOU = 0.8     # the open passport already lies on the clear spot -> 'clear desk space' is not offered
 
 
+RULEBOOK_OPEN = (226, 158)   # native size of the open rulebook, both pages (run 045949 t139-140: 254..480 x 108..266)
+
+
+def rulebook_desk_plan(facts: dict | None, state: dict) -> dict | None:
+    """loop29 (run 074339 t137-197, Jorji): the open rulebook's left page lay under the booth edge (visible native box
+    180..314 = the right page only), so the rule line never OCR'd. Step N3a drags it to a clear-desk spot sized to the
+    OPEN rulebook (layout.clear_desk_spot, as for the passport): the hidden left page is assumed to extend left of the
+    visible box. Returns {'vis', 'full', 'spot', 'offset', 'vis_center'} (native) or None."""
+    sinfo = (facts or {}).get("static") or {}
+    rbs = [d for d in (facts or {}).get("docs_named") or []
+           if d.get("id") == "rulebook" and d.get("where") == "desk" and d.get("native")]
+    if not rbs or "docs" not in sinfo:
+        return None
+    v = max(rbs, key=lambda d: (d["native"][2] - d["native"][0]) * (d["native"][3] - d["native"][1]))["native"]
+    w, h = RULEBOOK_OPEN
+    edge = v[0] <= layout.DESK[0] + 6   # cut by the booth edge: the hidden part is left of the visible box
+    full = [v[2] - w, v[1], v[2], v[1] + h] if edge else [v[0], v[1], v[0] + w, v[1] + h]
+    tray = bool(sinfo.get("tray_open", man.yes(state, "stamp_tray_open")))
+    # the dropped rulebook lies ON TOP of the other papers: only what the game draws over papers (stamp bar, tabs,
+    # inspect button) and the booth edge are obstacles (with the papers as obstacles, t138 put it under the button)
+    spot = layout.clear_desk_spot([], tray, (w, h), bool(sinfo.get("inspect_button")))
+    sb = spot["box"]
+    off = [sb[0] - full[0], sb[1] - full[1]]
+    return {"vis": list(v), "full": full, "spot": list(sb), "offset": off,
+            "vis_center": [(v[0] + v[2]) / 2, (v[1] + v[3]) / 2]}
+
+
 def _passport_doc(facts: dict | None) -> dict | None:
     """The paper TOD named the passport (p >= 0.5): the largest one on the desk, else one on the counter."""
     pp = [d for d in (facts or {}).get("docs_named") or [] if d.get("id") == "passport" and d.get("p", 0) >= 0.5
@@ -1922,6 +1949,18 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     rb_placed = nstep >= "N3" and nstep != "N3a"   # N3a: the rulebook is dragged further onto the desk
     if nstep == "N3a":
         boxes = [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"]
+        rp = rulebook_desk_plan(facts, state)
+        if rp is not None:
+            # loop29: the desk target is where the grabbed rulebook's centre lands with BOTH pages on the desk
+            sx_, sy_ = W / layout.NATIVE_W, H / layout.NATIVE_H
+            cx_, cy_ = rp["vis_center"][0] + rp["offset"][0], rp["vis_center"][1] + rp["offset"][1]
+            hw_ = DESK_TARGET_HALF
+            regions = [r for r in regions if r.caption not in (REGION_CAPS["desk"], REGION_CAPS["desk_clear"])] + [
+                Box(int((cx_ - hw_) * sx_), int((cy_ - hw_) * sy_), int((cx_ + hw_) * sx_), int((cy_ + hw_) * sy_),
+                    "", "region", 0.0, caption=REGION_CAPS["desk"])]
+            region_src["desk"] = "derived_frame"
+            facts["rulebook_plan"] = rp
+            print(f"           N3a rulebook plan: visible {rp['vis']} -> open box {rp['spot']} (offset {rp['offset']})")
     if booth and facts is not None and not nopp and man.rulebook_hides_passport(state, facts):
         # loop27 step R (run 064906 t22-35, Aidan Murphy): the open rulebook lies over the passport TOD already read;
         # the rulebook slot (layout stow_papers: a rulebook dropped on the counter closes) is offered as a target
@@ -2348,6 +2387,8 @@ class Entrant:
     stowed: list = field(default_factory=list)   # [(tick, 'flyer'|'citation')] executed step-K drops on the stow shelf
     pp_drop: int | None = None   # tick of the last drag of a paper TOD named the passport onto the person
     nodocs_ticks: int = 0   # loop24: consecutive ticks TOD said 'no documents' with a person at the window
+    nodocs_hist: list = field(default_factory=list)   # loop29: p('no documents') of the last 4 ticks (0: no person)
+    nopaper_ticks: int = 0  # loop29: consecutive ticks a person stood, no paper of theirs named, counter empty
     nodocs_on: bool = False   # loop26: step N held for this entrant; kept while 'no documents' >= NO_DOCS_KEEP_P
     nodocs_stage: str = ""    # loop26: furthest step-N sub-step reached (progress for the stall / cycle rules)
     nodocs_rule_tick: int | None = None   # loop26: executed click on the 'must have a passport' line in inspect mode
@@ -2361,11 +2402,13 @@ class Entrant:
         self.stowed = []
         self.pp_drop = None
         self.nodocs_on, self.nodocs_stage, self.nodocs_rule_tick = False, "", None
+        self.nopaper_ticks = 0
         self.reset_tick = tick
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
 
-    def observe(self, tick: int, state: dict, papers: bool = False, day: str = "1", pp_named: bool | None = None) -> None:
+    def observe(self, tick: int, state: dict, papers: bool = False, day: str = "1", pp_named: bool | None = None,
+                own: bool | None = None) -> None:
         """Start-of-tick update from request 1 (`papers`: TOD named a paper of the entrant's -- passport, ticket,
         flyer or an unread one -- on the desk or counter). The hand-back is TOD's PASSPORT_RETURNED_Q answer on this
         frame (audit B20), not a tick window."""
@@ -2375,6 +2418,13 @@ class Entrant:
                          man.NODOCS_INSPECT_PERSON_P if self.nodocs_on and man.yes(state, "inspect_mode_on") else 0.5)
         self.nodocs_ticks = self.nodocs_ticks + 1 if (person and man.yes(state, "no_documents_presented", man.NO_DOCS_P)
                                                       ) else 0
+        # loop29 (run 080225 t130-142, Jorji): 'no documents' hovered 0.52-0.70 and never held >= 0.6 for 3 straight
+        # ticks -> step N never started. Also kept: the last 4 ticks' answers (0 without a person) and the ticks the
+        # person has stood with TOD naming no paper of theirs anywhere and the counter empty per TOD.
+        ndp = (state.get("no_documents_presented") or {}).get("p", 0.0) if person else 0.0
+        self.nodocs_hist = (self.nodocs_hist + [ndp])[-4:]
+        self.nopaper_ticks = (self.nopaper_ticks + 1 if person and not (papers if own is None else own)
+                              and not man.yes(state, "document_on_counter_shelf") else 0)
         if self.nodocs_on and not person:
             # the memory lasts while the person stands there (a single dip below NO_DOCS_KEEP_P, run 045949 t139
             # 0.396, only pauses step N for that tick: manual.no_passport)
@@ -2525,6 +2575,7 @@ class Entrant:
                 "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
                 "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp,
                 "waiting_docs": self.waiting_docs, "mark_side": self.mark_side, "hb_drop": self.hb_drop, "pp_drop": self.pp_drop, "nodocs_ticks": self.nodocs_ticks,
+                "nodocs_hist": list(self.nodocs_hist), "nopaper_ticks": self.nopaper_ticks,
                 "nodocs_on": self.nodocs_on, "nodocs_rule_tick": self.nodocs_rule_tick,
                 "verdict_carried": self.verdict, "stowed": list(self.stowed)}
 
@@ -2554,9 +2605,12 @@ def passport_named(state: dict, df: dict) -> bool:
     return any(d["id"] == "passport" for d in name_docs(state, df))
 
 
-def entrant_papers(state: dict, df: dict) -> bool:
+OWN_PAPER_IDS = ("passport", "entry_ticket", man.UNREAD)   # loop29: a flyer can be left over from an earlier entrant
+
+
+def entrant_papers(state: dict, df: dict, ids: tuple = ENTRANT_PAPER_IDS) -> bool:
     """TOD named (or could not name) a paper of the entrant's on the desk or counter (G2 'papers still here')."""
-    return any(d["id"] in ENTRANT_PAPER_IDS for d in name_docs(state, df))
+    return any(d["id"] in ids for d in name_docs(state, df))
 
 
 def set_verdict_ask(df: dict, ent: "Entrant", prev_state: dict | None, prev_facts: dict | None, day: str) -> None:
@@ -2649,7 +2703,8 @@ def offline(args) -> int:
         gate_inspection(state, asked, df)
         s_prev = state
         ent = s_ent if seq else Entrant()
-        ent.observe(otick, state, papers=entrant_papers(state, df), day=oday, pp_named=passport_named(state, df))
+        ent.observe(otick, state, papers=entrant_papers(state, df), day=oday, pp_named=passport_named(state, df),
+                    own=entrant_papers(state, df, OWN_PAPER_IDS))
         if seq and len(ent.log) != s_resets:
             s_resets = len(ent.log)
             s_cyc.reset()
@@ -2995,7 +3050,8 @@ def run(args) -> int:
             if screen == "day_end" and (ent.country or ent.stamp_clicks or ent.handed_back is not None):
                 # the day is over (Day 2 ends at the bombing mid-entrant): nothing of this entrant carries into the next day
                 ent.reset(tick, "day_end screen")
-            ent.observe(tick, state, papers=entrant_papers(state, df), day=day, pp_named=passport_named(state, df))
+            ent.observe(tick, state, papers=entrant_papers(state, df), day=day, pp_named=passport_named(state, df),
+                    own=entrant_papers(state, df, OWN_PAPER_IDS))
             if len(ent.log) != n_resets:   # new entrant: stall / pick / refusal counters are entrant-scoped
                 n_resets = len(ent.log)
                 refused_n, pick_key, pick_n, stall_key, stall_n, drag_key, drag_n = 0, None, 0, None, 0, None, 0
@@ -3171,6 +3227,15 @@ def run(args) -> int:
                     if layout._iou4([sb.x1 / _sx, sb.y1 / _sy, sb.x2 / _sx, sb.y2 / _sy], _v) >= 0.5:   # TOD's pick IS the passport
                         # the desk drop point keeps the offset to this grab point (on the passport, not the ticket)
                         ax, ay = int(_dk["grab_native"][0] * _sx), int(_dk["grab_native"][1] * _sy)
+                _rp = (facts or {}).get("rulebook_plan")
+                if _sp is None and _rp and tb.caption == REGION_CAPS["desk"]:
+                    # loop29 N3a: keep the grab point; the rulebook moves by the planned offset (both pages on desk)
+                    _sx, _sy = frame.shape[1] / layout.NATIVE_W, frame.shape[0] / layout.NATIVE_H
+                    _v = _rp["vis"]
+                    if _v[0] * _sx <= ax <= _v[2] * _sx and _v[1] * _sy <= ay <= _v[3] * _sy:
+                        bx = min(max(int(ax + _rp["offset"][0] * _sx), 0), frame.shape[1] - 1)
+                        by = min(max(int(ay + _rp["offset"][1] * _sy), 0), frame.shape[0] - 1)
+                        rec["rulebook_drop"] = [bx, by]
                 if _sp is not None:
                     (ax, ay), (bx, by) = _sp["grab"], _sp["drop"]
                     rec["strip_drop"] = [bx, by]
