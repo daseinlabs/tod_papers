@@ -632,6 +632,14 @@ def add_tod_facts(facts: dict, state: dict, df: dict, sinfo: dict | None) -> Non
         a = state.get(f"doc{i}")
         if a:
             doc_cache_put(d, a, facts.get("tick", 0))
+    if facts.get("ticket_owed") and man.yes(state, "person_at_window"):
+        # loop30 (run 091325 t109-120, Antonia): her entry ticket (owed, read before the hand-back) came out from under
+        # the tray with no OCR text and TOD named it 'flyer' -> step K stowed it for 11 ticks. A text-less desk paper
+        # named 'flyer' below TICKET_GUESS_P that was never put away is offered as the probable ticket (TOD picks).
+        for d in facts["docs_named"]:
+            if (d["id"] == "flyer" and d["p"] < TICKET_GUESS_P and d["where"] == "desk" and not d.get("text")
+                    and d.get("native") and stowed_spot(d["native"]) is None):
+                d.update(id="entry_ticket", guess=True, flyer_p=d["p"])
     derive_open_on_desk(state, facts)
     facts["strip"] = strip_facts(state, df, sinfo)
     facts["passport_under"] = passport_sides(facts["strip"])
@@ -649,8 +657,29 @@ def add_tod_facts(facts: dict, state: dict, df: dict, sinfo: dict | None) -> Non
 
 CLUTTER_IDS = ("citation", "flyer")   # papers that are never stamped / checked (manual step K)
 CLUTTER_P = 0.5
+TICKET_GUESS_P = 0.6   # loop30: a text-less 'flyer' below this, while a ticket is owed, is offered as the probable ticket
+TICKET_GUESS_DESC = "paper — probably the entry ticket"
+MERGED_COVER = 0.6   # loop30: a box whose centre lies on no paper but covers >= this of one paper's box is that paper
 CLUTTER_SIZE = {"flyer": (150, 100)}   # full native size (Pink Vice flyer, runs 041004 / 035532); visible box may be cut
 PP_GONE_STILL_P = 0.8   # loop25: a 'still_here' below this does not outweigh "no passport named" after a passport drop
+
+
+def merged_paper(b, named: list[dict]) -> int | None:
+    """loop30 (run 091325 t109-120): the detector merged Antonia's entry ticket with empty desk into one box whose
+    centre lay on bare desk; TOD picked it as the flyer and 11 drags grabbed nothing. Index of the one paper (frame
+    box) that `b` covers >= MERGED_COVER of, when b's centre lies on no paper; else None."""
+    cx, cy = b.center
+    if any(d["box"][0] <= cx <= d["box"][2] and d["box"][1] <= cy <= d["box"][3] for d in named if d.get("box")):
+        return None
+    hits = []
+    for j, d in enumerate(named):
+        if not d.get("box"):
+            continue
+        x1, y1, x2, y2 = d["box"]
+        inter = max(0, min(b.x2, x2) - max(b.x1, x1)) * max(0, min(b.y2, y2) - max(b.y1, y1))
+        if inter >= MERGED_COVER * max(1, (x2 - x1) * (y2 - y1)):
+            hits.append(j)
+    return hits[0] if len(hits) == 1 else None
 
 
 def clutter_facts(named: list[dict], tray_open: bool) -> list[dict]:
@@ -873,10 +902,13 @@ def desk_facts(boxes: list, W: int, H: int, sinfo: dict | None = None) -> dict:
         seen.add(t)
         lines.append(t)
     docs = []
-    for d in sinfo.get("docs") or []:
+    fboxes = [{"box": list(layout.scale_box(d["box"], W, H))} for d in sinfo.get("docs") or []]
+    for k, d in enumerate(sinfo.get("docs") or []):
         x1, y1, x2, y2 = layout.scale_box(d["box"], W, H)
+        # loop30: text of a box merged with bare desk (centre on no paper) belongs to the one paper it covers
         texts = [b.text.strip() for b in sorted(boxes, key=lambda b: (b.y1, b.x1))
-                 if (b.text or "").strip() and x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2]
+                 if (b.text or "").strip() and ((x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2) or (
+                     b.kind != "region" and merged_paper(b, fboxes) == k))]
         docs.append({"where": d["where"], "native": list(d["box"]), "box": [x1, y1, x2, y2],
                      "text": texts[:6], "pos": ex.coarse_pos(Box(x1, y1, x2, y2, "", "panel", 1.0), W, H)})
     return {"desk_text": lines, "docs": docs[:MAX_DOC_Q],
@@ -2140,15 +2172,26 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     same_paper = paper_groups(dn_all)
     free_ids = set()   # step-N rulebook: pages dragged, corners/rule lines clicked -> no single input stated
     click_ids = set()   # loop26: N3-N5 rulebook elements (already placed): click-only
+    grab_at = {}   # loop30: element id -> grab point (frame px) on its paper when the element's centre is off it
+    if facts is not None:
+        facts["grab_at"] = grab_at
     for i, b in idmap.items():   # name each paper by TOD's request-1 identity answer (geometry: centre inside)
         if b.kind in ("region", "background"):
             continue
+        mj = merged_paper(b, dn_all)
+        if mj is not None:
+            x1, y1, x2, y2 = dn_all[mj]["box"]
+            grab_at[str(i)] = ((max(b.x1, x1) + min(b.x2, x2)) // 2, (max(b.y1, y1) + min(b.y2, y2)) // 2)
         for j, d in enumerate(dn_all):
             x1, y1, x2, y2 = d["box"]
-            if (x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2 and getattr(b, "name", "") not in layout.BY_NAME
+            if (((x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2) or j == mj)
+                    and getattr(b, "name", "") not in layout.BY_NAME
                     and not getattr(b, "name", "").startswith("rulebook_")):   # loop24: rulebook_nav click targets
                 rest = desc[str(i)].split(" — ", 1)[-1]   # drop the detector kind; TOD's identity names it
-                if d["id"] == man.UNREAD:   # identity gate: no name below IDENTITY_MIN_P
+                if d.get("guess"):   # loop30: text-less 'flyer' while the ticket is owed
+                    desc[str(i)] = (f"{TICKET_GUESS_DESC} (no text read; TOD's paper answer was 'flyer' "
+                                    f"p={d.get('flyer_p', d['p']):.2f}) — {rest}")
+                elif d["id"] == man.UNREAD:   # identity gate: no name below IDENTITY_MIN_P
                     wh = "counter" if d["where"] == "counter" else "desk"
                     desc[str(i)] = f"document on the {wh} — unread (TOD could not tell, p={d['p']:.2f}) — {rest}"
                 else:
@@ -2416,8 +2459,11 @@ class Entrant:
     nodocs_on: bool = False   # loop26: step N held for this entrant; kept while 'no documents' >= NO_DOCS_KEEP_P
     nodocs_stage: str = ""    # loop26: furthest step-N sub-step reached (progress for the stall / cycle rules)
     nodocs_rule_tick: int | None = None   # loop26: executed click on the 'must have a passport' line in inspect mode
+    ticket_read: int | None = None   # loop30: tick TOD read an entry ticket (dated) for this entrant; kept over the
+    #                                  hand-back reset -> the ticket is still owed while the person stays (G2)
 
     def reset(self, tick: int, why: str) -> None:
+        keep_ticket = self.ticket_read if why.startswith("TOD: passport returned") else None
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
         self.hb_drop, self.missed_stamps, self.checks, self.city, self.exp = None, [], {}, None, None
         self.tray_seen = []   # run 005956 t18/t21: entrant 2's tray toggles blocked entrant 3's first tray opening
@@ -2427,6 +2473,7 @@ class Entrant:
         self.pp_drop = None
         self.nodocs_on, self.nodocs_stage, self.nodocs_rule_tick = False, "", None
         self.nopaper_ticks = 0
+        self.ticket_read = keep_ticket
         self.reset_tick = tick
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
@@ -2478,7 +2525,9 @@ class Entrant:
                 self.handed_back, self.waiting_docs = None, False
         if self.handed_back is not None and person and ra == "returned":
             # G2 (run 070911 t79-111: the entrant waited for the ticket still on the desk)
-            self.waiting_docs = bool(papers)
+            # loop30 (run 091325 t105-120, Antonia): her ticket lay under the open tray, TOD named no paper of hers ->
+            # a ticket TOD read before the hand-back is still owed while she stays
+            self.waiting_docs = bool(papers) or self.ticket_read is not None
         # run 221232 t31-32 (Emre Dede, stamped t27/t28): he left with his passport, TOD said no person (0.30/0.27),
         # but the counter-shelf answer sat at 0.50 and the hand-back drop had been cleared by a 'still_here' -> no
         # reset; Ava Lao inherited his stamp presses and verdict. A stamp press of TOD's on record + an empty window
@@ -2542,6 +2591,9 @@ class Entrant:
             if v is not None:
                 self.checks[k] = {"value": v, "raw": state[k]["value"], "from": state[k].get("from"),
                                   "p": state[k]["p"], "tick": tick}
+                if k == "entry_ticket_dated_today" and state[k]["value"] in ("dated_today", "other_date") \
+                        and self.handed_back is None:
+                    self.ticket_read = tick
 
     def after_action(self, tick: int, state: dict, action: str, sb, tb, frame, changed, src_desc: str = "",
                      sent: bool = False) -> None:
@@ -2587,6 +2639,8 @@ class Entrant:
             self.hb_drop = tick
             if src_desc.startswith("passport (TOD"):
                 self.pp_drop = tick   # loop23: the PASSPORT itself was dropped on the person (missed-press gate)
+            elif src_desc.startswith(("entry_ticket (TOD", TICKET_GUESS_DESC)):
+                self.ticket_read = None   # loop30: the ticket went to the person (no longer owed)
 
     def step_seen(self, step: str) -> None:
         """loop26: step N (any sub-step) held this tick -> the sequence stays on for this entrant (observe ends it)."""
@@ -2601,7 +2655,8 @@ class Entrant:
                 "waiting_docs": self.waiting_docs, "mark_side": self.mark_side, "hb_drop": self.hb_drop, "pp_drop": self.pp_drop, "nodocs_ticks": self.nodocs_ticks,
                 "nodocs_hist": list(self.nodocs_hist), "nopaper_ticks": self.nopaper_ticks,
                 "nodocs_on": self.nodocs_on, "nodocs_rule_tick": self.nodocs_rule_tick,
-                "verdict_carried": self.verdict, "stowed": list(self.stowed)}
+                "verdict_carried": self.verdict, "stowed": list(self.stowed),
+                "ticket_owed": self.handed_back is not None and self.ticket_read is not None}
 
     def verdict_mem(self) -> dict:
         """TOD's own readings for this entrant, for the verdict question's text (manual.verdict_question)."""
@@ -3242,6 +3297,10 @@ def run(args) -> int:
                         io_win.click(hwnd, cx, cy, settle=args.settle)
             elif action == "drag" and sb is not None and tb is not None and tb is not sb:
                 (ax, ay), (bx, by) = sb.center, tb.center
+                if str(src) in ((facts or {}).get("grab_at") or {}):
+                    # loop30: the element's centre lies on bare desk; grab the paper it covers
+                    ax, ay = facts["grab_at"][str(src)]
+                    rec["grab_at"] = [ax, ay]
                 _sp = strip_plan(sb, tb, facts, frame, state, _stamp_box_native(idmap, tb, frame))
                 _dk = (facts or {}).get("desk_target") or {}
                 if (_sp is None and tb.caption in (REGION_CAPS["desk"], REGION_CAPS["desk_clear"])

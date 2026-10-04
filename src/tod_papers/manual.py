@@ -1131,9 +1131,15 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
     elif step == "R":
         out.append("You read this entrant's passport earlier and it is not visible now: the open rulebook lies over "
                    "it. Drag THE RULEBOOK onto the 'rulebook slot' target to put it away.")
+    elif step == "G2t":
+        out.append("The passport is back and the entrant is still at the window waiting for the entry ticket you "
+                   "read earlier; no ticket is visible and the stamp tray is open -- the ticket may lie under its "
+                   f"bar: first {_TRAY_CLOSE}.")
     elif step == "G2":
         out.append("The passport is back and the entrant is still at the window waiting for the rest of their "
-                   "papers: drag each paper of theirs still on the desk or counter shelf onto the person.")
+                   "papers: drag each paper of theirs still on the desk or counter shelf onto the person"
+                   + (" -- the entry ticket you read earlier first, before any tidying."
+                      if f.get("ticket_owed") else "."))
     elif step == "G":
         out.append(f"Papers handed back at tick {f.get('handed_back')}: this entrant is finished and leaves by "
                    "themselves; wait.")
@@ -1337,6 +1343,22 @@ def clutter_step(state: dict, f: dict):
     return "K", f"drag the {cl[0]['id']} -> counter shelf left of the desk"
 
 
+def ticket_hidden_by_tray(state: dict, f: dict) -> bool:
+    """loop30: a ticket is owed (read before the hand-back), no paper TOD named the ticket / left unread is visible,
+    and the stamp tray is open (TOD's answer or the pixel check) -- the ticket may lie under the open bar."""
+    if not f.get("ticket_owed"):
+        return False
+    if any(d["id"] in ("entry_ticket", UNREAD) for d in f.get("docs_named") or []):
+        return False
+    return yes(state, "stamp_tray_open") or bool(f.get("tray_open_px"))
+
+
+def g2_step(state: dict, f: dict) -> tuple[str, str]:
+    if ticket_hidden_by_tray(state, f):
+        return "G2t", "close the tray (tab -> right edge): the owed entry ticket is not visible"
+    return "G2", "drag the remaining document (entry ticket) -> entrant"
+
+
 def ticket_to_return(state: dict, facts: dict | None) -> str | None:
     """Step F order (loop14): where ('desk' / 'counter shelf') an entry ticket TOD named lies while the person is
     still at the window -- it goes back before the passport. None when there is none."""
@@ -1448,12 +1470,17 @@ def situation(state: dict, day: str = "1", facts: dict | None = None) -> tuple[s
     if yes(state, "inspect_mode_on"):
         return "H", "click the inspect-mode button (leave inspect mode)"
     k_step = clutter_step(state, facts or {})   # loop20: clutter is stowed before B-G (user priority)
+    f_ = facts or {}
+    if f_.get("ticket_owed") and f_.get("waiting_docs") and yes(state, "person_at_window"):
+        # loop30 (run 091325 t105-120, Antonia): the passport was back, her ticket still owed; tidying (step K) took
+        # 11 ticks over it. Handing the ticket back outranks the clutter step.
+        return g2_step(state, f_)
     if k_step:
         return k_step
     if rulebook_hides_passport(state, facts):
         return "R", "drag the rulebook -> rulebook slot (put it away; the passport is under it)"
     if (facts or {}).get("waiting_docs") and yes(state, "person_at_window"):
-        return "G2", "drag the remaining document (entry ticket) -> entrant"
+        return g2_step(state, facts or {})
     if (facts or {}).get("handed_back") is not None:
         return ("G", "wait for the entrant to leave") if yes(state, "person_at_window") else ("A", "click loudspeaker")
     kc = known_country(state, facts)
