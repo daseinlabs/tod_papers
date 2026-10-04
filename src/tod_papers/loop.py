@@ -2106,6 +2106,15 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         # step N reads the rulebook on the DESK; the stow shelf puts it away (Jorji dry-run: TOD dropped the rulebook
         # on 'counter shelf left of the desk' instead of the desk). The desk stays a drop target.
         regions = [r for r in regions if r.caption != REGION_CAPS["stow_papers"]]
+    if nstep in ("N1", "N2"):
+        # loop31 (run 110236 t68-73, Jorji): N1 dropped the rulebook on the tray-stow edge (2196,620), then TOD clicked
+        # the inspect button with no rulebook open (N4 <-> N1 toggling 4x). N1: the desk spot is the only drop target;
+        # N1/N2: the inspect button is not offered (N3 clicks it)
+        if nstep == "N1":
+            nr_ = [r for r in regions if r.caption == REGION_CAPS["desk"]]
+            if nr_:
+                regions = nr_
+        boxes = [b for b in boxes if getattr(b, "name", "") != "inspect_toggle"]
     only_tickets = bool((facts or {}).get("waiting_docs"))
     # only entry tickets left (passport already gone back, e.g. after a loop restart lost the hand-back memory):
     # the entrant target stays offered (run 092521 t226)
