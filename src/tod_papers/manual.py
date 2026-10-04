@@ -1067,8 +1067,13 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
         back = state.get("passport_returned") or {}
         # loop22 (run 022401 t33-44): one DENIED press missed (your ink reading 'none' 0.92), the passport bounced
         # back onto the counter from every hand-back drag ('still_here' 0.77) -- a re-press is allowed (< 2 presses)
+        # loop23 (run 030028 t28-40): before any hand-back 'still_here' is simply true (step F0: ticket first; the
+        # press had inked, gt APPROVED; TOD's ink answer 'none' 0.92) -- the missed-press reading needs a drag of the
+        # PASSPORT onto the person after the press that it came back from (pp_drop > press tick)
+        hbd = f.get("pp_drop")
         if (ink.get("value") == "none" and ink.get("p", 0) >= 0.75 and back.get("value") == "still_here"
-                and back.get("p", 0) >= 0.6 and sum(1 for _, s_ in sc if s_ == sd_) < 2):
+                and back.get("p", 0) >= 0.6 and sum(1 for _, s_ in sc if s_ == sd_) < 2
+                and hbd is not None and hbd > t_ and step == "F"):
             out.append(f"You pressed {sd_.upper()} at tick {t_}, but your ink reading shows NO stamp on the passport "
                        f"(p={ink.get('p', 0):.2f}) and it stays with you: the press missed and the person will not "
                        "take an unstamped passport. Drag it to the 'desk' target, then onto the landing strip under "

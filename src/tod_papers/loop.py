@@ -2024,6 +2024,7 @@ class Entrant:
     reset_tick: int = -1            # tick of the last reset: that tick's verdict / readings are not stored
     discarded: dict | None = None   # {"tick", "verdict"} what the last reset tick dropped (logs)
     stowed: list = field(default_factory=list)   # [(tick, 'flyer'|'citation')] executed step-K drops on the stow shelf
+    pp_drop: int | None = None   # tick of the last drag of a paper TOD named the passport onto the person
 
     def reset(self, tick: int, why: str) -> None:
         self.country, self.stamp_clicks, self.handed_back, self.started = None, [], None, tick
@@ -2032,6 +2033,7 @@ class Entrant:
         self.waiting_docs = False
         self.mark_side, self.verdict = None, None
         self.stowed = []
+        self.pp_drop = None
         self.reset_tick = tick
         self.log.append((tick, why))
         print(f"           entrant memory reset ({why})")
@@ -2144,12 +2146,14 @@ class Entrant:
             # a drop on the person is only a candidate; TOD's PASSPORT_RETURNED_Q answer next tick decides whether
             # the passport went back (observe), or the person leaving does
             self.hb_drop = tick
+            if src_desc.startswith("passport (TOD"):
+                self.pp_drop = tick   # loop23: the PASSPORT itself was dropped on the person (missed-press gate)
 
     def facts(self, tick: int, df: dict) -> dict:
         return {**df, "tick": tick, "country_carried": self.country, "stamp_clicks": list(self.stamp_clicks),
                 "missed_stamps": list(self.missed_stamps), "handed_back": self.handed_back, "tray_flips": self.tray_flips(),
                 "checks_carried": dict(self.checks), "city_carried": self.city, "exp_carried": self.exp,
-                "waiting_docs": self.waiting_docs, "mark_side": self.mark_side, "hb_drop": self.hb_drop,
+                "waiting_docs": self.waiting_docs, "mark_side": self.mark_side, "hb_drop": self.hb_drop, "pp_drop": self.pp_drop,
                 "verdict_carried": self.verdict, "stowed": list(self.stowed)}
 
     def verdict_mem(self) -> dict:
