@@ -478,10 +478,26 @@ def tod_verdict(state: dict, facts: dict | None) -> dict | None:
     return {"value": c["value"], "p": c["p"], "where": f"tick {c['tick']}"} if c else None
 
 
+def agreed_verdict(state: dict, facts: dict | None) -> dict | None:
+    """This tick's verdict answer when p >= VERDICT_P; else -- loop30 (run 100116 t111-142, Peter Michelsen: 'denied'
+    0.59 stored at t111, then 'denied' 0.39-0.46 every tick with the passport under the DENIED head -> E? / E0
+    ping-pong 30 ticks, no stamp offered) -- the verdict carried for this entrant (p >= VERDICT_P) when this tick's
+    answer names the SAME side as its top choice. Both are TOD's own answers. None otherwise."""
+    v = state.get("verdict")
+    if not v:
+        return None
+    if v["value"] in ("approved", "denied") and v["p"] >= VERDICT_P:
+        return {"value": v["value"], "p": v["p"], "where": "this frame"}
+    c = (facts or {}).get("verdict_carried")
+    if (c and v["value"] == c["value"] and c["value"] in ("approved", "denied") and c["p"] >= VERDICT_P):
+        return {"value": c["value"], "p": c["p"], "where": f"tick {c['tick']} (this frame agrees, p={v['p']:.2f})"}
+    return None
+
+
 def verdict_side(state: dict, facts: dict | None) -> str | None:
-    """'approved'/'denied' when TOD's verdict answer names one at p >= VERDICT_P (diagnostics / F2 only)."""
-    v = tod_verdict(state, facts)
-    return v["value"] if v and v["value"] in ("approved", "denied") and v["p"] >= VERDICT_P else None
+    """'approved'/'denied' when TOD's verdict answer names one at p >= VERDICT_P (agreed_verdict)."""
+    v = agreed_verdict(state, facts)
+    return v["value"] if v else None
 
 
 def _pp_phrase(v: dict) -> str:

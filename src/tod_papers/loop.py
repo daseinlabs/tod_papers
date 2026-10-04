@@ -1678,7 +1678,8 @@ def press_gate(side: str, state: dict, facts: dict) -> str | None:
     v = state.get("verdict")
     if not v:
         return f"refused: no verdict of yours this tick (pressing {side.upper()} needs your verdict {side.upper()})"
-    if v["value"] != side or v["p"] < man.VERDICT_P:
+    ag = man.agreed_verdict(state, facts)   # loop30: this tick's top answer names the side of the carried verdict
+    if v["value"] != side or not ag or ag["value"] != side:
         return f"refused: your verdict this tick was {v['value']} ({v['p']:.2f})"
     if side not in (facts.get("passport_under") or []):
         # run 114927 t37-94: 9 DENIED presses on the RULEBOOK lying under the strip
@@ -1694,9 +1695,9 @@ def stamp_hidden(boxes: list, frame: np.ndarray, state: dict, facts: dict | None
     (p >= VERDICT_P); both when the verdict is cannot_decide_yet, below VERDICT_P or not asked. Logged per tick as
     facts['stamp_hidden'] ('hidden_by: tod_verdict=approved p=0.81')."""
     sides = {_stamp_side(b, frame) for b in boxes} - {None}
-    v = state.get("verdict")
-    if v and v["value"] in ("approved", "denied") and v["p"] >= man.VERDICT_P:
-        why = f"hidden_by: tod_verdict={v['value']} p={v['p']:.2f}"
+    v = man.agreed_verdict(state, facts)   # loop30: a lower same-side answer keeps the carried verdict
+    if v:
+        why = f"hidden_by: tod_verdict={v['value']} p={v['p']:.2f} ({v['where']})"
         out = {s_: why for s_ in sides if s_ != v["value"]}
         f = facts or {}
         if v["value"] in sides and "strip" in f and v["value"] not in (f.get("passport_under") or []):
@@ -1711,6 +1712,7 @@ def stamp_hidden(boxes: list, frame: np.ndarray, state: dict, facts: dict | None
             out[v["value"]] = (f"hidden_by: pressed_{len(presses)}x={v['value']} "
                                f"(ticks {', '.join(str(t) for t in presses[-3:])})")
         return out
+    v = state.get("verdict")
     why = (f"hidden_by: tod_verdict={v['value']} p={v['p']:.2f}" if v else "hidden_by: tod_verdict=none")
     return {s_: why for s_ in sides}
 
