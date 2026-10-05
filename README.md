@@ -249,6 +249,30 @@ date. The no-documents entrant: rulebook to desk (t132) -> Basic Rules (t133) ->
 (t134) -> rule line "Entrant must have a passport" (t135) -> empty counter (t136) -> microphone
 (t138) -> "Where is your passport?" (t139); he left without a stamp or a citation.
 
+### Final demo run (`20261004_182810`)
+
+One unbroken take from cold start through Day 3 night, no `--pause-think`, with the fast scorer box
+(`deploy/gcp_fast.sh`, `--fast`) and A100 extraction ([docs/remote_extraction.md](docs/remote_extraction.md)):
+
+| | |
+|---|---|
+| days | 1-3 in one loop run |
+| entrants seen / processed | 22 / 19 |
+| correct | **17 / 19** (2 citations, both Day 2 approvals that should have been denials) |
+| no-documents entrant | Jorji interrogated on Day 3 |
+| ticks / TOD requests / decisions | 274 / 741 / 4,294 |
+| cost | $1.29 at $0.30 per 1k decisions ([docs/tally.md](docs/tally.md)) |
+| wall-clock | 16.5 min; median tick 3.7 s |
+
+### Video
+
+The demo video was recorded in one take with the OBS pipeline in
+[docs/recording.md](docs/recording.md) (`tools/obs_setup.py`, `tools/obs_director.py`,
+`tools/produce_demo.py`; live tally overlay from [docs/tally.md](docs/tally.md), viewer layout in
+[docs/viewer.md](docs/viewer.md)). The older capture-and-zoom pipeline is kept in
+[docs/recording_cap_legacy.md](docs/recording_cap_legacy.md). The MP4 itself is not in this repo
+(recordings and `runs/` are gitignored).
+
 `python tools/report.py runs/<run>` prints this table for any run.
 
 ## Limitations

@@ -154,6 +154,20 @@ inspect mode, select the rulebook line "Entrant must have a passport", select th
   he left on his own, no stamp, no citation. Same run reached Day 3's end (NightScreen) with 10
   entrants processed and 3 citations.
 
+## Final demo run and recording
+
+- Loop changes: refusal hygiene, the flyer offering, open-tray grab/drop, and `TOD_GRAB=wgc`
+  (game-window capture with Windows.Graphics.Capture).
+- `deploy/gcp_fast.sh` + `--fast`: one A100 box running the picker's shared-prefix scorer
+  ([demo.md](demo.md)); extraction on an A100 ([remote_extraction.md](remote_extraction.md)).
+- `tools/tally.py` / `tools/report.py` count requests and decisions per day and price them
+  ([tally.md](tally.md)); the OBS one-take pipeline ([recording.md](recording.md)) records the
+  game, the viewer and the tally live.
+- **Run `20261004_182810`:** one unbroken take, Days 1-3, no `--pause-think`. 22 entrants seen,
+  19 processed, 17/19 correct, 2 citations; Jorji interrogated on Day 3. 274 ticks, 741
+  requests, 4,294 decisions, $1.29 at $0.30/1k decisions, 16.5 min wall-clock, median tick 3.7 s.
+  The video is not in the repo.
+
 ## What did not work, in one list
 
 | tried | result | replaced by |
