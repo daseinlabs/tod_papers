@@ -187,6 +187,8 @@ def verdict(rec: dict):
         return v.get("probs") or {v.get("value"): v.get("p")}, "asked this tick"
     ev = (rec.get("entrant") or {}).get("verdict")
     if ev:
+        if isinstance(ev, dict):   # {'value': 'approved', 'p': .., 'tick': ..}
+            ev = ev.get("value")
         return {str(ev).lower(): None}, "stored from an earlier tick"
     return None, "not asked this tick"
 
