@@ -26,8 +26,14 @@ from typing import Any
 
 import numpy as np
 
-TOD_URL = "https://tod.parseclab.ai/v1/systemone"
+TOD_API_BASE = "https://tod.parseclab.ai"
+# TOD_API_URL overrides the base (e.g. http://127.0.0.1:8790 = the tod-fast box through deploy/gcp_fast.sh tunnel).
+TOD_URL = os.environ.get("TOD_API_URL", TOD_API_BASE).rstrip("/") + "/v1/systemone"
 USER_AGENT = "tod_papers/0.1"
+
+
+def _is_local(url: str) -> bool:
+    return url.startswith(("http://127.0.0.1", "http://localhost"))
 
 
 def _load_key() -> str:
@@ -112,9 +118,21 @@ class TodCreditExhausted(RuntimeError):
     """HTTP 402 / insufficient_credit: no retry will help; the caller must stop (run 20261002_123058 skipped 27 ticks)."""
 
 
+class TodBadRequest(RuntimeError):
+    """HTTP 422: TOD rejected the request's shape (a request-builder bug, e.g. a question with < 2 labels). The
+    loop skips the tick; it does not count toward the bad-request stop rule (run 20261004_171251)."""
+
+
 class TodClient:
     def __init__(self, api_key: str | None = None, timeout: float = 60.0, retries: int = 3):
-        self.key = api_key or _load_key()
+        self.url = os.environ.get("TOD_API_URL", TOD_API_BASE).rstrip("/") + "/v1/systemone"
+        # the local fast box needs no key; one that is set is still sent (and ignored there)
+        try:
+            self.key = api_key or _load_key()
+        except RuntimeError:
+            if not _is_local(self.url):
+                raise
+            self.key = ""
         self.timeout = timeout
         self.retries = retries
         self.total_cost = 0.0
@@ -148,15 +166,10 @@ class TodClient:
         if not state:
             raise ValueError("need text and/or image")
         body = json.dumps({"state": state, "questions": questions}).encode()
-        req = urllib.request.Request(
-            TOD_URL,
-            data=body,
-            headers={
-                "Authorization": f"Bearer {self.key}",
-                "Content-Type": "application/json",
-                "User-Agent": USER_AGENT,
-            },
-        )
+        headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
+        if self.key:
+            headers["Authorization"] = f"Bearer {self.key}"
+        req = urllib.request.Request(self.url, data=body, headers=headers)
         last: Exception | None = None
         for attempt in range(self.retries + 1):
             t0 = time.perf_counter()
@@ -174,6 +187,8 @@ class TodClient:
                     last = e
                     self._backoff(attempt, f"HTTP {e.code}", e.headers.get("Retry-After"))
                     continue
+                if e.code == 422:
+                    raise TodBadRequest(f"TOD HTTP 422: {msg}") from e
                 raise RuntimeError(f"TOD HTTP {e.code}: {msg}") from e
             except RETRY_EXC as e:
                 # connection refused/reset, SSL EOF/reset, DNS hiccup, read timeout (runs 092612, 094930 crashed here)

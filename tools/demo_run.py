@@ -11,8 +11,10 @@ Steps (no scripted in-game clicks; every click from the title screen on is TOD's
   2. relaunch through Steam, wait for the window, wait until its frame is still, keep it on-screen
      (io_win.ensure_onscreen) and log the client rect to runs/demo_<ts>.json (for framing the recording);
   3. check game-memory ground truth (gt) attaches -- the demo STOP needs it;
-  4. ensure the remote-extract tunnel: GET <url>/health; if down, start `deploy/gcp_l4_spot.sh tunnel` detached
-     (log runs/tunnel_<ts>.log) and wait for /health; TOD_EXTRACT_URL is set in the loop's env only;
+  4. ensure a remote-extract tunnel, A100 first: GET 127.0.0.1:8766/health, if down start
+     `deploy/gcp_l4_spot.sh tunnel --a100` detached; if it does not answer, fall back to the L4 (8765,
+     `deploy/gcp_l4_spot.sh tunnel`). Logs runs/tunnel_<ts>_<a100|l4>.log, records the one used in
+     runs/demo_<ts>.json ("extractor"); never starts/stops instances. TOD_EXTRACT_URL is set in the loop's env only;
   5. run ONE `python -m tod_papers.loop --max-ticks 1500 --save-raw --stop-on-gt-day-end 3 ...` from the title
      screen. It stops on the first tick where gt says day >= 3 and screen NightScreen (gt is used for that stop
      only, never in TOD's text). `--stop-on-screen day_end` is NOT used (it would stop at Day 1's night);
@@ -40,7 +42,8 @@ import reset_game as rg  # noqa: E402  (imports io_win first: DPI awareness)
 import report  # noqa: E402
 from tod_papers import io_win  # noqa: E402
 
-DEFAULT_URL = "http://127.0.0.1:8765"
+DEFAULT_URL = None   # None: A100 tunnel (8766) first, then the L4 (8765); see EXTRACTORS
+FAST_URL = "http://127.0.0.1:8790"   # --fast: tod-fast scorer box, `deploy/gcp_fast.sh tunnel`
 STOP_FLAGS = ["--stall-stop", "12", "--pick-stop", "10", "--refuse-stop", "5"]   # the loop's usual safety stops
 
 
@@ -63,30 +66,57 @@ def find_bash() -> str | None:
     return None
 
 
-def ensure_tunnel(url: str, ts: str, wait_s: float) -> bool:
+# Remote extractors in preference order: (name, local tunnel url, deploy/gcp_l4_spot.sh args). The A100 box
+# (tod-extract-a100) tunnels on 8766, the L4 on 8765. Only tunnels are started here -- never an instance.
+EXTRACTORS = [("A100", "http://127.0.0.1:8766", ["tunnel", "--a100"]),
+              ("L4", "http://127.0.0.1:8765", ["tunnel"])]
+
+
+def ensure_tunnel(url: str, ts: str, wait_s: float, tunnel_args: list[str] | None = None,
+                  name: str = "", sh: str = "deploy/gcp_l4_spot.sh") -> bool:
+    tunnel_args = tunnel_args or ["tunnel"]
+    script = sh + " " + " ".join(tunnel_args)
     h = health(url)
     if h:
-        log(f"extract server up at {url} (warm={h.get('warm')} gpu={h.get('gpu')})")
+        log(f"extract server {name} up at {url} (warm={h.get('warm')} gpu={h.get('gpu')})")
         return True
     bash = find_bash()
     if not bash:
-        log("extract server down and Git Bash not found; start `deploy/gcp_l4_spot.sh tunnel` yourself")
+        log(f"extract server {name} down and Git Bash not found; start `{script}` yourself")
         return False
-    lp = os.path.join(ROOT, "runs", f"tunnel_{ts}.log")
-    log(f"extract server down -> starting the tunnel detached (log {lp})")
+    lp = os.path.join(ROOT, "runs", f"tunnel_{ts}{'_' + name.lower() if name else ''}.log")
+    log(f"extract server {name} down at {url} -> starting `{script}` detached (log {lp})")
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     with open(lp, "w", encoding="utf-8") as fh:
-        subprocess.Popen([bash, "deploy/gcp_l4_spot.sh", "tunnel"], cwd=ROOT, stdout=fh, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True)
+        proc = subprocess.Popen([bash, sh] + tunnel_args, cwd=ROOT, stdout=fh,
+                                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=flags,
+                                close_fds=True)
     t0 = time.time()
     while time.time() - t0 < wait_s:
         time.sleep(3.0)
         h = health(url)
         if h:
-            log(f"tunnel up after {time.time() - t0:.0f}s (warm={h.get('warm')})")
+            log(f"tunnel {name} up after {time.time() - t0:.0f}s (warm={h.get('warm')} gpu={h.get('gpu')})")
             return True
-    log(f"no /health at {url} within {wait_s:.0f}s. Is the VM running? (`deploy/gcp_l4_spot.sh status` / `start`)")
+        if proc.poll() is not None:   # ssh exited (VM stopped / no IP): no point waiting the full budget
+            log(f"tunnel {name} exited (rc {proc.returncode}) after {time.time() - t0:.0f}s; see {lp}")
+            return False
+    log(f"no /health at {url} within {wait_s:.0f}s. Is the VM running? "
+        f"(`{sh} status{' --a100' if '--a100' in tunnel_args else ''}`)")
+    subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)   # no stray ssh
     return False
+
+
+def ensure_extractor(ts: str, wait_s: float, url: str | None = None) -> tuple[str, str] | None:
+    """Prefer the A100 tunnel (8766), fall back to the L4 (8765). An explicit --extract-url is used alone.
+    Returns (name, url) of the extractor that answered /health, or None."""
+    if url:
+        return ("custom", url) if ensure_tunnel(url, ts, wait_s, name="custom") else None
+    for name, u, targs in EXTRACTORS:
+        if ensure_tunnel(u, ts, wait_s, targs, name):
+            return name, u
+        log(f"{name} extractor unavailable -> trying the next one")
+    return None
 
 
 def wait_gt(timeout: float) -> dict:
@@ -100,6 +130,21 @@ def wait_gt(timeout: float) -> dict:
     return s
 
 
+def place_window(hwnd: int, place: str) -> tuple:
+    """Move the window so its client origin is exactly at "X,Y" (physical px); returns the new origin."""
+    px, py = (int(v) for v in place.split(","))
+    for _ in range(5):
+        cx, cy, _, _ = io_win.client_rect_physical(hwnd)
+        if (cx, cy) == (px, py):
+            break
+        wl, wt, _, _ = io_win.win32gui.GetWindowRect(hwnd)
+        io_win.win32gui.SetWindowPos(hwnd, 0, wl + (px - cx), wt + (py - cy), 0, 0, 0x0001 | 0x0004 | 0x0010)
+        time.sleep(0.5)   # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+    moved = io_win.client_rect_physical(hwnd)[:2]
+    log(f"--place {px},{py}: client origin now {moved}")
+    return moved
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--pause-think", action="store_true", help="pass --pause-think to the loop (off by default)")
@@ -109,13 +154,20 @@ def main(argv=None) -> int:
                          "Day 3's night")
     ap.add_argument("--max-ticks", type=int, default=1500)
     ap.add_argument("--stop-day", type=int, default=3, help="stop at this day's night screen (gt)")
-    ap.add_argument("--extract-url", default=DEFAULT_URL)
+    ap.add_argument("--extract-url", default=DEFAULT_URL, help="use only this extractor url (default: A100 tunnel 8766, else L4 8765)")
     ap.add_argument("--local-extract", action="store_true", help="do not use the remote extractor (slower ticks)")
     ap.add_argument("--tunnel-wait", type=float, default=90)
     ap.add_argument("--no-launch", action="store_true", help="the game is already on the title screen; do not "
                     "kill / wipe / relaunch")
     ap.add_argument("--window-timeout", type=float, default=120)
     ap.add_argument("--stable-timeout", type=float, default=90)
+    ap.add_argument("--wipe-saves", action="store_true",
+                    help="delete the story progress files before launch (opt-in; Steam Cloud may restore them)")
+    ap.add_argument("--place", default=None, metavar="X,Y",
+                    help="move the game so its client origin is at this physical screen px (recording: 0,0)")
+    ap.add_argument("--fast", action="store_true",
+                    help="score on the tod-fast box (shared-prefix scorer, deploy/gcp_fast.sh): bring its tunnel up on "
+                         f"{FAST_URL}, health-check it, set TOD_API_URL for the loop. Never starts the VM.")
     ap.add_argument("--loop-args", default="", help="extra loop.py flags, e.g. \"--history 20\"")
     args = ap.parse_args(argv)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -125,9 +177,13 @@ def main(argv=None) -> int:
     if not args.no_launch:
         log(f"terminated {rg.kill_game() or 'nothing (game not running)'}")
         time.sleep(2.0)   # let Steam register the exit (and finish its cloud sync)
-        meta["saves"] = rg.backup_and_clear(ts, keep=args.from_day is not None)
+        # saves are KEPT by default (backed up anyway): TOD starts a new story from the game's own menu. --wipe-saves
+        # deletes the progress files, but with Steam running Steam Cloud downloads them back at launch
+        # (run 20261004_145643 came back to Day 3), so it is opt-in and not used by the demo.
+        wipe = args.wipe_saves and args.from_day is None
+        meta["saves"] = rg.backup_and_clear(ts, keep=not wipe)
         log(f"saves: backup {meta['saves'].get('backup')}; "
-            f"{'kept (--from-day)' if args.from_day else 'removed ' + str(meta['saves'].get('removed'))}")
+            f"{'removed ' + str(meta['saves'].get('removed')) if wipe else 'kept'}")
     ld = os.path.join(ROOT, "runs", "LAST_DAY.json")
     if os.path.exists(ld):   # one loop invocation: TOD reads the day from the screen, nothing is carried in
         os.remove(ld)
@@ -147,6 +203,8 @@ def main(argv=None) -> int:
         st = {"stable_after_s": None}
     hwnd = rg.unity_window_of({p.pid for p in rg.game_procs()}) or hwnd
     moved = io_win.ensure_onscreen(hwnd)
+    if args.place:   # recording: put the client origin exactly here (e.g. 0,0) before the loop starts
+        moved = place_window(hwnd, args.place)
     geo = rg.check_geometry(hwnd)
     meta.update(window_moved_to=moved, client=geo["client"], screen=geo["screen"], geometry_notes=geo["notes"])
     log(f"window stable after {st['stable_after_s']}s; client (x,y,w,h physical px) = {geo['client']} on a "
@@ -172,14 +230,30 @@ def main(argv=None) -> int:
         env.pop("TOD_EXTRACT_URL", None)
         log("local extraction (no TOD_EXTRACT_URL)")
     else:
-        if not ensure_tunnel(args.extract_url, ts, args.tunnel_wait):
-            log("FAILED: remote extractor unreachable (use --local-extract to run with local extraction)")
+        ex = ensure_extractor(ts, args.tunnel_wait, args.extract_url)
+        if not ex:
+            log("FAILED: no remote extractor reachable (A100 8766, L4 8765; use --local-extract to run with "
+                "local extraction)")
             return 1
-        env["TOD_EXTRACT_URL"] = args.extract_url
+        log(f"using the {ex[0]} extractor at {ex[1]}")
+        meta["extractor"] = {"name": ex[0], "url": ex[1]}
+        env["TOD_EXTRACT_URL"] = ex[1]
+
+    # ---- 4b: --fast: TOD scoring on the tod-fast box instead of the public API -----------------------------------
+    if args.fast:
+        if not ensure_tunnel(FAST_URL, ts, max(args.tunnel_wait, 60), ["tunnel"], "fast", sh="deploy/gcp_fast.sh"):
+            log("FAILED: tod-fast scorer not reachable (`deploy/gcp_fast.sh status`; start it with "
+                "`deploy/gcp_fast.sh start`)")
+            return 1
+        h = health(FAST_URL) or {}
+        log(f"TOD scoring on the fast box: TOD_API_URL={FAST_URL} (model {(h.get('picker') or {}).get('model')})")
+        meta["tod_api_url"] = env["TOD_API_URL"] = FAST_URL
 
     # ---- 5: one loop invocation ---------------------------------------------------------------------------------
     cmd = [sys.executable, "-m", "tod_papers.loop", "--max-ticks", str(args.max_ticks), "--save-raw",
            "--stop-on-gt-day-end", str(args.stop_day)] + STOP_FLAGS
+    if args.from_day is None:   # saves are kept: TOD is told to start a NEW story from the menu
+        cmd.append("--new-story")
     if args.pause_think:
         cmd.append("--pause-think")
     cmd += args.loop_args.split()
@@ -199,6 +273,10 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:   # under --pause-think, prefer `type nul > runs\STOP_LOOP` (the game is resumed)
         p.terminate()
         rc = p.wait()
+    except BaseException:       # never leave the loop playing headless (e.g. a stdout encoding error here)
+        p.terminate()
+        p.wait()
+        raise
     meta.update(loop_rc=rc, run_dir=run_dir, loop_wall_s=round(time.time() - t0, 1))
     stop = None
     if run_dir and os.path.exists(os.path.join(run_dir, "summary.md")):

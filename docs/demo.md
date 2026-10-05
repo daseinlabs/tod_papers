@@ -11,7 +11,10 @@ non-booth screens (manual step 7).
 Run all of these from the repo root with the loop venv:
 
 ```
-# the demo: fresh story, game clock running while TOD thinks (default)
+# the recorded demo take (OBS: game + TOD sidebar + tally, one continuous MP4; docs/recording.md)
+python tools/produce_demo.py --days 1
+
+# the loop alone, no recording: fresh story, game clock running while TOD thinks (default)
 .venv-loop\Scripts\python.exe tools\demo_run.py
 
 # same, with the game process held while TOD thinks (slower wall-clock, no 18:00 pressure)
@@ -28,16 +31,62 @@ To stop cleanly mid-run, use `type nul > runs\STOP_LOOP`. Do not use Ctrl-C unde
 file makes sure the game is resumed. Other useful flags are `--local-extract` (no tunnel), `--no-launch` (the game
 is already on the title screen), `--max-ticks` (default 1500) and `--loop-args "..."` (extra loop flags).
 
+### Optional: a faster TOD scorer on your own GPU (`--fast`)
+
+By default the loop scores on the public API (`https://tod.parseclab.ai/v1/systemone`). `src/tod_papers/tod_client.py`
+reads **`TOD_API_URL`** (a base URL). Point it at any server that speaks the same `/v1/systemone` request and
+response shape.
+
+`deploy/gcp_fast.sh` runs that kind of server on one A100 40GB spot VM:
+
+- It uses the TOD picker with its shared-prefix scorer, which encodes the screenshot and state once per request
+  instead of once per question.
+- `deploy/fast_shim.py` puts the public request/response shape in front of it.
+- It is reachable only through an SSH tunnel on `127.0.0.1:8790`, so it needs no API key.
+- The image and weights come from our private registry and bucket, so outside our project the script is a recipe
+  only. The script takes `PROJECT` from the environment or `gcloud config`, and the weights bucket from
+  `WEIGHTS_BUCKET=gs://...` (optionally `IMAGE=...`).
+
+```
+bash deploy/gcp_fast.sh start      # create/resume the VM (spot A100, roughly $1.2/h while running)
+.venv-loop\Scripts\python.exe tools\demo_run.py --fast    # opens the tunnel, checks /health, sets TOD_API_URL
+bash deploy/gcp_fast.sh stop       # stop billing when done
+```
+
+Measured on 2026-10-04 by replaying 5 requests from a stored run (`tools/fast_replay.py`):
+
+| | 13-question state request | 3-question action request |
+|---|---|---|
+| speedup, same A100 (reference scorer vs shared-prefix) | about 2.7 to 2.9x | about 2x |
+| speedup, through the tunnel vs the public API | about 1.8 to 2.1x (≈1.75 s → ≈0.9 s) | about 1.4x (≈1.7 s → ≈1.2 s) |
+
+- Probabilities match the public API to within the GPU-to-GPU noise. The largest per-option difference was 0.13.
+  That was on a near-tie question, where the reference scorer on the A100 itself differs from the API by 0.28.
+- In a live title-screen tick, the two TOD requests took 592 ms and 465 ms, against 897 ms and 881 ms on the API.
+
 What `demo_run.py` does:
 
-1. It kills the game and copies `%APPDATA%\3909\PapersPlease` to `runs\save_backup_<ts>\`. Without `--from-day`
-   it also deletes the story progress files, using the same list as `tools/reset_game.py` (`settings.sav` is
-   kept). It removes `runs\LAST_DAY.json` so that no day reading carries into the run.
+1. It kills the game and copies `%APPDATA%\3909\PapersPlease` to `runs\save_backup_<ts>\`. Only with
+   `--wipe-saves` does it delete the story progress files, using the same list as `tools/reset_game.py`. It removes `runs\LAST_DAY.json` so that no day reading carries into the run.
+   **Saves are kept by default (2026-10-04).** TOD starts a new story from the game's own menu instead.
+   Deleting the progress files does not survive a launch: Steam Auto-Cloud downloads them back (run
+   20261004_145643 came back to the Day 3 tile). A `cloud > "enabled" "0"` key in `localconfig.vdf` did not stop
+   that either. `--wipe-saves` keeps the old delete as an opt-in. Without `--from-day`, the loop runs with
+   `--new-story`. On the menu and day-select screens, TOD's text then carries the line "GOAL: start a NEW story
+   from Day 1 (do not continue an existing save)", plus a note that the DAY 1 tile is labelled NEW. The
+   other-screens manual says to follow a GOAL line, and to take the HIGHEST tile only when there is none. All
+   tiles stay offered as options, and TOD chooses. With saves present, the day-select screen shows DAY 1 "NEW",
+   then one dated tile per saved day (the latest marked in red). Clicking NEW goes straight to the Day 1 intro,
+   with no confirmation box.
 2. It relaunches the game through Steam (`steam://rungameid/239030`), waits for the window and for a still frame,
    and runs `io_win.ensure_onscreen`. It logs the client rect.
 3. It checks that game-memory ground truth (`tod_papers.gt`) attaches.
-4. It checks the extract tunnel with `GET http://127.0.0.1:8765/health`. If the tunnel is down, it starts
-   `deploy/gcp_l4_spot.sh tunnel` detached (log in `runs\tunnel_<ts>.log`) and waits for `/health`.
+4. It picks a remote extractor, A100 first: `GET http://127.0.0.1:8766/health`; if down it starts
+   `deploy/gcp_l4_spot.sh tunnel --a100` detached (log `runs\tunnel_<ts>_a100.log`) and waits for
+   `/health`. If the A100 does not answer (VM stopped, ssh exits, or `--tunnel-wait` runs out), it falls back
+   to the L4: `127.0.0.1:8765`, `deploy/gcp_l4_spot.sh tunnel` (log `runs\tunnel_<ts>_l4.log`). The one used
+   is logged ("using the A100 extractor at ...") and stored as `extractor` in `runs\demo_<ts>.json`. It never
+   starts or stops an instance. `--extract-url URL` skips the choice and uses only that URL.
    `TOD_EXTRACT_URL` is set only in the loop's environment. It does not start the VM: if `/health` never answers,
    run `deploy/gcp_l4_spot.sh start` yourself.
 5. It runs `python -m tod_papers.loop --max-ticks 1500 --save-raw --stop-on-gt-day-end 3 --stall-stop 12
@@ -93,8 +142,8 @@ Un-paused, the game clock runs during TOD's ~4-6 s of thinking, so each day ends
 window stays where Steam opened it. The client is expected to be 2280x1280 physical px (4x the native 570x320).
 
 `demo_run.py` logs `client (x,y,w,h physical px) = [...]` and the screen size before the loop starts, and saves
-them as `client` / `screen` in `runs\demo_<ts>.json`. Record that rect, or the whole screen if it is the same
-size.
+them as `client` / `screen` in `runs\demo_<ts>.json`. The recording does not depend on that rect: OBS captures
+the game window itself (docs/recording.md).
 
 Keep other windows off the game: the loop waits, without input, while the game is not in the foreground, and
 aborts after `--fg-patience` (60 x 2 s). The cursor parks at the top-right corner of the client between actions.
@@ -129,10 +178,48 @@ The TOD overlay (`overlay.py`) is a separate window; frame it too if it should b
 - **Per entrant:** name, TOD's verdict answer (request 1b) and its p on the first stamp-press tick, stamp side(s)
   pressed, gt correct / given verdict, whether they match, ticks, and whether a citation followed.
 - **Per day:** entrants processed (gt), correct/wrong, citations, savings on the night screen, ticks, TOD calls
-  and $. Calls and $ are apportioned by the requests made on that day's ticks.
+  (apportioned by the requests made on that day's ticks), decisions and $.
 - **Run totals:** wall-clock, median tick, median ms for extract / request 1 / 1b / request 2, and pause on/off.
+- **Cost:** **$0.30 per 1,000 decisions**, where a decision is one question TOD answered:
+  `cost = decisions x 0.0003`. This holds per day and in total, on the API or on the `--fast` GPU box alike.
+  Change the rate with `--rate-per-1k R` on `tools/report.py` and `tools/tally.py`. A real API bill from
+  `summary.md` is printed only as a secondary `billed` figure. See docs/tally.md "Cost model".
 
 Runs before loop15 have no request-1b verdict answer, so that column shows `(not logged)`.
+
+## Patching the tally in a finished video (no retake)
+
+Use this when the tally's numbers or wording changed after the take (for example the cost model). Each
+TALLY span from `scene_log.json` is re-skinned with re-exported PNGs, and the rest stays as recorded.
+
+```
+# 1. corrected PNGs, rendered exactly as live (day ends: the per-tick repaints tally_day<d>_t<NNNN>.png)
+cp runs/<ts>/tally_schedule.json runs/<ts>/tally_schedule.live.json
+.venv-loop\Scripts\python.exe tools\tally.py --run runs\<ts> --export
+cp runs/<ts>/tally_schedule.live.json runs/<ts>/tally_schedule.json
+# 2. patch: matches every TALLY-span frame to its PNG variant (cost regions masked), tracks the ~0.7 s Move
+#    slide in/out per frame, overlays the PNGs scaled 1920x1080 -> 3840x2160 (the OBS TALLY scene: bounds =
+#    full canvas, scale 2.0, lanczos), h264 QP 18 (NVENC if it opens, else libx264 -preset veryfast:
+#    the winget ffmpeg 9 build needs NVIDIA driver >= 610), audio + chapters stream-copied
+.venv-loop\Scripts\python.exe tools\patch_tally.py --run runs\<ts>     # -> runs/<ts>/demo_day3_final.mp4
+#    --dry-run prints the spans / segments and the ffmpeg command (also in runs/<ts>/tally/patch_plan.json)
+```
+
+It aborts if a static frame inside a TALLY span matches none of the PNGs, which means the PNGs differ
+from the live render somewhere other than the cost regions.
+
+## Speed versions
+
+```
+ffmpeg -i runs/<ts>/demo_day3_final.mp4 -filter_complex "[0:v]setpts=PTS/2,fps=30[v];[0:a]atempo=2.0[a]" ^
+  -map "[v]" -map "[a]" -c:v h264_nvenc -preset p5 -tune hq -rc constqp -qp 18 -profile:v high -pix_fmt yuv420p ^
+  -c:a aac -b:a 192k -movflags +faststart runs/<ts>/demo_day3_final_2x.mp4
+# 3x: setpts=PTS/3, atempo=3.0 -> demo_day3_final_3x.mp4
+# NVENC fails to open ("Required: 13.1 Found: 13.0") with a driver older than 610: use
+#   -c:v libx264 -preset veryfast -qp 18 -profile:v high   instead of the h264_nvenc options
+```
+
+`atempo` changes speed and keeps the pitch. `fps=30` drops the extra frames so the output stays 30 fps CFR.
 
 ## Offline sanity check (2026-10-04)
 
