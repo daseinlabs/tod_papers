@@ -30,6 +30,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 from ctypes import wintypes
+import os
 import threading
 import time
 from typing import Optional, Tuple
@@ -365,6 +366,19 @@ class Grabber:
         self._output_origin = (0, 0)  # top-left of the dxcam output monitor
         self._mss = None
         self._last_frame = None
+        self._wgc = None
+        # TOD_GRAB=wgc: Windows.Graphics.Capture of the window itself (occlusion-independent; src/tod_papers/wgc.py).
+        # Default (unset) is unchanged: dxcam, then mss.
+        if os.environ.get("TOD_GRAB", "").lower() == "wgc":
+            try:
+                from . import wgc
+                self._wgc = wgc.WindowCapture(hwnd, cursor=False)
+                if not self._wgc.wait_first(3.0):
+                    raise RuntimeError("no WGC frame within 3 s")
+                return
+            except Exception as e:
+                print(f"[io_win] TOD_GRAB=wgc unavailable ({e!r}); falling back to {prefer}")
+                self._wgc = None
         if prefer == "dxcam":
             self._init_dxcam()
         if self._camera is None:
@@ -421,6 +435,10 @@ class Grabber:
 
     def grab(self) -> np.ndarray:
         """Return a BGR uint8 array (h, w, 3) of the client area."""
+        if self._wgc is not None:
+            img = self._grab_wgc()
+            if img is not None:
+                return img
         if self._camera is not None:
             img = self._grab_dxcam()
             if img is not None:
@@ -457,6 +475,24 @@ class Grabber:
         self._last_frame = np.ascontiguousarray(frame)
         return self._last_frame
 
+    def _grab_wgc(self) -> Optional[np.ndarray]:
+        """Latest WGC frame of the window, cropped to the client area (WGC delivers only on change; the newest
+        frame is the current content)."""
+        from . import wgc
+        f, _ = self._wgc.frame()
+        if f is None:
+            return self._last_frame
+        x, y, w, h = wgc.client_in_frame(self.hwnd)
+        x, y = max(0, x), max(0, y)
+        roi = f[y:y + h, x:x + w]
+        if roi.shape[0] != h or roi.shape[1] != w:   # frame from before a resize: wait for the next one
+            if self._last_frame is not None:
+                return self._last_frame
+        import cv2   # BGRA -> BGR: ~3x faster than numpy's strided [:, :, :3] copy at 2280x1280
+        self._last_frame = cv2.cvtColor(np.ascontiguousarray(roi) if not roi.flags["C_CONTIGUOUS"] and
+                                        roi.strides[1] != 4 else roi, cv2.COLOR_BGRA2BGR)
+        return self._last_frame
+
     def _grab_mss(self) -> np.ndarray:
         x, y, w, h = self._client_box()
         if self._mss is None:
@@ -466,6 +502,9 @@ class Grabber:
         return np.ascontiguousarray(arr[:, :, :3])  # drop alpha -> BGR
 
     def close(self) -> None:
+        if self._wgc is not None:
+            self._wgc.close()
+            self._wgc = None
         if self._camera is not None:
             try:
                 self._camera.release()
