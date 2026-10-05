@@ -53,7 +53,7 @@ from .extract import Box
 from . import layout
 from . import manual as man
 from .som import annotate
-from .tod_client import TodClient, TodCreditExhausted, TodUnreachable, choice, noul
+from .tod_client import TodBadRequest, TodClient, TodCreditExhausted, TodUnreachable, choice, noul
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -351,6 +351,12 @@ class StuckTracker:
         return [f for f in self.fails if f.banned_until > tick]
 
 
+# loop32 (run 180437 t139-143, Teres Svordova): an executed pick the harness REFUSED (step-K drop, put-away /
+# rulebook-slot drop, stamp press gate) was offered again unchanged; TOD re-picked it 5x -> stop. A refusal is
+# remembered here and excluded from the next REFUSE_EXCL_TICKS ticks' offering (prepare), stated in one line.
+REFUSALS: list = []      # [{"tick", "action", "box", "tgt_cap", "reason"}]
+REFUSE_EXCL_TICKS = 3
+
 CYCLE_WINDOW = 8        # ticks looked at for a period-2/3 cycle
 CYCLE_BAN_TICKS = 6     # the cycle's sources stay excluded this long
 CYCLE_STATE_KEYS = ("person_at_window", "document_on_counter_shelf", "document_open_on_desk", "stamp_tray_open",
@@ -645,6 +651,7 @@ def add_tod_facts(facts: dict, state: dict, df: dict, sinfo: dict | None) -> Non
     facts["passport_under"] = passport_sides(facts["strip"])
     facts["tray_open_px"] = bool((sinfo or {}).get("tray_open"))
     facts["clutter"] = clutter_facts(facts["docs_named"], facts["tray_open_px"])
+    facts["under_open_tray"] = under_open_tray(facts)
     if not man.yes(state, "person_at_window") and not man.yes(state, "document_open_on_desk"):
         # loop14: the entrant leaves as soon as the passport is back; an entry ticket still on the desk then is
         # left behind (TOD: nobody at the window) -> desk clutter, manual step K (stow), never a hand-back
@@ -653,6 +660,33 @@ def add_tod_facts(facts: dict, state: dict, df: dict, sinfo: dict | None) -> Non
                 facts["clutter"].append({"id": "entry_ticket", "p": d["p"], "native": d["native"], "where": "desk",
                                          "strips": [], "under_bar": False, "on_passport": False, "in_way": True,
                                          "left_behind": True})
+
+
+UNDER_TRAY_FRAC = (0.1, 0.95)   # covered fraction of a paper's box that counts as 'partly under the open tray'
+
+
+def under_open_tray(facts: dict) -> list[str]:
+    """run 172409 t64-92: ids of the entrant's desk papers PARTLY covered by the open tray's footprint (state for the
+    WHAT APPLIES NOW block; pixels only). Not the passport while it lies under a stamp head (that is by design),
+    not clutter (step K1 states it)."""
+    if not facts.get("tray_open_px"):
+        return []
+    mask = np.zeros((layout.NATIVE_H, layout.NATIVE_W), bool)
+    for x1, y1, x2, y2 in layout.open_tray_footprint():
+        mask[max(0, y1):y2, max(0, x1):x2] = True
+    out = []
+    for d in facts.get("docs_named") or []:
+        b = d.get("native")
+        if d.get("where") != "desk" or not b or d["id"] in CLUTTER_IDS or d["id"] == man.GAME_SLIP:
+            continue
+        if d["id"] == "passport" and facts.get("passport_under"):
+            continue
+        x1, y1, x2, y2 = [int(v) for v in b]
+        a = max(1, (x2 - x1) * (y2 - y1))
+        frac = float(mask[max(0, y1):y2, max(0, x1):x2].sum()) / a
+        if UNDER_TRAY_FRAC[0] < frac < UNDER_TRAY_FRAC[1] and d["id"] not in out:
+            out.append(d["id"])
+    return out
 
 
 CLUTTER_IDS = ("citation", "flyer")   # papers that are never stamped / checked (manual step K)
@@ -1342,6 +1376,74 @@ def _stamp_box_native(idmap: dict, tb: Box, frame: np.ndarray):
     return None
 
 
+def _is_paper_src(b) -> bool:
+    """A draggable paper (not a fixed control, the tray tab, a drop region or the screen background)."""
+    return (b is not None and b.kind not in ("region", "background") and not _is_tray_tab(b)
+            and getattr(b, "name", "") not in layout.BY_NAME)
+
+
+def paper_drag_points(sb: Box, tb: Box, ax: int, ay: int, bx: int, by: int, planned: bool, facts: dict | None,
+                      frame: np.ndarray, state: dict) -> tuple[int, int, int, int, dict]:
+    """run 172409 t63-92 (Robert Hampton): TOD dropped the counter passport on the 'right edge of the desk' target
+    with the tray open -> it lay under the open tray; every later drag grabbed its box centre, ON the tray, and
+    pulled the tray shut instead (31 ticks, cycle stop). Harness geometry only -- TOD's element / target ids are
+    kept:
+    - grab: when the grab point of a paper lies under a higher-z thing (open-tray footprint, another paper's box),
+      it moves to the paper's visible part (layout.visible_grab_point); a planned drop (strip / desk plan) moves by
+      the same delta so the paper lands where planned  -> info['grab_point_adjusted']
+    - drop: a paper's drop point under the OPEN tray's footprint (any target but the two stamp landing strips) goes
+      to the nearest free desk spot (layout.clear_desk_spot near=)  -> info['drop_moved_off_tray']
+    Returns (ax, ay, bx, by, info)."""
+    info: dict = {}
+    sinfo = (facts or {}).get("static") or {}
+    if not _is_paper_src(sb) or "docs" not in sinfo:
+        return ax, ay, bx, by, info
+    H, W = frame.shape[:2]
+    sx, sy = W / layout.NATIVE_W, H / layout.NATIVE_H
+    tray = bool(sinfo.get("tray_open", man.yes(state, "stamp_tray_open")))
+    docs = [d for d in sinfo.get("docs") or [] if d.get("box")]
+    g = (ax / sx, ay / sy)
+    sbn = [sb.x1 / sx, sb.y1 / sy, sb.x2 / sx, sb.y2 / sy]
+    def area(b):
+        return max(1, (b[2] - b[0]) * (b[3] - b[1]))
+    # the paper TOD's element is (best box match; else the smallest paper under the grab point)
+    paper = max(docs, key=lambda d: layout._iou4(sbn, d["box"]), default=None)
+    if paper is None or layout._iou4(sbn, paper["box"]) < 0.3:
+        hit = [d for d in docs if layout.in_boxes(g, [d["box"]])]
+        paper = min(hit, key=lambda d: area(d["box"])) if hit else None
+    vis = list(paper["box"]) if paper is not None else [int(v) for v in sbn]
+    # another paper counts as lying over it only when smaller (a ticket / slip across the passport); z-order
+    # between papers is otherwise unknown, so a larger one is never treated as covering
+    others = [list(d["box"]) for d in docs if d is not paper and area(d["box"]) < area(vis)
+              and layout._ov(d["box"], vis) > 0]
+    covers = (layout.open_tray_footprint() if tray else []) + others
+    if paper is not None and layout.in_boxes(g, covers):   # no pixel paper box -> nothing known to grab instead
+        p = layout.visible_grab_point(vis, covers)
+        if p is not None:
+            nax, nay = int(p[0] * sx), int(p[1] * sy)
+            info["grab_point_adjusted"] = {"from": [ax, ay], "to": [nax, nay], "paper_native": vis,
+                                           "covered_by": "open tray" if tray and layout.in_boxes(
+                                               g, layout.open_tray_footprint()) else "another paper"}
+            if planned:
+                bx = min(max(bx + nax - ax, 0), W - 1)
+                by = min(max(by + nay - ay, 0), H - 1)
+            ax, ay = nax, nay
+    strips = (REGION_CAPS["stamp_landing_denied"], REGION_CAPS["stamp_landing_approved"])
+    if tray and tb.caption not in strips and layout.in_boxes((bx / sx, by / sy), layout.open_tray_footprint()):
+        where = (paper or {}).get("where") or "desk"
+        size = (layout.OPEN_PASSPORT if where == "counter" or paper is None
+                else (max(8, int(vis[2] - vis[0])), max(8, int(vis[3] - vis[1]))))
+        spot = layout.clear_desk_spot(docs, True, size, bool(sinfo.get("inspect_button")), [vis],
+                                      near=(bx / sx, by / sy))
+        src = {"where": where, "native": vis}
+        nx, ny = layout.passport_drop_point(spot, src, size, True, others, (ax / sx, ay / sy))
+        nbx, nby = int(nx * sx), int(ny * sy)
+        info["drop_moved_off_tray"] = {"from": [bx, by], "to": [nbx, nby], "spot_native": spot["box"],
+                                       "target": short(tb.caption, 40)}
+        bx, by = nbx, nby
+    return ax, ay, bx, by, info
+
+
 def passport_needs_clear_space(state: dict, facts: dict | None, day: str, info: dict) -> bool:
     """'clear desk space' target: an open passport lies on the desk (not under a stamp head, not already on the
     clear spot) and request 1b could not read it -- country 'unreadable' / p < 0.6 (none carried), or on Day 2/3
@@ -1543,7 +1645,20 @@ ACTION_CHOICES = {
 }
 
 
-def build_questions(src_ids: dict, tgt_ids: dict, booth: bool = True, vline: str = "") -> dict:
+def _identity_caption(rest: str, d: dict) -> str:
+    """loop32 (run 180437 t139-143): the detector caption 'bulletin board' stood next to TOD's identity 'flyer (TOD
+    0.95)'. TOD's identity names the paper; a detector caption that names something else is replaced by a neutral
+    'paper on the desk/counter (pos)'. Kept: OCR text read on it ('...'), or a caption naming TOD's identity."""
+    cap, pos = (rest.rsplit(" (", 1) + [""])[:2] if rest.endswith(")") else (rest, "")
+    ident = str(d.get("id", "")).replace("_", " ")
+    if cap.startswith("'") or (ident and ident.split()[0] in cap.lower()):
+        return rest
+    wh = "counter" if d.get("where") == "counter" else "desk"
+    return f"paper on the {wh}" + (f" ({pos}" if pos else "")
+
+
+def build_questions(src_ids: dict, tgt_ids: dict, booth: bool = True, vline: str = "",
+                    omitted: dict | None = None) -> dict:
     """Request 2: the input kind (TOD's `action`, audit B26), the element and, in the booth, the drop target.
     `vline`: TOD's own verdict of this tick (verdict_line), directly above the action question."""
     q = {
@@ -1556,12 +1671,23 @@ def build_questions(src_ids: dict, tgt_ids: dict, booth: bool = True, vline: str
             "decision, first drag the passport to the other strip.",
             {**src_ids, WAIT_KEY: WAIT_DESC}),
     }
+    # a question with < 2 labels is not a decision (TOD rejects it: 422 bad_labels, run 171251 t18 target,
+    # run 175201 t14 source = only 'wait'): it is omitted (logged question_omitted:<name>); a single remaining label
+    # is recorded in `omitted` and inserted as a derived answer after the ask (a single drop target is used by
+    # decide() when TOD's action is a drag)
     if booth:
         q["target"] = choice(
             "If the chosen element is dragged: onto which numbered drop target should it be released? (stamp "
             "landing strip = under a stamp so it can be stamped; the entrant = hand documents back; desk = read a "
             "document; clear desk space = move a half-hidden open passport so its page shows; tray stow edge / desk "
             "= close / open the stamp tray.) Ignored for a click.", tgt_ids)
+    for name in list(q):
+        labels = list((q[name].get("criteria") or {}))
+        if len(labels) < 2:
+            del q[name]
+            print(f"[questions] question_omitted:{name} ({len(labels)} label{'s' if len(labels) != 1 else ''})")
+            if omitted is not None and len(labels) == 1 and name != "target":
+                omitted[name] = labels[0]
     return q
 
 
@@ -1975,6 +2101,74 @@ def rulebook_nav(frame: np.ndarray, state: dict, facts: dict | None) -> tuple[li
     return out, info
 
 
+def refusal_hygiene(src_ids: dict, tgt_ids: dict, idmap: dict, desc: dict, doc_ids: set, banned_ids: dict,
+                     ban_lines: list, facts: dict | None, tick: int, booth: bool = True) -> list:
+    """loop32: step-K target hygiene + refusal exclusions on this tick's offering (in place). Returns the log."""
+    refusal_info = []
+    # loop32 step K hygiene: a flyer / citation slip (TOD's identity) goes only to the put-away spot (or the
+    # entrant, a flyer after the passport went back -- decide() refuses every other drop). Without such a target
+    # this tick it is not offered as a source (run 180437 t139-143: the only 'flyer' lay under the open tray bar
+    # -> no put-away spot; it was dragged onto the tray stow edge 5x, refused each time).
+    caps_ok = {REGION_CAPS["stow_papers"]}
+    fb_ = bool(facts and (facts.get("waiting_docs") or facts.get("handed_back") is not None))
+    ok_t = {k for k in tgt_ids if idmap[int(k)].caption in caps_ok}
+    ok_flyer = ok_t | ({k for k in tgt_ids if idmap[int(k)].caption == REGION_CAPS["hand_back"]} if fb_ else set())
+    for k in sorted((k for k in list(src_ids) if int(k) in doc_ids
+                     and desc[k].split(" (TOD", 1)[0] in CLUTTER_IDS), key=int):
+        ok_k = ok_flyer if desc[k].startswith("flyer") else ok_t
+        if not ok_k:
+            ub = any(c.get("under_bar") and c.get("in_way") for c in (facts or {}).get("clutter") or ())
+            why = ("it lies under the open stamp bar -- close the tray first" if ub
+                   else "nothing on the desk needs putting away")
+            del src_ids[k]
+            banned_ids[k] = _Fail("drag", idmap[int(k)], desc[k], why=why)
+            refusal_info.append({"id": k, "kind": "clutter_no_target", "why": why})
+            ban_lines.append(f"#{k} ({desc[k].split(' (TOD', 1)[0]}, your answer) is not offered this tick: no "
+                             f"put-away spot ({why})")
+    # every drag source left is a flyer / citation slip: the drops decide() refuses for them (stamp strips, tray stow
+    # edge, the entrant unless the flyer may go back) are not offered as targets either
+    drag_src = [k for k in src_ids if _cls(idmap[int(k)], booth, int(k) in doc_ids) == "drag"]
+    clut = [k for k in drag_src if int(k) in doc_ids and desc[k].split(" (TOD", 1)[0] in CLUTTER_IDS]
+    if drag_src and len(clut) == len(drag_src):
+        bad = {REGION_CAPS["stamp_landing_denied"], REGION_CAPS["stamp_landing_approved"], REGION_CAPS["tray_stow"]}
+        if not (fb_ and all(desc[k].startswith("flyer") for k in clut)):
+            bad.add(REGION_CAPS["hand_back"])
+        drop_ = [t for t in tgt_ids if idmap[int(t)].caption in bad]
+        if drop_ and len(drop_) < len(tgt_ids):
+            for t in drop_:
+                del tgt_ids[t]
+            refusal_info.append({"kind": "clutter_targets_not_offered", "targets": drop_})
+    # loop32 refusal hygiene: last tick's refused (element, action, target) is not offered again. One shared
+    # target question: the target is dropped when no other drag source is left for it, else the element.
+    for r in [r for r in REFUSALS if 0 < tick - r["tick"] <= REFUSE_EXCL_TICKS]:
+        k = next((str(i) for i, b in idmap.items() if b.kind != "region" and str(i) in src_ids
+                  and _same_element(r["box"], b)), None)
+        if k is None or (r["action"] == "drag" and not any(idmap[int(t)].caption == r["tgt_cap"] for t in tgt_ids)):
+            continue   # element gone / already excluded, or the refused target is not offered anyway
+        if r["action"] == "drag":
+            tk = next((t for t in tgt_ids if idmap[int(t)].caption == r["tgt_cap"]), None)
+            others = [s for s in src_ids if s != k and _cls(idmap[int(s)], booth, int(s) in doc_ids) == "drag"]
+            if tk is not None and not others and len(tgt_ids) > 1:
+                del tgt_ids[tk]
+                how = f"target #{tk} not offered"
+            else:
+                del src_ids[k]
+                banned_ids[k] = _Fail("drag", idmap[int(k)], desc[k], why=r["reason"])
+                how = f"source #{k} not offered"
+            ban_lines.append(f"#{k} cannot be dragged there: {r['reason']}")
+        else:
+            del src_ids[k]
+            banned_ids[k] = _Fail("click", idmap[int(k)], desc[k], why=r["reason"])
+            how = f"source #{k} not offered"
+            ban_lines.append(f"#{k} cannot be pressed now: {r['reason']}")
+        refusal_info.append({"id": k, "kind": "excluded_after_refusal", "refused_tick": r["tick"],
+                             "action": r["action"], "target": r["tgt_cap"], "how": how})
+        print(f"           excluded_after_refusal: {r['action']} #{k} (refused t{r['tick']}) -> {how}")
+    if facts is not None:
+        facts["excluded_after_refusal"] = refusal_info
+    return refusal_info
+
+
 def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str, args,
             stuck: "StuckTracker | None" = None, tick: int = 0, facts: dict | None = None) -> dict:
     """Everything between (extract + request 1) and request 2: drop-target
@@ -2279,7 +2473,7 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
                     wh = "counter" if d["where"] == "counter" else "desk"
                     desc[str(i)] = f"document on the {wh} — unread (TOD could not tell, p={d['p']:.2f}) — {rest}"
                 else:
-                    desc[str(i)] = f"{d['id']} (TOD {d['p']:.2f}) — {rest}"
+                    desc[str(i)] = f"{d['id']} (TOD {d['p']:.2f}) — {_identity_caption(rest, d)}"
                 if nopp and d["id"] == "rulebook":
                     free_ids.add(i)   # step N: rulebook pages and rule lines are clicked (page corner, inspect-mode rule)
                     if rb_placed:
@@ -2353,6 +2547,8 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
         if drop_desk:
             tgt_ids = {k: v for k, v in tgt_ids.items() if k != drop_desk} or tgt_ids
         src_ids = cap_options(src_ids, tgt_ids, idmap, doc_ids, booth)
+    if booth:
+        refusal_hygiene(src_ids, tgt_ids, idmap, desc, doc_ids, banned_ids, ban_lines, facts, tick, booth)
     region_ids = {k: idmap[int(k)].caption for k in desc if idmap[int(k)].kind == "region"}
     region_info = {}
     for k, cap in region_ids.items():
@@ -2365,7 +2561,8 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     for name, v in region_src.items():
         if v == "dropped":   # vision extractor: could not be derived from this frame -> not offered (logged)
             region_info[name] = {"id": None, "box": None, "target_source": "dropped"}
-    questions = build_questions(src_ids, tgt_ids, booth, verdict_line(state) if booth else "")
+    q_omitted: dict = {}
+    questions = build_questions(src_ids, tgt_ids, booth, verdict_line(state) if booth else "", q_omitted)
     # citation slips / flyers (TOD's identity) among the sources: their drop is checked in decide (never a stamp strip,
     # never the entrant -- a flyer only together with the entrant's papers after the passport went back)
     clutter_src = {k for k in src_ids if desc[k].split(" (TOD", 1)[0] in CLUTTER_IDS and int(k) in doc_ids}
@@ -2379,7 +2576,8 @@ def prepare(frame: np.ndarray, boxes: list[Box], state: dict, history, day: str,
     url = encode_image(send, args.send_format, args.jpeg_quality)
     return dict(annotated=annotated, idmap=idmap, desc=desc, banned_ids=banned_ids, doc_ids=doc_ids, src_ids=src_ids,
                 click_ids=click_ids,
-                tgt_ids=tgt_ids, regions=region_info, booth=booth, questions=questions, state_text=state_text,
+                tgt_ids=tgt_ids, regions=region_info, booth=booth, questions=questions, q_omitted=q_omitted,
+                state_text=state_text,
                 text_info=text_info, image_url=url, image_kb=round(len(url) * 3 / 4 / 1024, 1), clutter_src=clutter_src,
                 flyer_back=flyer_back,
                 tray_flips=(facts or {}).get("tray_flips", 0), region_src=region_src,
@@ -2421,6 +2619,7 @@ def _clean_state(state: dict) -> dict:
 
 TRAY_FLIP_LIMIT = man.TRAY_FLIP_LIMIT
 TRAY_BAN_TICKS = 4   # a toggle-looping closing tab stays excluded this long (A5)
+BAD422_BACKSTOP = 30   # 422s in a row (~2 min of skipped ticks) -> stop; a single/occasional 422 never stops
 NONBOOTH_STOP = 60   # step-7 ticks in a row (cutscenes, day_end, menus) before the run stops
 COUNTER_CLAUSE_P = 0.55  # verdict text names a paper on the counter only when TOD said so last tick
 STOP_SCREEN_P = 0.5  # --stop-on-screen counts a tick only when TOD's screen answer has at least this p
@@ -2432,6 +2631,16 @@ REPEAT_WINDOW, REPEAT_STOP = 12, 10   # same executed input 10 of the last 12 ti
 def _is_tray_tab(b) -> bool:
     return b is not None and ("stamp tray tab" in (b.caption or "")
                               or getattr(b, "name", "") in ("tray_tab", "tray_tab_open"))
+
+
+def fill_omitted(res, P: dict) -> None:
+    """A request-2 question omitted by build_questions for having a single label (e.g. `source` = only 'wait'):
+    that label is the only possible answer; inserted as a derived answer (derived=True) before decide()."""
+    from types import SimpleNamespace
+    for name, lab in (P.get("q_omitted") or {}).items():
+        if name not in res.answers:
+            res.answers[name] = SimpleNamespace(value=lab, probabilities={lab: 1.0}, confidence=None,
+                                                qtype="derived", derived=True)
 
 
 def fill_derived(res, D: dict) -> None:
@@ -2460,6 +2669,12 @@ def decide(res, P: dict) -> dict:
            _cls(P["idmap"].get(int(src)), P["booth"], int(src) in P.get("doc_ids", ())))
     action = act if act in ("click", "drag") else ("drag" if cls == "drag" else "click")
     tod_pick = (action, src)
+    only_tgt = next(iter(P.get("tgt_ids") or {})) if len(P.get("tgt_ids") or {}) == 1 else None
+    if "target" not in res.answers and only_tgt is not None and P.get("booth"):
+        # one drop target: the `target` question was not asked (build_questions); that target is the drop
+        from types import SimpleNamespace
+        res.answers["target"] = SimpleNamespace(value=only_tgt, probabilities={only_tgt: 1.0}, confidence=None,
+                                                qtype="derived", derived=True)
     note, mismatch, conv = "", None, None
     if cls == "click" and action == "drag":
         # press-only element (stamp, horn, button, page corner, inspect toggle, day tile, NEXT/CONTINUE text):
@@ -2896,6 +3111,7 @@ def offline(args) -> int:
         t1 = time.perf_counter()
         res = tod.ask(P["questions"], text=P["state_text"], image_data_url=P["image_url"])
         t_tod = (time.perf_counter() - t1) * 1e3
+        fill_omitted(res, P)
         D = decide(res, P)
         fill_derived(res, D)
         step = man.situation(state, oday if oday in DAY_RULES else "1", facts)
@@ -3096,10 +3312,14 @@ def run(args) -> int:
     n_resets = 0                                # len(ent.log) last seen -> entrant-scoped counters reset
     unreach_n = 0                               # --unreachable-stop counter (consecutive)
     bad4xx_n = 0                                # consecutive TOD 4xx (bad request) ticks -> stop at 2
+    bad422_n = 0                                # consecutive 422s (skipped, not the 4xx rule); backstop only
 
     def park_cursor():
         if not args.dry_run and is_foreground(hwnd):
-            io_win.move(hwnd, *park)
+            if args.park_screen:   # recording: absolute screen px, e.g. below the video crop (cursor out of frame)
+                io_win._move_abs_screen(*args.park_screen)
+            else:
+                io_win.move(hwnd, *park)
 
     # --pause-think: the game process is held (ThinkSuspend) from the frame grab until just before the input
     think = ThinkSuspend(io_win, hwnd, enabled=bool(args.pause_think) and not args.dry_run)
@@ -3210,7 +3430,19 @@ def run(args) -> int:
                 rec.update(tod_error=f"state: {e}", executed="none (state request error)")
                 row.update(action="none", effect="skipped: state request error")
                 unreach_n = unreach_n + 1 if isinstance(e, TodUnreachable) else 0
-                bad4xx_n = bad4xx_n + 1 if "TOD HTTP 4" in str(e) else 0
+                if isinstance(e, TodBadRequest):   # request-builder bug: skip the tick, never the 4xx stop rule
+                    bad422_n += 1
+                    rec["tod_422"] = True
+                    print(f"[tick {tick:03d}] TOD 422 (request-builder bug): tick skipped, not counted toward the "
+                          f"stop rule ({bad422_n} in a row)")
+                    if bad422_n >= BAD422_BACKSTOP:
+                        stop_reason = f"TOD 422 on {bad422_n} ticks in a row (request-builder bug)"
+                        print(f"[loop] STOP: {stop_reason}")
+                        rec["stop_reason"] = stop_reason
+                        row["effect"] = "stop: " + stop_reason
+                else:
+                    bad422_n = 0
+                bad4xx_n = bad4xx_n + 1 if ("TOD HTTP 4" in str(e) and not isinstance(e, TodBadRequest)) else 0
                 if bad4xx_n >= 2:   # run 015649 t41-58: the same 422 repeated 17 ticks; a bad request will not fix itself
                     stop_reason = f"TOD rejected the request twice in a row ({str(e)[:80]})"
                     print(f"[loop] STOP: {stop_reason}")
@@ -3300,6 +3532,8 @@ def run(args) -> int:
                     menu_bounces += 1
                 screen_seq.append(screen)
             facts["menu_bounces"] = menu_bounces
+            if args.new_story:   # demo goal for the menu screens (manual.build adds it to the non-booth text)
+                facts["story_goal"] = "start a NEW story from Day 1 (do not continue an existing save)"
 
             # ---- REQUEST 2 (action, SoM frame) -------------------------------------
             P = prepare(frame, boxes, state, history, day, args, stuck=stuck, tick=tick, facts=facts)
@@ -3330,7 +3564,19 @@ def run(args) -> int:
                 rec.update(tod_error=str(e), executed="none (TOD error)")
                 row.update(action="none", effect="skipped: TOD error")
                 unreach_n = unreach_n + 1 if isinstance(e, TodUnreachable) else 0
-                bad4xx_n = bad4xx_n + 1 if "TOD HTTP 4" in str(e) else 0
+                if isinstance(e, TodBadRequest):   # request-builder bug: skip the tick, never the 4xx stop rule
+                    bad422_n += 1
+                    rec["tod_422"] = True
+                    print(f"[tick {tick:03d}] TOD 422 (request-builder bug): tick skipped, not counted toward the "
+                          f"stop rule ({bad422_n} in a row)")
+                    if bad422_n >= BAD422_BACKSTOP:
+                        stop_reason = f"TOD 422 on {bad422_n} ticks in a row (request-builder bug)"
+                        print(f"[loop] STOP: {stop_reason}")
+                        rec["stop_reason"] = stop_reason
+                        row["effect"] = "stop: " + stop_reason
+                else:
+                    bad422_n = 0
+                bad4xx_n = bad4xx_n + 1 if ("TOD HTTP 4" in str(e) and not isinstance(e, TodBadRequest)) else 0
                 if bad4xx_n >= 2:   # run 015649 t41-58: the same 422 repeated 17 ticks; a bad request will not fix itself
                     stop_reason = f"TOD rejected the request twice in a row ({str(e)[:80]})"
                     print(f"[loop] STOP: {stop_reason}")
@@ -3348,9 +3594,12 @@ def run(args) -> int:
                 time.sleep(2.0)
                 continue
             rec["tod_ms"] = round((time.perf_counter() - t1) * 1e3, 1)
-            unreach_n = bad4xx_n = 0
+            unreach_n = bad4xx_n = bad422_n = 0
             rec["tod_request_id"] = res.request_id
             res.answers["screen"] = probe["screen"]  # overlay shows it alongside the other answers
+            fill_omitted(res, P)
+            if P.get("q_omitted"):
+                rec["question_omitted"] = dict(P["q_omitted"])
 
             D = decide(res, P)
             fill_derived(res, D)
@@ -3362,6 +3611,7 @@ def run(args) -> int:
                 state_text=P["state_text"],
                 descriptions=desc,
                 excluded={k: v.desc for k, v in banned_ids.items()},
+                excluded_after_refusal=(facts or {}).get("excluded_after_refusal") or [],
                 boxes={str(i): b.to_dict() for i, b in idmap.items()},
                 answers={q: {"choice": a.value, "probabilities": a.probabilities, "confidence": a.confidence}
                          for q, a in res.answers.items()},
@@ -3415,6 +3665,7 @@ def run(args) -> int:
                     rec["grab_at"] = [ax, ay]
                 _sp = strip_plan(sb, tb, facts, frame, state, _stamp_box_native(idmap, tb, frame))
                 _dk = (facts or {}).get("desk_target") or {}
+                _dkplan = False
                 if (_sp is None and tb.caption in (REGION_CAPS["desk"], REGION_CAPS["desk_clear"])
                         and _dk.get("grab_native") and _dk.get("passport_vis")):
                     _sx, _sy = frame.shape[1] / layout.NATIVE_W, frame.shape[0] / layout.NATIVE_H
@@ -3422,6 +3673,7 @@ def run(args) -> int:
                     if layout._iou4([sb.x1 / _sx, sb.y1 / _sy, sb.x2 / _sx, sb.y2 / _sy], _v) >= 0.5:   # TOD's pick IS the passport
                         # the desk drop point keeps the offset to this grab point (on the passport, not the ticket)
                         ax, ay = int(_dk["grab_native"][0] * _sx), int(_dk["grab_native"][1] * _sy)
+                        _dkplan = True
                 _rp = (facts or {}).get("rulebook_plan")
                 if _sp is None and _rp and tb.caption == REGION_CAPS["desk"]:
                     # loop29 N3a: keep the grab point; the rulebook moves by the planned offset (both pages on desk)
@@ -3436,6 +3688,11 @@ def run(args) -> int:
                     rec["strip_drop"] = [bx, by]
                     rec["strip_plan"] = {k_: _sp[k_] for k_ in ("side", "grab", "grab_native", "planned", "visa",
                                                                  "foot", "inside", "trimmed")}
+                _planned = _sp is not None or "rulebook_drop" in rec or _dkplan
+                ax, ay, bx, by, _pd = paper_drag_points(sb, tb, ax, ay, bx, by, _planned, facts, frame, state)
+                for k_, v_ in _pd.items():   # harness geometry only (TOD's element / target ids unchanged)
+                    rec[k_] = v_
+                    print(f"           {k_}: {v_['from']} -> {v_['to']}")
                 check_inside(hwnd, ax, ay)
                 check_inside(hwnd, bx, by)
                 executed = f"drag #{src} ({ax},{ay}) -> #{tgt} ({bx},{by})"
@@ -3539,11 +3796,22 @@ def run(args) -> int:
             pick_key, pick_n = pk, (pick_n + 1 if pk == pick_key and not nonbooth else 1)
             if args.pick_stop and pick_n >= args.pick_stop:
                 stop_reason = f"stalled: manual step {pk[0]} + TOD pick {pk[1]} '{pk[2]}' {pick_n} ticks running"
+            if veto and veto.startswith("refused") and sb is not None:
+                # loop32: remembered so the next ticks' offering excludes this (element, action, target)
+                _tc = tb.caption if (action == "drag" and tb is not None) else ""
+                REFUSALS[:] = [r for r in REFUSALS if not (r["action"] == action and r["tgt_cap"] == _tc
+                                                           and _same_element(r["box"], sb))]
+                REFUSALS.append({"tick": tick, "action": action, "box": sb,
+                                 "tgt_cap": tb.caption if (action == "drag" and tb is not None) else "",
+                                 "reason": veto.split("refused: ", 1)[-1]})
+                del REFUSALS[:-8]
             if veto and veto.startswith("refused") and D["tod_pick"][1] == src:
                 # counted only when TOD itself picked that stamp (run 005956 t4: a convention re-pick landed on it)
                 refused_n += 1
                 if args.refuse_stop and refused_n >= args.refuse_stop:
-                    stop_reason = f"stalled: stamp press refused {refused_n} times"
+                    what = (f"drag of #{src} onto '{short(tb.caption, 30)}'" if action == "drag" and tb is not None
+                            else f"press of #{src}" if action == "click" else f"{action} of #{src}")
+                    stop_reason = f"stalled: {what} refused {refused_n}x ({short(veto, 70)})"
             ent.last_under = facts.get("passport_under") or []
             rec["passport_under"] = ent.last_under
             ent.after_action(tick, state, action, sb, tb, frame, changed,
@@ -3644,6 +3912,12 @@ def main(argv=None, result: dict | None = None) -> int:
     ap.add_argument("--ban-ticks", type=int, default=6, help="ticks an ineffective element stays excluded")
     ap.add_argument("--park", type=float, nargs=2, default=(0.999, 0.003),
                     help="cursor park point as client fractions (default: top-right corner, away from controls)")
+    ap.add_argument("--new-story", action="store_true",
+                    help="demo: on the title / day-select screens TOD's text states the goal 'start a NEW story from "
+                         "Day 1 (do not continue an existing save)'; saves stay on disk")
+    ap.add_argument("--park-screen", type=int, nargs=2, default=None, metavar=("X", "Y"),
+                    help="park the cursor at this absolute physical screen pixel instead of --park (demo recording: "
+                         "below the 16:9 video crop so the idle cursor is out of frame)")
     ap.add_argument("--no-viz", dest="viz", action="store_false")
     ap.add_argument("--save-raw", action="store_true")
     ap.add_argument("--stop-on-screen", default="", help="comma list of request-1 screens; stop (without acting) "

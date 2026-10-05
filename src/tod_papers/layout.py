@@ -837,6 +837,45 @@ def passport_grab_point(vis, others: list | None = None, inset: int = 6) -> tupl
     return best or (cx, cy)
 
 
+def open_tray_footprint() -> list[list[int]]:
+    """Native boxes the OPEN stamp tray draws over papers (run 172409 t63-92, Hampton): the bar + its shadow
+    (TRAY_BAR), the two stamp knob/body columns above it and the open-tray tab."""
+    return ([list(TRAY_BAR)] + [[kx1, DESK[1], kx2, TRAY_BAR[1]] for kx1, kx2 in KNOB_X]
+            + [list(BY_NAME["tray_tab_open"].box)])
+
+
+def in_boxes(pt, boxes) -> bool:
+    return any(b[0] <= pt[0] <= b[2] and b[1] <= pt[1] <= b[3] for b in boxes)
+
+
+def visible_grab_point(vis, covers: list, inset: int = 4):
+    """run 172409 t64-92: the passport lay under the open tray and every drag grabbed its box centre -- on the
+    tray, so the drag pulled the tray shut instead of moving the paper. A grab point (native) on the VISIBLE part
+    of paper box `vis`: outside every box in `covers` (higher-z things: open tray footprint, other papers) and
+    `inset` px inside the paper's edges; the point deepest inside the visible area (ties: nearest the box
+    centre). None when no visible point exists."""
+    x1, y1, x2, y2 = [int(v) for v in vis]
+    x1, y1, x2, y2 = max(0, x1), max(0, y1), min(NATIVE_W, x2), min(NATIVE_H, y2)
+    if x2 - x1 < 2 or y2 - y1 < 2:
+        return None
+    m = np.ones((y2 - y1, x2 - x1), np.uint8)
+    for c in covers or []:
+        cx1, cy1, cx2, cy2 = [int(v) for v in c]
+        m[max(0, cy1 - y1):max(0, cy2 - y1 + 1), max(0, cx1 - x1):max(0, cx2 - x1 + 1)] = 0
+    mp = np.zeros((m.shape[0] + 2, m.shape[1] + 2), np.uint8)   # paper edges count as boundaries
+    mp[1:-1, 1:-1] = m
+    dist = cv2.distanceTransform(mp, cv2.DIST_L2, 3)[1:-1, 1:-1]
+    dmax = float(dist.max())
+    if dmax < 2:
+        return None
+    ys, xs = np.nonzero(dist >= min(dmax, inset) - 1e-3)   # >= inset in (a thin strip: its deepest points)
+    cx, cy = (x2 - x1) / 2, (y2 - y1) / 2
+    # deepest first (capped at 3*inset so a big visible area does not pull the point far off), then nearest centre
+    depth = np.minimum(dist[ys, xs], 3 * inset)
+    k = int(np.lexsort(((xs - cx) ** 2 + (ys - cy) ** 2, -depth))[0])
+    return int(xs[k] + x1), int(ys[k] + y1)
+
+
 def head_footprint(side: str, stamp_box=None) -> list[int]:
     """Where the stamp head inks (native): STRIP_X width centred on the detected stamp box (native, x-centre), the
     strip rows STRIP_Y; the fixture strip when no stamp box was detected."""
@@ -858,11 +897,13 @@ def contains(outer, inner) -> bool:
 
 
 def clear_desk_spot(docs: list[dict], is_tray_open: bool, size=OPEN_PASSPORT, inspect_button: bool = False,
-                    exclude: list | None = None) -> dict:
+                    exclude: list | None = None, near=None) -> dict:
     """Where the open passport (size w x h, native) lies fully on the desk with the least covered: every
     position inside DESK (DESK_MARGIN in) is scored by the obstacle area under it (desk_obstacles weights; the
     data page -- lower half -- counts 3x), ties go to the position whose centre is farthest from any obstacle
-    (the largest clear region). Returns {'box', 'center', 'cost', 'check' (passport_obstruction)}."""
+    (the largest clear region) -- or, with `near` (native point), the one whose centre is nearest it (run 172409:
+    a paper dropped onto the open tray goes to the nearest free desk spot instead).
+    Returns {'box', 'center', 'cost', 'check' (passport_obstruction)}."""
     w, h = int(size[0]), int(size[1])
     obst = desk_obstacles(docs, is_tray_open, inspect_button, exclude)
     cost = np.zeros((NATIVE_H, NATIVE_W), np.float32)
@@ -886,7 +927,10 @@ def clear_desk_spot(docs: list[dict], is_tray_open: bool, size=OPEN_PASSPORT, in
     dist = cv2.distanceTransform(free, cv2.DIST_L2, 3)
     cx, cy = np.minimum(X + w // 2, NATIVE_W - 1), np.minimum(Y + h // 2, NATIVE_H - 1)
     best = total.min()
-    score = np.where(total <= best + 1e-3, dist[cy, cx], -1.0)
+    if near is not None:
+        score = np.where(total <= best + 1e-3, -((cx - near[0]) ** 2 + (cy - near[1]) ** 2).astype(np.float32), -1e12)
+    else:
+        score = np.where(total <= best + 1e-3, dist[cy, cx], -1.0)
     i, j = np.unravel_index(int(np.argmax(score)), score.shape)
     x1, y1 = int(X[i, j]), int(Y[i, j])
     box = [x1, y1, x1 + w, y1 + h]

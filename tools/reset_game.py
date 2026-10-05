@@ -129,14 +129,39 @@ def wait_window(timeout: float) -> int:
     raise TimeoutError(f"no {loop.WINDOW_CLASS} window from {EXE_NAME} within {timeout:.0f}s")
 
 
-def wait_stable(hwnd: int, timeout: float, need: int = 4, thresh: float = 0.004) -> dict:
+TITLE_CAP_S = 10.0   # the title screen animates and never goes still (run 171251 waited 2x90 s): accept it after this
+
+
+def _on_title() -> str | None:
+    """The game's own screen (gt, harness only -- never shown to TOD) when it is the title / a menu, else None."""
+    try:
+        from tod_papers import gt
+        s = gt.snapshot()
+        scr = str(s.get("screen") or "") if s.get("ok") else ""
+        return scr if ("Title" in scr or "Menu" in scr) else None
+    except Exception:
+        return None
+
+
+def wait_stable(hwnd: int, timeout: float, need: int = 4, thresh: float = 0.004,
+                title_cap: float = TITLE_CAP_S) -> dict:
     """Foreground the window and grab every 0.5 s until `need` consecutive frame
-    pairs differ by < `thresh` (fraction of pixels) and the frame is not black."""
+    pairs differ by < `thresh` (fraction of pixels) and the frame is not black.
+    After `title_cap` s a non-black frame on the (animated) title / a menu screen is accepted as stable."""
     t0 = time.time()
     grab = None
     prev, run, size = None, 0, None
+    t_title = 0.0
     try:
         while time.time() - t0 < timeout:
+            if title_cap and time.time() - t0 >= title_cap and prev is not None and float(prev.mean()) >= 4.0 \
+                    and time.time() - t_title >= 1.0:
+                t_title = time.time()
+                scr = _on_title()
+                if scr:
+                    r = io_win.client_rect_physical(hwnd)
+                    return {"stable_after_s": round(time.time() - t0, 1), "frame": prev, "client": r,
+                            "animated_title": scr}
             loop.try_foreground(hwnd)
             r = io_win.client_rect_physical(hwnd)
             if grab is None or r[2:] != size:

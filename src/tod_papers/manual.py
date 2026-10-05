@@ -113,8 +113,9 @@ OTHER_SCREENS = """\
 PAPERS, PLEASE -- SCREENS OUTSIDE THE BOOTH
 Each turn: CLICK one numbered element, or WAIT while a screen fades.
 - Main menu (title screen): click STORY.
-- Day select ("Select day to continue or start a new game"): click the day tile with the HIGHEST day number (a fresh
-  save has only DAY 1 / NEW). Never click BACK, QUIT or the trash icon (BACK undoes progress, trash deletes the
+- Day select ("Select day to continue or start a new game"): if a GOAL line below says which story to play, click
+  the tile it names (DAY 1 / NEW starts a new story). Otherwise click the day tile with the HIGHEST day number (a
+  fresh save has only DAY 1 / NEW). Never click BACK, QUIT or the trash icon (BACK undoes progress, trash deletes the
   save). If no tile is drawn yet, wait. A clicked tile opens a box with CONTINUE and CANCEL: click CONTINUE (the
   upper short line; OCR may misspell it, e.g. 'COHTIHUE').
 - Intro, newspaper and bulletin screens: NEXT; then WALK TO WORK goes to the booth. Text without a button: click it.
@@ -1234,6 +1235,10 @@ def now_block(state: dict, day: str, facts: dict | None = None) -> str:
     if f.get("paper_on_passport") and step not in ("K", "K1"):
         out.append(f"A {f['paper_on_passport']['id'].upper()} lies across the open passport: the 'clear desk space "
                    "off the passport' target takes it off.")
+    for pid in f.get("under_open_tray") or []:   # run 172409 t64-92: state only, no element named
+        nm = {"entry_ticket": "entry ticket", UNREAD: "unread document"}.get(pid, pid.replace("_", " "))
+        out.append(f"The {nm} is partly under the open stamp tray; closing the tray or dragging the visible edge "
+                   "frees it.")
     return "WHAT APPLIES NOW (from your own answers above):\n" + "\n".join(f"- {x}" for x in out)
 
 
@@ -1245,8 +1250,11 @@ def build(state: dict, history, day: str, ban_lines: list[str] | None = None, fa
     full_hist = [hist_line(x) for x in list(history)[-HIST_MAX:]]
     booth = (facts or {}).get("booth", True)
     man_t = manual_text(booth, day)
+    scr = state.get("screen", {}).get("value")
+    goal = (facts or {}).get("story_goal") if scr in ("menu", "day_select", "title") else None
     fixed = [state_block(state, day, facts) + "\n\n" + now_block(state, day, facts) if booth else
-             f"- Screen: {state.get('screen', {}).get('value')} (p={state.get('screen', {}).get('p', 0):.2f})",
+             f"- Screen: {scr} (p={state.get('screen', {}).get('p', 0):.2f})"
+             + (f"\nGOAL: {goal}. On day select, the DAY 1 tile is the one labelled NEW." if goal else ""),
              desk_text_block(facts, cap=True) if booth else ""]
 
     def hist_part(hist: list[str]) -> str:
