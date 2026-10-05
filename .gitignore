@@ -36,3 +36,13 @@ private/
 
 # ground-truth reader: Il2CppDumper binary + dump output (never commit)
 .tools/
+.obs_ws_password
+
+# scratch and recordings (never committed)
+scratchpad/
+*.mp4
+*.mkv
+*.mov
+*.webm
+stage_replay_*/
+stage_rects.json

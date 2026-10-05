@@ -10,6 +10,7 @@ pywin32==312
 dxcam==0.3.0
 mss==10.2.0
 comtypes==1.4.17
+obsws-python==1.8.0   # tools/obs_director.py, tools/obs_setup.py (obs-websocket v5)
 #
 # --- provided by .venv-extract (versions as found there 2026-10-01) ---
 # numpy==2.5.2
